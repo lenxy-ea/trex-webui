@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  captureEvidenceScreenshot,
+  evidenceScreenshotPath,
   isReadOnlyMethod,
   normalizeBaseUrl,
   parseOptions,
@@ -9,6 +11,28 @@ import {
 } from "./production-browser-smoke.mjs";
 
 describe("production browser smoke safeguards", () => {
+  it("derives a stable screenshot path from the JSON evidence path", () => {
+    expect(evidenceScreenshotPath("/tmp/production-smoke.json")).toBe("/tmp/production-smoke.png");
+    expect(evidenceScreenshotPath("/tmp/production-smoke.JSON")).toBe("/tmp/production-smoke.png");
+    expect(evidenceScreenshotPath("/tmp/production-smoke")).toBe("/tmp/production-smoke.png");
+  });
+
+  it("captures full-page browser evidence at the derived path", async () => {
+    const screenshot = vi.fn().mockResolvedValue(undefined);
+
+    await expect(captureEvidenceScreenshot({ screenshot }, "/tmp/production-smoke.json")).resolves.toBe(
+      "/tmp/production-smoke.png"
+    );
+    expect(screenshot).toHaveBeenCalledOnce();
+    expect(screenshot).toHaveBeenCalledWith({ fullPage: true, path: "/tmp/production-smoke.png" });
+  });
+
+  it("propagates screenshot failures so missing evidence cannot pass silently", async () => {
+    const screenshot = vi.fn().mockRejectedValue(new Error("disk full"));
+
+    await expect(captureEvidenceScreenshot({ screenshot }, "/tmp/production-smoke.json")).rejects.toThrow("disk full");
+  });
+
   it("normalizes an API base URL to the production WebUI root", () => {
     expect(normalizeBaseUrl("http://127.0.0.1/api")).toBe("http://127.0.0.1/");
     expect(normalizeBaseUrl("https://trex.example/lab")).toBe("https://trex.example/lab/");

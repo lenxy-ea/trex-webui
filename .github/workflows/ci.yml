@@ -130,6 +130,12 @@ jobs:
           sudo nginx
           npm run smoke:web:production -- --base-url http://127.0.0.1 --gate-id ci-${{ github.sha }} --output .logs/ci-production-browser-smoke.json
 
+      - name: Verify production browser evidence
+        if: always()
+        run: |
+          test -s .logs/ci-production-browser-smoke.json
+          test -s .logs/ci-production-browser-smoke.png
+
       - name: Upload production browser evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

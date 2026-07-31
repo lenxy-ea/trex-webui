@@ -33,6 +33,16 @@ export function normalizeBaseUrl(value) {
   return url.toString();
 }
 
+export function evidenceScreenshotPath(outputPath) {
+  return outputPath.replace(/\.json$/i, "") + ".png";
+}
+
+export async function captureEvidenceScreenshot(page, outputPath) {
+  const screenshotPath = evidenceScreenshotPath(outputPath);
+  await page.screenshot({ fullPage: true, path: screenshotPath });
+  return screenshotPath;
+}
+
 function optionValue(argv, index, name) {
   const value = argv[index + 1];
   if (!value || value.startsWith("--")) {
@@ -134,6 +144,11 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function guardDeferredPageWait(promise) {
+  void promise.catch(() => {});
+  return promise;
+}
+
 async function browserApiContract(page) {
   return page.evaluate(async () => {
     const [healthResponse, environmentResponse] = await Promise.all([
@@ -155,17 +170,19 @@ async function exerciseLazyWorkspace(page, result, check, timeoutMs) {
   const loadedJavascript = new Set(
     result.loaded_assets.filter((asset) => asset.url.endsWith(".js") && asset.status === 200).map((asset) => asset.url)
   );
-  const chunkResponsePromise = page.waitForResponse(
-    (response) => {
-      const url = compactUrl(response.url());
-      return (
-        new URL(response.url()).pathname.startsWith("/assets/") &&
-        new URL(response.url()).pathname.endsWith(".js") &&
-        response.status() === 200 &&
-        !loadedJavascript.has(url)
-      );
-    },
-    { timeout: timeoutMs }
+  const chunkResponsePromise = guardDeferredPageWait(
+    page.waitForResponse(
+      (response) => {
+        const url = compactUrl(response.url());
+        return (
+          new URL(response.url()).pathname.startsWith("/assets/") &&
+          new URL(response.url()).pathname.endsWith(".js") &&
+          response.status() === 200 &&
+          !loadedJavascript.has(url)
+        );
+      },
+      { timeout: timeoutMs }
+    )
   );
 
   await page.getByRole("button", { name: check.button, exact: true }).click();
@@ -203,13 +220,17 @@ function assertApiContract(contract) {
 }
 
 async function exerciseReadOnlyUi(page, result, timeoutMs) {
-  const overviewResponsePromise = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/system/overview" && response.request().method() === "GET",
-    { timeout: timeoutMs }
+  const overviewResponsePromise = guardDeferredPageWait(
+    page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/system/overview" && response.request().method() === "GET",
+      { timeout: timeoutMs }
+    )
   );
-  const profilesResponsePromise = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/trex/profiles" && response.request().method() === "GET",
-    { timeout: timeoutMs }
+  const profilesResponsePromise = guardDeferredPageWait(
+    page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/trex/profiles" && response.request().method() === "GET",
+      { timeout: timeoutMs }
+    )
   );
   const navigationResponse = await page.goto(result.base_url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
   if (!navigationResponse || !navigationResponse.ok()) {
@@ -284,6 +305,7 @@ export async function runProductionBrowserSmoke(options) {
     page_errors: [],
     console_errors: [],
     smoke_errors: [],
+    screenshot: null,
     steps: []
   };
   let browser = null;
@@ -348,6 +370,9 @@ export async function runProductionBrowserSmoke(options) {
     });
 
     await exerciseReadOnlyUi(page, result, options.timeoutMs);
+    const screenshotPath = await captureEvidenceScreenshot(page, options.output);
+    result.screenshot = screenshotPath;
+    result.steps.push("browser evidence screenshot captured");
     const failures = smokeFailureMessages(result);
     if (failures.length > 0) {
       throw new Error(failures.join("\n"));
@@ -358,10 +383,12 @@ export async function runProductionBrowserSmoke(options) {
     result.verdict = "pass";
   } catch (error) {
     result.smoke_errors.push(errorMessage(error));
-    if (page) {
-      const screenshotPath = options.output.replace(/\.json$/i, "") + ".png";
+    if (result.screenshot) {
+      result.failure_screenshot = result.screenshot;
+    } else if (page) {
       try {
-        await page.screenshot({ fullPage: true, path: screenshotPath });
+        const screenshotPath = await captureEvidenceScreenshot(page, options.output);
+        result.screenshot = screenshotPath;
         result.failure_screenshot = screenshotPath;
       } catch (screenshotError) {
         result.smoke_errors.push(`unable to capture failure screenshot: ${errorMessage(screenshotError)}`);
