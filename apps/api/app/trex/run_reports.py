@@ -114,6 +114,11 @@ def run_report_trend_record(target: Path) -> dict[str, Any] | None:
     metrics = _run_report_trend_metrics(payload.get("metrics"))
     if not metrics:
         metrics = _run_report_acceptance_trend_metrics(payload)
+    traffic_run_summary = (
+        payload.get("traffic_run_summary")
+        if isinstance(payload.get("traffic_run_summary"), dict)
+        else {}
+    )
     traffic_session = payload.get("traffic_session") if isinstance(payload.get("traffic_session"), dict) else {}
     return {
         "name": target.name,
@@ -123,7 +128,8 @@ def run_report_trend_record(target: Path) -> dict[str, Any] | None:
         "verdict": verdict,
         "summary": summary,
         "profile": _clean_report_scalar(payload.get("profile")),
-        "run_duration": _clean_report_scalar(traffic_session.get("duration"))
+        "run_duration": _clean_report_scalar(traffic_run_summary.get("duration"))
+        or _clean_report_scalar(traffic_session.get("duration"))
         or _clean_report_scalar(payload.get("duration_seconds")),
         "metrics": metrics,
     }

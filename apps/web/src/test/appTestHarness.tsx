@@ -237,13 +237,23 @@ export const trafficRuntimeResult = {
         tunables: {}
       }
     ],
+    authority: {
+      host: "127.0.0.1",
+      sync_port: 4501,
+      async_port: 4500,
+      scapy_port: 4507,
+      daemon_supervisor: "systemd",
+      generation: "11111111-1111-4111-8111-111111111111"
+    },
     session: null,
+    mutation_intent: null,
     config: {
       path: "/etc/trex_cfg.yaml",
       port_limit: 2,
       interfaces: ["0000:02:00.0", "0000:02:00.1"]
     },
     available_ports: [0, 1],
+    live_state_sampled: true,
     port_states: [
       { port: 0, state: "stopped", ownership: "none" },
       { port: 1, state: "stopped", ownership: "none" }
@@ -254,12 +264,42 @@ export const trafficRuntimeResult = {
   error: null
 };
 
+const activeTrafficStartEvidence = {
+  intent_nonce: "11111111-1111-4111-8111-111111111111",
+  operation: "start" as const,
+  completion_mode: "direct" as const,
+  ports: [0, 1],
+  baseline_port_states: {
+    0: "stopped" as const,
+    1: "stopped" as const
+  },
+  desired_port_states: {
+    0: "running" as const,
+    1: "running" as const
+  },
+  baseline_acquired_ports: [],
+  prepared_at: "2026-07-30T00:00:00Z",
+  completed_at: "2026-07-30T00:00:00Z",
+  acquisition_restored: true as const,
+  wal_cleared: true as const
+};
+
 export const activeTrafficRuntimeResult = {
   ...trafficRuntimeResult,
   data: {
     ...trafficRuntimeResult.data,
+    authority: {
+      host: "10.0.0.10",
+      sync_port: 4501,
+      async_port: 4500,
+      scapy_port: 4507,
+      daemon_supervisor: "external" as const,
+      generation: "external:10.0.0.10:4501:4500:4507"
+    },
     session: {
       id: "session-123",
+      revision: 1,
+      evidence_version: 1,
       authority: {
         host: "10.0.0.10",
         sync_port: 4501,
@@ -275,11 +315,25 @@ export const activeTrafficRuntimeResult = {
       groups: [
         {
           group_id: "pair-0",
+          run_id: activeTrafficStartEvidence.intent_nonce,
+          source: "plan",
+          plan_revision: 1,
           ports: [0, 1],
           profile_path: "/opt/trex-core/scripts/stl/udp_1pkt_simple.py",
+          profile_sha256: "a".repeat(64),
+          start_multiplier: "1",
           multiplier: "1",
           duration: -1,
+          start_force: false,
+          start_total: false,
+          start_synchronized: false,
+          start_clear_existing: true,
+          started_at: "2026-07-30T00:00:00Z",
+          ended_at: null,
+          hard_stop_at: null,
           tunables: {},
+          start_evidence: activeTrafficStartEvidence,
+          cleanup_evidence: null,
           state: "running",
           port_states: {
             0: "running",
@@ -288,6 +342,8 @@ export const activeTrafficRuntimeResult = {
           updated_at: "2026-07-30T00:00:01Z"
         }
       ],
+      completed_groups: [],
+      mutation_evidence: [activeTrafficStartEvidence],
       reconciliation: "live TRex port state reconciled"
     },
     port_states: [

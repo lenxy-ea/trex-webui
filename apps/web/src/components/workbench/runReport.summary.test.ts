@@ -8,6 +8,7 @@ import {
   expect,
   ipv4EnvelopeFields,
   it,
+  runReportTrafficSession,
   type BuildRunReportInput,
   type ProfileWorkbenchStream,
   type RunReportCaptureFile,
@@ -41,7 +42,7 @@ function captureOwnershipInput(
     portRecords: [],
     profilePath: "standard-e2e.py",
     selectedProfile: null,
-    startResult: trafficSession?.startResult ?? null,
+    startResult: null,
     statsHistory: [],
     statsResult: {
       ok: true,
@@ -64,7 +65,7 @@ function captureOwnershipInput(
 }
 
 function completedCaptureSession(): RunReportTrafficSession {
-  return {
+  return runReportTrafficSession({
     startedAt: "2026-07-30T08:00:10.000Z",
     endedAt: "2026-07-30T08:00:20.000Z",
     profilePath: "standard-e2e.py",
@@ -84,7 +85,118 @@ function completedCaptureSession(): RunReportTrafficSession {
       blocker: null,
       error: null
     }
+  });
+}
+
+function runControlInput(trafficSession: RunReportTrafficSession | null): BuildRunReportInput {
+  return {
+    captureFilesResult: {
+      ok: true,
+      data: { root: "/tmp/captures", files: [] },
+      blocker: null,
+      error: null
+    },
+    capturePackets: [
+      {
+        index: 1,
+        time: 1,
+        port: 0,
+        mode: "RX",
+        destination: "48.0.0.1",
+        source: "16.0.0.1",
+        type: "IPv4/UDP",
+        length: 64,
+        wirelen: 64,
+        info: "run-control evidence packet",
+        binary_base64: "",
+        hex_preview: "",
+        decoded_layers: []
+      }
+    ],
+    captureStatusResult: {
+      ok: true,
+      data: { captures: [] },
+      blocker: null,
+      error: null
+    },
+    generatedAt: "2026-07-30T08:00:30.000Z",
+    logRows: [],
+    overview: null,
+    portRecords: [],
+    profilePath: "standard-e2e.py",
+    selectedProfile: null,
+    startResult: null,
+    statsHistory: [],
+    statsResult: {
+      ok: true,
+      data: {
+        global: {
+          rx_bps: 1_000_000,
+          rx_pps: 1000,
+          tx_bps: 1_000_000,
+          tx_pps: 1000
+        },
+        latency: {
+          global: { average: 25 }
+        },
+        total: {
+          ipackets: 1000,
+          opackets: 1000
+        }
+      },
+      blocker: null,
+      error: null
+    },
+    templateId: "standard",
+    trafficSession,
+    trafficMultiplier: "1kpps",
+    workbenchStreams: null
   };
+}
+
+function completedSharedStopSession(secondPorts = [2, 3]): RunReportTrafficSession {
+  const trafficSession = completedCaptureSession();
+  const firstGroup = trafficSession.session.completed_groups[0];
+  const firstStart = trafficSession.session.mutation_evidence.find((entry) =>
+    entry.operation === "start")!;
+  const sharedStop = trafficSession.session.mutation_evidence.find((entry) =>
+    entry.operation === "stop")!;
+  const secondRunningStates = Object.fromEntries(
+    secondPorts.map((port) => [port, "running" as const])
+  );
+  const secondStoppedStates = Object.fromEntries(
+    secondPorts.map((port) => [port, "stopped" as const])
+  );
+  const secondStart: typeof firstStart = {
+    ...firstStart,
+    intent_nonce: "33333333-3333-4333-8333-333333333333",
+    ports: secondPorts,
+    baseline_port_states: secondStoppedStates,
+    desired_port_states: secondRunningStates
+  };
+  const secondGroup: typeof firstGroup = {
+    ...firstGroup,
+    group_id: "pair-1",
+    run_id: secondStart.intent_nonce,
+    ports: secondPorts,
+    start_evidence: secondStart,
+    cleanup_evidence: {
+      ...firstGroup.cleanup_evidence!,
+      final_port_states: secondStoppedStates
+    },
+    port_states: secondStoppedStates
+  };
+  const stopPorts = [...new Set([...firstGroup.ports, ...secondPorts])];
+  sharedStop.ports = stopPorts;
+  sharedStop.baseline_port_states = Object.fromEntries(
+    stopPorts.map((port) => [port, "running" as const])
+  );
+  sharedStop.desired_port_states = Object.fromEntries(
+    stopPorts.map((port) => [port, "stopped" as const])
+  );
+  trafficSession.session.completed_groups = [firstGroup, secondGroup];
+  trafficSession.session.mutation_evidence = [firstStart, secondStart, sharedStop];
+  return trafficSession;
 }
 
 describe("run report builder / summary", () => {
@@ -248,7 +360,7 @@ describe("run report builder / summary", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-05T00:00:00.000Z",
         endedAt: "2026-06-05T00:00:02.500Z",
         profilePath: "bench.py",
@@ -268,7 +380,7 @@ describe("run report builder / summary", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "100%",
       workbenchStreams: [gtpuStream]
     });
@@ -316,7 +428,7 @@ describe("run report builder / summary", () => {
     expect(snapshot.markdown).toContain("| Profile/capture fields | pass | Capture decode matched 37 expected profile field(s) |");
     expect(snapshot.markdown).toContain("### Profile/Capture Field Match");
     expect(snapshot.markdown).toContain("| gtpu-inner-ipv6-fe | IPv4.Source | pass | 16.0.0.1 | 16.0.0.1 | - |");
-    expect(snapshot.payload.traffic_session).toEqual(
+    expect(snapshot.payload.traffic_run_summary).toEqual(
       expect.objectContaining({
         duration: "2.5 s",
         profile: "bench.py",
@@ -712,7 +824,7 @@ describe("run report builder / summary", () => {
       window_start: "2026-07-30T08:00:10.000Z",
       window_end: "2026-07-30T08:00:25.000Z"
     });
-    expect(snapshot.payload.traffic_session).toEqual(
+    expect(snapshot.payload.traffic_run_summary).toEqual(
       expect.objectContaining({
         capture_completed_at: "2026-07-30T08:00:25.000Z"
       })
@@ -757,6 +869,267 @@ describe("run report builder / summary", () => {
       expect.objectContaining({
         status: "unknown",
         detail: expect.stringContaining("inventory context only")
+      })
+    );
+  });
+
+  it("warns instead of passing while the canonical traffic session is still running", () => {
+    const trafficSession = runReportTrafficSession({
+      startedAt: "2026-07-30T08:00:10.000Z",
+      endedAt: null,
+      profilePath: "standard-e2e.py",
+      ports: [0, 1],
+      multiplier: "1kpps",
+      duration: 10,
+      tunables: {},
+      startResult: {
+        ok: true,
+        data: { accepted: true },
+        blocker: null,
+        error: null
+      },
+      stopResult: null
+    });
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("warn");
+    expect(snapshot.diagnostics.find((item) => item.label === "Run control")).toEqual(
+      expect.objectContaining({
+        status: "warn",
+        summary: expect.stringContaining("session is running")
+      })
+    );
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic stop")).toEqual(
+      expect.objectContaining({
+        status: "warn",
+        detail: expect.stringContaining("session is running")
+      })
+    );
+    expect(snapshot.markdown).toContain("| Stop result | Canonical traffic session is running;");
+  });
+
+  it("labels a successful non-canonical fallback start as accepted rather than persisted", () => {
+    const input = runControlInput(null);
+    input.startResult = {
+      ok: true,
+      data: { accepted: true },
+      blocker: null,
+      error: null
+    };
+
+    const snapshot = buildRunReportSnapshot(input);
+
+    expect(snapshot.markdown).toContain("| Start result | accepted (non-canonical) |");
+    expect(snapshot.markdown).not.toContain("| Start result | persisted |");
+  });
+
+  it("warns when a canonical session has no versioned stop evidence", () => {
+    const trafficSession = completedCaptureSession();
+    trafficSession.session.evidence_version = null;
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("warn");
+    expect(snapshot.diagnostics.find((item) => item.label === "Run control")).toEqual(
+      expect.objectContaining({ status: "warn", summary: expect.stringContaining("no versioned stop evidence") })
+    );
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic stop")).toEqual(
+      expect.objectContaining({ status: "warn", detail: expect.stringContaining("no versioned stop evidence") })
+    );
+  });
+
+  it("fails hard-stop cleanup even when the stopped session has clean counters", () => {
+    const trafficSession = completedCaptureSession();
+    const group = trafficSession.session.completed_groups[0];
+    const stopMutation = trafficSession.session.mutation_evidence.find((entry) =>
+      entry.operation === "stop");
+    group.cleanup_evidence = {
+      ...group.cleanup_evidence!,
+      completion: "hard_stop",
+      wal_cleared: false
+    };
+    stopMutation!.completion_mode = "hard_stop";
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.diagnostics.find((item) => item.label === "Run control")).toEqual(
+      expect.objectContaining({ status: "fail", summary: expect.stringContaining("hard_stop") })
+    );
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic stop")).toEqual(
+      expect.objectContaining({ status: "fail", detail: expect.stringContaining("hard_stop") })
+    );
+    expect(snapshot.markdown).not.toContain("| Stop result | persisted |");
+  });
+
+  it("fails when an unreferenced stop mutation remains in the canonical ledger", () => {
+    const trafficSession = completedCaptureSession();
+    const stopMutation = trafficSession.session.mutation_evidence.find((entry) =>
+      entry.operation === "stop")!;
+    trafficSession.session.mutation_evidence.push({
+      ...stopMutation,
+      intent_nonce: "33333333-3333-4333-8333-333333333333"
+    });
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic stop")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("stop mutation nonce set does not exactly match")
+      })
+    );
+  });
+
+  it("fails when an unreferenced start mutation remains in the canonical ledger", () => {
+    const trafficSession = completedCaptureSession();
+    const startMutation = trafficSession.session.mutation_evidence.find((entry) =>
+      entry.operation === "start")!;
+    trafficSession.session.mutation_evidence.push({
+      ...startMutation,
+      intent_nonce: "33333333-3333-4333-8333-333333333333"
+    });
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic start")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("start mutation nonce set does not exactly match")
+      })
+    );
+  });
+
+  it("fails when mutation intent nonces are not globally unique", () => {
+    const trafficSession = completedCaptureSession();
+    const startMutation = trafficSession.session.mutation_evidence.find((entry) =>
+      entry.operation === "start")!;
+    trafficSession.session.mutation_evidence.push({ ...startMutation });
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic start")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("globally unique")
+      })
+    );
+  });
+
+  it("fails when an exact start mutation does not target running port states", () => {
+    const trafficSession = completedCaptureSession();
+    const group = trafficSession.session.completed_groups[0];
+    const startMutation = trafficSession.session.mutation_evidence.find((entry) =>
+      entry.operation === "start")!;
+    startMutation.desired_port_states = { 0: "stopped", 1: "stopped" };
+    group.start_evidence = { ...startMutation };
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic start")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("not an exact completed start mutation")
+      })
+    );
+  });
+
+  it("fails when a mutation completion precedes its prepared timestamp", () => {
+    const trafficSession = completedCaptureSession();
+    const startMutation = trafficSession.session.mutation_evidence.find((entry) =>
+      entry.operation === "start")!;
+    startMutation.prepared_at = "2026-07-30T08:00:11.000Z";
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic start")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("completes before it is prepared")
+      })
+    );
+  });
+
+  it("fails when a stopped group update precedes its cleanup completion", () => {
+    const trafficSession = completedCaptureSession();
+    trafficSession.session.completed_groups[0].updated_at = "2026-07-30T08:00:15.000Z";
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic start")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("updated_at precedes ended_at")
+      })
+    );
+  });
+
+  it("fails when the session end timestamp does not match the final operator stop", () => {
+    const trafficSession = completedCaptureSession();
+    const group = trafficSession.session.completed_groups[0];
+    const stopMutation = trafficSession.session.mutation_evidence.find((entry) =>
+      entry.operation === "stop");
+    const mismatchedCompletion = "2026-07-30T08:00:19.000Z";
+    group.ended_at = mismatchedCompletion;
+    group.cleanup_evidence = {
+      ...group.cleanup_evidence!,
+      completed_at: mismatchedCompletion
+    };
+    stopMutation!.prepared_at = mismatchedCompletion;
+    stopMutation!.completed_at = mismatchedCompletion;
+
+    const snapshot = buildRunReportSnapshot(runControlInput(trafficSession));
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic stop")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("session ended_at does not match")
+      })
+    );
+  });
+
+  it("passes a complete exact operator-stop evidence chain", () => {
+    const snapshot = buildRunReportSnapshot(runControlInput(completedCaptureSession()));
+
+    expect(snapshot.conclusion.verdict).toBe("pass");
+    expect(snapshot.template.verdict).toBe("pass");
+    expect(snapshot.diagnostics.find((item) => item.label === "Run control")).toEqual(
+      expect.objectContaining({ status: "pass" })
+    );
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic stop")).toEqual(
+      expect.objectContaining({ status: "pass", detail: "Stop command accepted" })
+    );
+    expect(snapshot.markdown).toContain("| Stop result | persisted |");
+  });
+
+  it("passes multiple groups closed by one exact shared stop mutation", () => {
+    const snapshot = buildRunReportSnapshot(runControlInput(completedSharedStopSession()));
+
+    expect(snapshot.conclusion.verdict).toBe("pass");
+    expect(snapshot.diagnostics.find((item) => item.label === "Run control")).toEqual(
+      expect.objectContaining({ status: "pass" })
+    );
+    expect(snapshot.markdown).toContain("| Stop result | persisted |");
+  });
+
+  it("fails shared-stop evidence when its run groups overlap ports", () => {
+    const snapshot = buildRunReportSnapshot(
+      runControlInput(completedSharedStopSession([1, 2]))
+    );
+
+    expect(snapshot.conclusion.verdict).toBe("fail");
+    expect(snapshot.conclusion.checks.find((item) => item.label === "Traffic stop")).toEqual(
+      expect.objectContaining({
+        status: "fail",
+        detail: expect.stringContaining("not an exact completed stop mutation")
       })
     );
   });

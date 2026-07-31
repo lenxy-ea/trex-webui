@@ -34,18 +34,34 @@ FORBIDDEN_SUFFIXES = {
     ".pcapng",
 }
 
+FORBIDDEN_BASENAMES = {
+    "runtime-state.json",
+    "runtime-state-quick-validation.json",
+}
+
 IPV4_PATTERN = re.compile(rb"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b")
 MAC_PATTERN = re.compile(rb"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b")
 PCI_BDF_PATTERN = re.compile(
     rb"\b(?:[0-9a-fA-F]{4}:)?[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]\b"
+)
+IPV6_PATTERN = re.compile(
+    rb"(?i)(?<![0-9a-f:.])"
+    rb"(?:f[cd][0-9a-f]{0,2}|fe[89ab][0-9a-f]?|[23][0-9a-f]{0,3})"
+    rb"(?::[0-9a-f]{0,4}){1,7}(?![0-9a-f:.])"
+)
+IPV4_MAPPED_IPV6_PATTERN = re.compile(
+    rb"(?i)(?<![0-9a-f:.])(?:[0-9a-f]{0,4}:){1,6}ffff:"
+    rb"(?:[0-9a-f]{1,4}:[0-9a-f]{1,4}|(?:[0-9]{1,3}\.){3}[0-9]{1,3})"
+    rb"(?![0-9a-f:.])"
 )
 DOCUMENTATION_NETWORKS = (
     ipaddress.ip_network("192.0.2.0/24"),
     ipaddress.ip_network("198.51.100.0/24"),
     ipaddress.ip_network("203.0.113.0/24"),
 )
+DOCUMENTATION_IPV6_NETWORK = ipaddress.ip_network("2001:db8::/32")
 POLICY_FILENAME = "public-source-policy.json"
-NETWORK_KINDS = frozenset({"ipv4", "mac", "pci_bdf"})
+NETWORK_KINDS = frozenset({"ipv4", "ipv6", "mac", "pci_bdf"})
 SAFE_MAC_ADDRESSES = frozenset({"00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"})
 
 SECRET_PATTERNS = {
@@ -148,6 +164,22 @@ def is_safe_ipv4(value: str) -> bool:
     )
 
 
+def is_safe_ipv6(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return True
+    if address.version == 6 and address.ipv4_mapped is not None:
+        return is_safe_ipv4(str(address.ipv4_mapped))
+    return bool(
+        address.version != 6
+        or address.is_loopback
+        or address.is_unspecified
+        or address.is_multicast
+        or address in DOCUMENTATION_IPV6_NETWORK
+    )
+
+
 def _validate_exact_value(kind: str, raw_value: Any) -> tuple[str | None, str | None]:
     if not isinstance(raw_value, str) or not raw_value:
         return None, f"{kind} exact values must be non-empty strings"
@@ -164,6 +196,19 @@ def _validate_exact_value(kind: str, raw_value: Any) -> tuple[str | None, str | 
         if is_safe_ipv4(value):
             return None, (
                 f"intrinsically safe IPv4 value must not be authorized: {value!r}"
+            )
+    elif kind == "ipv6":
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return None, f"invalid exact IPv6 value: {value!r}"
+        if address.version != 6:
+            return None, f"exact IPv6 value is not IPv6: {value!r}"
+        if str(address) != value:
+            return None, f"exact IPv6 value must use canonical compressed form: {value!r}"
+        if is_safe_ipv6(value):
+            return None, (
+                f"intrinsically safe IPv6 value must not be authorized: {value!r}"
             )
     elif kind == "mac":
         if MAC_PATTERN.fullmatch(value.encode("ascii", errors="ignore")) is None:
@@ -282,6 +327,7 @@ def _contains_network_identifier(value: str) -> bool:
     payload = value.encode("utf-8")
     return bool(
         IPV4_PATTERN.search(payload)
+        or IPV6_PATTERN.search(payload)
         or MAC_PATTERN.search(payload)
         or PCI_BDF_PATTERN.search(payload)
     )
@@ -421,9 +467,14 @@ def validate_path(root: Path, path: Path) -> list[str]:
     findings: list[str] = []
     if path.is_symlink():
         findings.append(f"{relative}: symbolic links are not allowed")
-    if relative.parts and relative.parts[0] in FORBIDDEN_TOP_LEVEL:
+    if any(component in FORBIDDEN_TOP_LEVEL for component in relative.parts):
         findings.append(f"{relative}: internal-only path")
-    if path.suffix.casefold() in FORBIDDEN_SUFFIXES:
+    casefolded_name = path.name.casefold()
+    runtime_state_artifact = casefolded_name in FORBIDDEN_BASENAMES or any(
+        casefolded_name.startswith(f".{basename}.")
+        for basename in FORBIDDEN_BASENAMES
+    )
+    if path.suffix.casefold() in FORBIDDEN_SUFFIXES or runtime_state_artifact:
         findings.append(f"{relative}: runtime or credential artifact")
     name = path.name
     if (name == ".env" or name.startswith(".env.")) and name != ".env.example":
@@ -458,6 +509,26 @@ def validate_content(
             if not policy.authorize(relative, "ipv4", value):
                 findings.append(
                     f"{relative}: IPv4 address {value!r} is outside the exact "
+                    "source-scope values"
+                )
+        ipv6_matches = {
+            match.group(0).decode("ascii").casefold()
+            for pattern in (IPV6_PATTERN, IPV4_MAPPED_IPV6_PATTERN)
+            for match in pattern.finditer(payload)
+        }
+        for raw_value in sorted(ipv6_matches):
+            try:
+                address = ipaddress.ip_address(raw_value)
+            except ValueError:
+                continue
+            if address.version != 6:
+                continue
+            value = str(address)
+            if is_safe_ipv6(value):
+                continue
+            if not policy.authorize(relative, "ipv6", value):
+                findings.append(
+                    f"{relative}: IPv6 address {value!r} is outside the exact "
                     "source-scope values"
                 )
         for value in sorted(

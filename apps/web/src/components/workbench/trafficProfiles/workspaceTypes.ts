@@ -10,6 +10,8 @@ import type {
   ProfileWorkbenchSaveResult,
   ProfileWorkbenchStream,
   ProfileWorkbenchYamlExportResult,
+  TrafficRuntimeSnapshot,
+  TrafficStartResult,
   TrexPortRecord,
   TrexResult
 } from "../../../api";
@@ -59,7 +61,8 @@ export type TrafficProfilesWorkspaceProps = {
   onTrafficDurationEnabledChange: (enabled: boolean) => void;
   onTrafficDurationValueChange: (value: string) => void;
   onTrafficPlanDirtyChange?: (dirty: boolean) => void;
-  onTrafficSessionAuthorityChange?: (sessionId: string) => void;
+  onTrafficRuntimeChange?: (snapshot: TrafficRuntimeSnapshot) => void;
+  onTrafficStartResult?: (result: TrexResult<TrafficStartResult>) => void;
   onStartTraffic: () => void;
   onStartAllTraffic: () => void;
   onUpdateTraffic: () => void;

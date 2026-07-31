@@ -6,6 +6,7 @@ import {
   expect,
   ipv4EnvelopeFields,
   it,
+  runReportTrafficSession,
   type ProfileWorkbenchStream
 } from "./runReportTestHarness";
 
@@ -96,7 +97,7 @@ describe("run report builder / failures", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-05T00:00:20.000Z",
         endedAt: "2026-06-05T00:00:23.000Z",
         profilePath: "profile.yaml",
@@ -116,7 +117,7 @@ describe("run report builder / failures", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [stream]
     });
@@ -249,7 +250,7 @@ describe("run report builder / failures", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-05T00:00:40.000Z",
         endedAt: "2026-06-05T00:00:43.000Z",
         profilePath: "profile.yaml",
@@ -269,7 +270,7 @@ describe("run report builder / failures", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [stream]
     });
@@ -419,7 +420,7 @@ describe("run report builder / failures", () => {
         error: null
       },
       templateId: "latency",
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-05T00:01:10.000Z",
         endedAt: "2026-06-05T00:01:12.000Z",
         profilePath: "latency.py",
@@ -439,7 +440,7 @@ describe("run report builder / failures", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "100pps"
     });
 
@@ -528,7 +529,7 @@ describe("run report builder / failures", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-05T00:01:40.000Z",
         endedAt: "2026-06-05T00:01:42.000Z",
         profilePath: "udp_1pkt_simple.py",
@@ -543,7 +544,7 @@ describe("run report builder / failures", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1"
     });
 

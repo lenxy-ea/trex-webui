@@ -85,7 +85,7 @@ def save_run_report(
         return TrexCallResult(False, blocker="run_report_file_name_invalid", error=RUN_REPORT_FILE_NAME_ERROR)
 
     archive = {
-        "version": 1,
+        "version": 2,
         "title": normalized_title,
         "generated_at": generated_at,
         "markdown": normalized_markdown,

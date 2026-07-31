@@ -2,6 +2,9 @@ import type {
   ProfileRecord,
   ProfileWorkbenchStream,
   SystemOverview,
+  TrafficMutationEvidence,
+  TrafficSession,
+  TrafficSessionGroup,
   TrexCaptureFiles,
   TrexCapturePacket,
   TrexCaptureStatus,
@@ -10,8 +13,18 @@ import type {
   TrexStatsSnapshot
 } from "../../api";
 import { displayBitRate, displayBytes, displayCount, displayLatencyUs, displayPacketRate, displayValue } from "./format";
+import {
+  trafficSessionDurationLabel,
+  trafficSessionPorts,
+  trafficSessionProfiles,
+  trafficSessionRateLabel,
+  trafficSessionRunGroups,
+  type RunReportTrafficSession
+} from "./trafficRunAuthority";
 import { trexResultDiagnostic } from "./trexDiagnostics";
 import type { LogRow, StatsHistorySample } from "./types";
+
+export type { RunReportTrafficSession } from "./trafficRunAuthority";
 
 const DHCP_MIN_PAYLOAD_BYTES = 300;
 const DNS_DEFAULT_QUERY_NAME = "example.com";
@@ -112,19 +125,6 @@ export type RunReportSnapshot = {
   recentLogs: LogRow[];
 };
 
-export type RunReportTrafficSession = {
-  startedAt: string;
-  endedAt: string | null;
-  captureCompletedAt?: string | null;
-  profilePath: string;
-  ports: number[] | null;
-  multiplier: string;
-  duration: number;
-  tunables: Record<string, string | number | boolean>;
-  startResult: TrexResult<Record<string, unknown>> | null;
-  stopResult: TrexResult<Record<string, unknown>> | null;
-};
-
 export type RunReportCaptureFile = TrexCaptureFiles["files"][number] & {
   generated_at?: string | null;
 };
@@ -143,7 +143,7 @@ export type BuildRunReportInput = {
   portRecords: TrexPortRecord[];
   profilePath: string;
   selectedProfile: ProfileRecord | null;
-  startResult: TrexResult<Record<string, unknown>> | null;
+  startResult: TrexResult<unknown> | null;
   statsHistory: StatsHistorySample[];
   statsResult: TrexResult<TrexStatsSnapshot> | null;
   templateId?: RunReportTemplateId;
@@ -289,8 +289,8 @@ function runCaptureFileEvidence(
     };
   }
 
-  const windowStart = trafficSession.startedAt;
-  const primaryWindowEnd = trafficSession.endedAt ?? generatedAt;
+  const windowStart = trafficSession.session.started_at;
+  const primaryWindowEnd = trafficSession.session.ended_at ?? generatedAt;
   const primaryEndTimestamp = timestampMilliseconds(primaryWindowEnd);
   const captureCompletedTimestamp = timestampMilliseconds(trafficSession.captureCompletedAt);
   const windowEnd = primaryEndTimestamp !== null
@@ -316,7 +316,7 @@ function runCaptureFileEvidence(
       return fileTimestamp !== null && fileTimestamp >= startTimestamp && fileTimestamp <= endTimestamp;
     }),
     inventoryCount: files.length,
-    scope: trafficSession.endedAt ? "closed_run_window" : "active_run_window",
+    scope: trafficSession.session.ended_at ? "closed_run_window" : "active_run_window",
     windowEnd,
     windowStart
   };
@@ -330,6 +330,474 @@ function runPortsText(ports: number[] | null | undefined) {
     return "-";
   }
   return ports.join(", ");
+}
+
+function profilePathLabel(path: string) {
+  const segments = path.split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? path;
+}
+
+type RunReportStopEvidence = {
+  result: TrexResult<unknown> | null;
+  verdict: RunReportVerdict;
+  detail: string;
+};
+
+type RunReportTrafficEvidence = {
+  startResult: TrexResult<unknown> | null;
+  stopEvidence: RunReportStopEvidence;
+};
+
+type ValidatedStartEvidence = {
+  completionByGroup: Map<TrafficSessionGroup, number>;
+  result: TrexResult<unknown>;
+};
+
+function failedStartEvidence(detail: string): TrexResult<unknown> {
+  return {
+    ok: false,
+    data: null,
+    blocker: `Persisted start evidence failed verification: ${detail}`,
+    error: null
+  };
+}
+
+function failedStopEvidence(detail: string): RunReportStopEvidence {
+  const message = `Persisted stop evidence failed verification: ${detail}`;
+  return {
+    result: {
+      ok: false,
+      data: null,
+      blocker: message,
+      error: null
+    },
+    verdict: "fail",
+    detail: message
+  };
+}
+
+function incompleteStopEvidence(detail: string): RunReportStopEvidence {
+  return {
+    result: null,
+    verdict: "warn",
+    detail
+  };
+}
+
+function exactNumberSequence(left: number[], right: number[]) {
+  return left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function exactTextSet(left: string[], right: string[]) {
+  const normalizedLeft = [...new Set(left)].sort();
+  const normalizedRight = [...new Set(right)].sort();
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index]);
+}
+
+function hasUniquePorts(ports: number[]) {
+  return new Set(ports).size === ports.length;
+}
+
+function exactPortSet(left: number[], right: number[]) {
+  const normalizedLeft = [...new Set(left)].sort((a, b) => a - b);
+  const normalizedRight = [...new Set(right)].sort((a, b) => a - b);
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((port, index) => port === normalizedRight[index]);
+}
+
+function exactStoppedPortStates(
+  portStates: Record<number, string>,
+  ports: number[]
+) {
+  const statePorts = Object.keys(portStates).map(Number);
+  return statePorts.every(Number.isFinite)
+    && exactPortSet(statePorts, ports)
+    && ports.every((port) => portStates[port] === "stopped");
+}
+
+function exactRunningPortStates(
+  portStates: Record<number, string>,
+  ports: number[]
+) {
+  const statePorts = Object.keys(portStates).map(Number);
+  return statePorts.every(Number.isFinite)
+    && exactPortSet(statePorts, ports)
+    && ports.every((port) => portStates[port] === "running");
+}
+
+function exactPortStateRecord(
+  left: Record<number, string>,
+  right: Record<number, string>
+) {
+  const leftPorts = Object.keys(left).map(Number);
+  const rightPorts = Object.keys(right).map(Number);
+  return leftPorts.every(Number.isFinite)
+    && rightPorts.every(Number.isFinite)
+    && exactPortSet(leftPorts, rightPorts)
+    && leftPorts.every((port) => left[port] === right[port]);
+}
+
+function exactMutationEvidence(
+  left: TrafficMutationEvidence,
+  right: TrafficMutationEvidence
+) {
+  return left.intent_nonce === right.intent_nonce
+    && left.operation === right.operation
+    && left.completion_mode === right.completion_mode
+    && exactNumberSequence(left.ports, right.ports)
+    && exactPortStateRecord(left.baseline_port_states, right.baseline_port_states)
+    && exactPortStateRecord(left.desired_port_states, right.desired_port_states)
+    && exactNumberSequence(left.baseline_acquired_ports, right.baseline_acquired_ports)
+    && left.prepared_at === right.prepared_at
+    && left.completed_at === right.completed_at
+    && left.acquisition_restored === right.acquisition_restored
+    && left.wal_cleared === right.wal_cleared;
+}
+
+function mutationLedgerError(session: TrafficSession) {
+  const nonces = session.mutation_evidence.map((mutation) => mutation.intent_nonce);
+  if (nonces.some((nonce) => nonce.trim() === "")) {
+    return "mutation intent nonces must be non-empty";
+  }
+  if (new Set(nonces).size !== nonces.length) {
+    return "mutation intent nonces must be globally unique";
+  }
+  for (const mutation of session.mutation_evidence) {
+    const preparedAt = timestampMilliseconds(mutation.prepared_at);
+    const completedAt = timestampMilliseconds(mutation.completed_at);
+    if (preparedAt === null || completedAt === null) {
+      return `intent ${mutation.intent_nonce} has an invalid timestamp`;
+    }
+    if (preparedAt > completedAt) {
+      return `intent ${mutation.intent_nonce} completes before it is prepared`;
+    }
+  }
+  return null;
+}
+
+function exactStopMutation(
+  mutation: TrafficMutationEvidence,
+  groups: TrafficSessionGroup[]
+) {
+  const targetPorts = groups.flatMap((group) => group.ports);
+  return mutation.operation === "stop"
+    && mutation.completion_mode !== "hard_stop"
+    && hasUniquePorts(mutation.ports)
+    && hasUniquePorts(targetPorts)
+    && exactPortSet(mutation.ports, targetPorts)
+    && exactStoppedPortStates(mutation.desired_port_states, mutation.ports)
+    && mutation.acquisition_restored === true
+    && mutation.wal_cleared === true;
+}
+
+function validateStartEvidence(
+  session: TrafficSession,
+  groups: TrafficSessionGroup[],
+  mutationByNonce: Map<string, TrafficMutationEvidence>
+): ValidatedStartEvidence | string {
+  if (groups.length === 0) {
+    return "canonical traffic session has no run groups";
+  }
+  const sessionStartedAt = timestampMilliseconds(session.started_at);
+  const sessionUpdatedAt = timestampMilliseconds(session.updated_at);
+  if (sessionStartedAt === null || sessionUpdatedAt === null) {
+    return "session start/update timestamps must be valid";
+  }
+  if (sessionUpdatedAt < sessionStartedAt) {
+    return "session updated_at precedes session started_at";
+  }
+  if (session.ended_at !== null) {
+    const sessionEndedAt = timestampMilliseconds(session.ended_at);
+    if (sessionEndedAt === null) {
+      return "session ended_at must be a valid timestamp";
+    }
+    if (sessionEndedAt < sessionStartedAt || sessionUpdatedAt < sessionEndedAt) {
+      return "session end/update timestamps are not monotonic";
+    }
+  }
+
+  const completionByGroup = new Map<TrafficSessionGroup, number>();
+  const groupStartNonces: string[] = [];
+  const completedStarts: Array<{ at: string; timestamp: number }> = [];
+  for (const group of groups) {
+    const startEvidence = group.start_evidence;
+    if (
+      startEvidence === null
+      || group.run_id === null
+      || group.run_id.trim() === ""
+      || startEvidence.intent_nonce !== group.run_id
+    ) {
+      return `group ${group.group_id ?? "-"} has no exact start nonce`;
+    }
+    const mutation = mutationByNonce.get(group.run_id);
+    if (!mutation || !exactMutationEvidence(startEvidence, mutation)) {
+      return `group ${group.group_id ?? "-"} start evidence does not match one exact mutation`;
+    }
+    if (
+      mutation.operation !== "start"
+      || mutation.completion_mode === "hard_stop"
+      || !hasUniquePorts(group.ports)
+      || !hasUniquePorts(mutation.ports)
+      || !exactPortSet(mutation.ports, group.ports)
+      || !exactRunningPortStates(mutation.desired_port_states, mutation.ports)
+      || mutation.acquisition_restored !== true
+      || mutation.wal_cleared !== true
+    ) {
+      return `intent ${mutation.intent_nonce} is not an exact completed start mutation`;
+    }
+    const completedAt = timestampMilliseconds(mutation.completed_at);
+    const groupStartedAt = timestampMilliseconds(group.started_at);
+    const groupUpdatedAt = timestampMilliseconds(group.updated_at);
+    if (
+      completedAt === null
+      || groupStartedAt === null
+      || groupUpdatedAt === null
+      || group.started_at !== mutation.completed_at
+    ) {
+      return `group ${group.group_id ?? "-"} has inconsistent start timestamps`;
+    }
+    if (groupUpdatedAt < groupStartedAt) {
+      return `group ${group.group_id ?? "-"} updated_at precedes started_at`;
+    }
+    if (group.ended_at !== null) {
+      const groupEndedAt = timestampMilliseconds(group.ended_at);
+      if (groupEndedAt === null || groupEndedAt < groupStartedAt) {
+        return `group ${group.group_id ?? "-"} has an invalid ended_at timestamp`;
+      }
+      if (groupUpdatedAt < groupEndedAt) {
+        return `group ${group.group_id ?? "-"} updated_at precedes ended_at`;
+      }
+    }
+    if (group.hard_stop_at !== null) {
+      const hardStopAt = timestampMilliseconds(group.hard_stop_at);
+      if (hardStopAt === null || hardStopAt < groupStartedAt) {
+        return `group ${group.group_id ?? "-"} has an invalid hard_stop_at timestamp`;
+      }
+    }
+    groupStartNonces.push(group.run_id);
+    completedStarts.push({ at: mutation.completed_at, timestamp: completedAt });
+    completionByGroup.set(group, completedAt);
+  }
+
+  const startMutationNonces = session.mutation_evidence
+    .filter((mutation) => mutation.operation === "start")
+    .map((mutation) => mutation.intent_nonce);
+  if (new Set(groupStartNonces).size !== groupStartNonces.length) {
+    return "run-group start intent nonces must be unique";
+  }
+  if (!exactTextSet(groupStartNonces, startMutationNonces)) {
+    return "start mutation nonce set does not exactly match the run-group start nonce set";
+  }
+  const firstCompletion = completedStarts.reduce((earliest, candidate) =>
+    candidate.timestamp < earliest.timestamp ? candidate : earliest);
+  if (session.started_at !== firstCompletion.at) {
+    return "session started_at does not match the earliest start completion";
+  }
+
+  return {
+    completionByGroup,
+    result: {
+      ok: true,
+      data: groups.map((group) => group.start_evidence)
+    }
+  };
+}
+
+function validateStopEvidence(
+  session: TrafficSession,
+  groups: TrafficSessionGroup[],
+  mutationByNonce: Map<string, TrafficMutationEvidence>,
+  startCompletionByGroup: Map<TrafficSessionGroup, number>
+): RunReportStopEvidence {
+  if (
+    groups.some((group) => group.cleanup_evidence?.completion === "hard_stop")
+    || session.mutation_evidence.some((mutation) =>
+      mutation.operation === "stop" && mutation.completion_mode === "hard_stop")
+  ) {
+    return failedStopEvidence("hard_stop cleanup is not an operator stop");
+  }
+  for (const group of groups) {
+    const cleanup = group.cleanup_evidence;
+    if (cleanup === null) {
+      continue;
+    }
+    const cleanupCompletedAt = timestampMilliseconds(cleanup.completed_at);
+    const startCompletedAt = startCompletionByGroup.get(group);
+    if (
+      cleanupCompletedAt === null
+      || startCompletedAt === undefined
+      || cleanupCompletedAt < startCompletedAt
+      || group.ended_at !== cleanup.completed_at
+    ) {
+      return failedStopEvidence(`group ${group.group_id ?? "-"} has a non-monotonic cleanup timeline`);
+    }
+  }
+  const operatorStopNonces: string[] = [];
+  for (const group of groups) {
+    const cleanup = group.cleanup_evidence;
+    if (cleanup?.completion !== "operator_stop") {
+      continue;
+    }
+    if (cleanup.intent_nonce === null || cleanup.intent_nonce.trim() === "") {
+      return failedStopEvidence(`group ${group.group_id ?? "-"} has no operator-stop intent nonce`);
+    }
+    operatorStopNonces.push(cleanup.intent_nonce);
+  }
+  const stopMutationNonces = session.mutation_evidence
+    .filter((mutation) => mutation.operation === "stop")
+    .map((mutation) => mutation.intent_nonce);
+  if (!exactTextSet(operatorStopNonces, stopMutationNonces)) {
+    return failedStopEvidence(
+      "stop mutation nonce set does not exactly match the operator-stop cleanup nonce set"
+    );
+  }
+  if (session.state !== "stopped") {
+    return incompleteStopEvidence(
+      `Canonical traffic session is ${session.state}; exact operator-stop evidence is not available`
+    );
+  }
+  if (session.ended_at === null || timestampMilliseconds(session.ended_at) === null) {
+    return failedStopEvidence("the stopped session has no valid ended_at timestamp");
+  }
+  const inconsistentGroup = groups.find((group) =>
+    group.ports.length === 0
+    || group.state !== "stopped"
+    || group.hard_stop_at !== null
+    || !exactStoppedPortStates(group.port_states, group.ports));
+  if (inconsistentGroup) {
+    return failedStopEvidence(`group ${inconsistentGroup.group_id ?? "-"} is not fully stopped`);
+  }
+  const incompleteGroup = groups.find((group) =>
+    group.cleanup_evidence?.completion !== "operator_stop");
+  if (incompleteGroup) {
+    const completion = incompleteGroup.cleanup_evidence?.completion ?? "missing";
+    return incompleteStopEvidence(
+      `Group ${incompleteGroup.group_id ?? "-"} cleanup evidence is ${completion}, not operator_stop`
+    );
+  }
+
+  const groupsByIntent = new Map<string, TrafficSessionGroup[]>();
+  const completionTimes: Array<{ at: string; timestamp: number }> = [];
+  for (const group of groups) {
+    const cleanup = group.cleanup_evidence;
+    if (cleanup === null || cleanup.intent_nonce === null || cleanup.intent_nonce.trim() === "") {
+      return failedStopEvidence(`group ${group.group_id ?? "-"} has no operator-stop intent nonce`);
+    }
+    if (
+      cleanup.acquisition_restored !== true
+      || cleanup.wal_cleared !== true
+      || !exactStoppedPortStates(cleanup.final_port_states, group.ports)
+    ) {
+      return failedStopEvidence(`group ${group.group_id ?? "-"} has incomplete cleanup evidence`);
+    }
+    const completionTimestamp = timestampMilliseconds(cleanup.completed_at);
+    if (
+      completionTimestamp === null
+      || group.ended_at === null
+      || group.ended_at !== cleanup.completed_at
+    ) {
+      return failedStopEvidence(`group ${group.group_id ?? "-"} has inconsistent cleanup timestamps`);
+    }
+    completionTimes.push({ at: cleanup.completed_at, timestamp: completionTimestamp });
+    const mutation = mutationByNonce.get(cleanup.intent_nonce);
+    if (!mutation || mutation.operation !== "stop") {
+      return failedStopEvidence(`intent ${cleanup.intent_nonce} does not reference one stop mutation`);
+    }
+    if (cleanup.completed_at !== mutation.completed_at) {
+      return failedStopEvidence(`intent ${cleanup.intent_nonce} has mismatched completion timestamps`);
+    }
+    const preparedAt = timestampMilliseconds(mutation.prepared_at);
+    const startCompletedAt = startCompletionByGroup.get(group);
+    if (
+      preparedAt === null
+      || startCompletedAt === undefined
+      || preparedAt < startCompletedAt
+    ) {
+      return failedStopEvidence(
+        `intent ${cleanup.intent_nonce} is prepared before its corresponding start completes`
+      );
+    }
+    groupsByIntent.set(
+      cleanup.intent_nonce,
+      [...(groupsByIntent.get(cleanup.intent_nonce) ?? []), group]
+    );
+  }
+
+  for (const [intentNonce, intentGroups] of groupsByIntent) {
+    const mutation = mutationByNonce.get(intentNonce);
+    if (!mutation || !exactStopMutation(mutation, intentGroups)) {
+      return failedStopEvidence(`intent ${intentNonce} is not an exact completed stop mutation`);
+    }
+  }
+
+  const finalCompletion = completionTimes.reduce((latest, candidate) =>
+    candidate.timestamp > latest.timestamp ? candidate : latest);
+  if (session.ended_at !== finalCompletion.at) {
+    return failedStopEvidence("session ended_at does not match the final operator-stop completion");
+  }
+
+  return {
+    result: {
+      ok: true,
+      data: groups.map((group) => group.cleanup_evidence)
+    },
+    verdict: "pass",
+    detail: "Exact operator-stop evidence verified"
+  };
+}
+
+function persistedTrafficEvidence(
+  trafficSession: RunReportTrafficSession | null,
+  fallbackStartResult: TrexResult<unknown> | null
+): RunReportTrafficEvidence {
+  if (trafficSession === null) {
+    return {
+      startResult: fallbackStartResult,
+      stopEvidence: {
+        result: null,
+        verdict: "unknown",
+        detail: "No canonical traffic session is attached"
+      }
+    };
+  }
+  const session = trafficSession.session;
+  if (session.evidence_version !== 1) {
+    return {
+      startResult: null,
+      stopEvidence: incompleteStopEvidence(
+        "Canonical traffic session has no versioned stop evidence or authenticated start chain"
+      )
+    };
+  }
+  const groups = trafficSessionRunGroups(session);
+  const ledgerError = mutationLedgerError(session);
+  if (ledgerError) {
+    return {
+      startResult: failedStartEvidence(ledgerError),
+      stopEvidence: failedStopEvidence(ledgerError)
+    };
+  }
+  const mutationByNonce = new Map(
+    session.mutation_evidence.map((mutation) => [mutation.intent_nonce, mutation])
+  );
+  const startEvidence = validateStartEvidence(session, groups, mutationByNonce);
+  if (typeof startEvidence === "string") {
+    return {
+      startResult: failedStartEvidence(startEvidence),
+      stopEvidence: failedStopEvidence(`start evidence chain is invalid: ${startEvidence}`)
+    };
+  }
+  return {
+    startResult: startEvidence.result,
+    stopEvidence: validateStopEvidence(
+      session,
+      groups,
+      mutationByNonce,
+      startEvidence.completionByGroup
+    )
+  };
 }
 
 function portStatus(port: TrexPortRecord) {
@@ -3731,10 +4199,10 @@ function buildDiagnostics(input: {
   portErrors: number;
   queueFull: number;
   savedCaptures: number;
-  startResult: TrexResult<Record<string, unknown>> | null;
+  startResult: TrexResult<unknown> | null;
   stats: TrexStatsSnapshot | null;
   statsResult: TrexResult<TrexStatsSnapshot> | null;
-  stopResult: TrexResult<Record<string, unknown>> | null;
+  stopEvidence: RunReportStopEvidence;
   txBps: number | null;
   rxBps: number | null;
   txPps: number | null;
@@ -3759,32 +4227,34 @@ function buildDiagnostics(input: {
 
   diagnostics.push({
     label: "Run control",
-    status: input.startResult && !input.startResult.ok || input.stopResult && !input.stopResult.ok
+    status: input.startResult && !input.startResult.ok || input.stopEvidence.verdict === "fail"
       ? "fail"
-      : input.startResult?.ok && input.stopResult?.ok
+      : input.startResult?.ok && input.stopEvidence.verdict === "pass"
         ? "pass"
-        : input.startResult?.ok
+        : input.stopEvidence.verdict === "warn" || input.startResult?.ok
           ? "warn"
           : "unknown",
     summary: input.startResult && !input.startResult.ok
       ? `Start blocked: ${startDiagnostic?.summary ?? input.startResult.error ?? input.startResult.blocker ?? "traffic start failed"}`
-      : input.stopResult && !input.stopResult.ok
-        ? `Stop blocked: ${input.stopResult.error ?? input.stopResult.blocker ?? "traffic stop failed"}`
-        : input.startResult?.ok && input.stopResult?.ok
+      : input.stopEvidence.verdict === "fail"
+        ? `Stop blocked: ${input.stopEvidence.detail}`
+        : input.startResult?.ok && input.stopEvidence.verdict === "pass"
           ? "Start and stop commands were both accepted"
-          : input.startResult?.ok
+          : input.stopEvidence.verdict === "warn"
+            ? input.stopEvidence.detail
+            : input.startResult?.ok
             ? "Traffic start was accepted; stop result is not in this report"
             : "No start command result was captured",
     action: input.startResult && !input.startResult.ok
       ? startDiagnostic?.action ?? "Resolve the TRex start blocker and rerun the profile"
-      : input.stopResult && !input.stopResult.ok
+      : input.stopEvidence.verdict === "fail"
         ? "Confirm the selected ports are reachable, then stop traffic again before archiving"
-        : input.startResult?.ok && !input.stopResult
+        : input.stopEvidence.verdict === "warn" || input.startResult?.ok && !input.stopEvidence.result
           ? "Stop traffic and refresh the report snapshot for a closed run window"
           : "No operator action required",
     evidence: runReportEvidence([
       ["Start", input.startResult ? input.startResult.ok ? "accepted" : "blocked" : "-"],
-      ["Stop", input.stopResult ? input.stopResult.ok ? "accepted" : "blocked" : "-"]
+      ["Stop", input.stopEvidence.verdict]
     ])
   });
 
@@ -3945,10 +4415,10 @@ function buildTemplateAssessment(input: {
   portErrors: number;
   queueFull: number;
   savedCaptures: number;
-  startResult: TrexResult<Record<string, unknown>> | null;
+  startResult: TrexResult<unknown> | null;
   stats: TrexStatsSnapshot | null;
   statsResult: TrexResult<TrexStatsSnapshot> | null;
-  stopResult: TrexResult<Record<string, unknown>> | null;
+  stopEvidence: RunReportStopEvidence;
   template: RunReportTemplate;
   txBps: number | null;
   rxBps: number | null;
@@ -3983,23 +4453,25 @@ function buildTemplateAssessment(input: {
         status: "fail",
         detail: input.startResult.error ?? input.startResult.blocker ?? "Start command failed"
       }
-    : input.stopResult && !input.stopResult.ok
+    : input.stopEvidence.verdict === "fail"
       ? {
           label: "Closed run window",
           status: "fail",
-          detail: input.stopResult.error ?? input.stopResult.blocker ?? "Stop command failed"
+          detail: input.stopEvidence.detail
         }
-      : input.startResult?.ok && input.stopResult?.ok
+      : input.startResult?.ok && input.stopEvidence.verdict === "pass"
         ? {
             label: "Closed run window",
             status: "pass",
             detail: "Start and stop commands were both accepted"
           }
-        : input.startResult?.ok
+        : input.stopEvidence.verdict === "warn" || input.startResult?.ok
           ? {
               label: "Closed run window",
               status: "warn",
-              detail: "Start was accepted, but no stop result is attached"
+              detail: input.stopEvidence.verdict === "warn"
+                ? input.stopEvidence.detail
+                : "Start was accepted, but no stop result is attached"
             }
           : {
               label: "Closed run window",
@@ -4190,7 +4662,8 @@ function buildTemplateAssessment(input: {
       : null;
     criteria = [captureEvidenceCheck, recorderClosureCheck, decodeCheck, matchCheck, fieldMatchCheck, lossCheck].filter((criterion): criterion is RunReportCheck => Boolean(criterion));
   } else {
-    const diagnosticVerdict = highestVerdict(input.diagnostics.map((diagnostic) => diagnostic.status));
+    const diagnosticVerdict = highestVerdict(input.diagnostics.map((diagnostic) =>
+      diagnostic.status === "unknown" ? "pass" : diagnostic.status));
     criteria = [
       {
         label: "Operational evidence",
@@ -4226,12 +4699,6 @@ function conclusionWithTemplate(
     status: assessment.verdict,
     detail: `${assessment.label}: ${assessment.summary}`
   };
-  if (template.id === "standard") {
-    return {
-      ...conclusion,
-      checks: [...conclusion.checks, templateCheck]
-    };
-  }
   const verdict = highestVerdict([conclusion.verdict, assessment.verdict]);
   const title = verdictWeight(assessment.verdict) > verdictWeight(conclusion.verdict)
     ? templateVerdictTitle(template, assessment.verdict)
@@ -4239,10 +4706,12 @@ function conclusionWithTemplate(
   const summary = verdictWeight(assessment.verdict) > verdictWeight(conclusion.verdict)
     ? assessment.summary
     : conclusion.summary;
-  const reasons = [
-    ...assessment.reasons,
-    ...conclusion.reasons
-  ].filter((reason, index, all) => all.indexOf(reason) === index).slice(0, 10);
+  const assessmentRaisesVerdict = verdictWeight(assessment.verdict) > verdictWeight(conclusion.verdict);
+  const reasons = (template.id === "standard" && !assessmentRaisesVerdict
+    ? [...conclusion.reasons, ...assessment.reasons]
+    : [...assessment.reasons, ...conclusion.reasons])
+    .filter((reason, index, all) => all.indexOf(reason) === index)
+    .slice(0, 10);
   return {
     ...conclusion,
     verdict,
@@ -4265,10 +4734,10 @@ function buildConclusion(input: {
   portErrors: number;
   queueFull: number;
   savedCaptures: number;
-  startResult: TrexResult<Record<string, unknown>> | null;
+  startResult: TrexResult<unknown> | null;
   stats: TrexStatsSnapshot | null;
   statsResult: TrexResult<TrexStatsSnapshot> | null;
-  stopResult: TrexResult<Record<string, unknown>> | null;
+  stopEvidence: RunReportStopEvidence;
   txBps: number | null;
   rxBps: number | null;
   txPps: number | null;
@@ -4279,6 +4748,9 @@ function buildConclusion(input: {
   const startDiagnostic = trexResultDiagnostic(input.startResult);
   const startFailure = input.startResult && !input.startResult.ok
     ? `Start blocked: ${startDiagnostic?.summary ?? input.startResult.error ?? input.startResult.blocker ?? "traffic start failed"}`
+    : "";
+  const stopFailure = input.stopEvidence.verdict === "fail"
+    ? `Stop blocked: ${input.stopEvidence.detail}`
     : "";
   const trafficEvidence = [
     input.txBps,
@@ -4292,6 +4764,7 @@ function buildConclusion(input: {
   ].some((value) => (value ?? 0) > 0);
   const failures = [
     startFailure,
+    stopFailure,
     input.statsResult && !input.statsResult.ok
       ? `Stats blocked: ${input.statsResult.error ?? input.statsResult.blocker ?? "stats unavailable"}`
       : "",
@@ -4310,6 +4783,11 @@ function buildConclusion(input: {
   const flowIssues = flowStatsIssues(input.stats);
   const warnings = [
     startDiagnostic?.action ?? "",
+    input.stopEvidence.verdict === "warn"
+      ? input.stopEvidence.detail
+      : input.startResult?.ok && input.stopEvidence.verdict === "unknown"
+        ? "Traffic start is persisted, but exact operator-stop evidence is missing"
+      : "",
     input.captureLayerMatch.applicable && input.captureLayerMatch.status === "warn"
       ? input.captureLayerMatch.summary
       : "",
@@ -4354,17 +4832,13 @@ function buildConclusion(input: {
           status: "unknown",
           detail: "No start command result captured"
         },
-    input.stopResult
-      ? {
-          label: "Traffic stop",
-          status: input.stopResult.ok ? "pass" : "fail",
-          detail: input.stopResult.ok ? "Stop command accepted" : input.stopResult.error ?? input.stopResult.blocker ?? "Stop command failed"
-        }
-      : {
-          label: "Traffic stop",
-          status: "unknown",
-          detail: "No stop command result captured"
-        },
+    {
+      label: "Traffic stop",
+      status: input.stopEvidence.verdict,
+      detail: input.stopEvidence.verdict === "pass"
+        ? "Stop command accepted"
+        : input.stopEvidence.detail
+    },
     input.statsResult
       ? {
           label: "Stats snapshot",
@@ -4482,15 +4956,25 @@ export function buildRunReportSnapshot(input: BuildRunReportInput): RunReportSna
     "latency.global.latency.average",
     "latency.global.average"
   ]) ?? latest?.latencyAvg ?? null;
-  const profileLabel = input.selectedProfile?.relative_path ?? input.profilePath;
+  const sessionProfiles = trafficSession
+    ? trafficSessionProfiles(trafficSession.session)
+    : [];
+  const profileLabel = sessionProfiles.length > 0
+    ? sessionProfiles.map(profilePathLabel).join(", ")
+    : input.selectedProfile?.relative_path ?? input.profilePath;
   const activeRecorders = input.captureStatusResult?.ok ? input.captureStatusResult.data?.captures.length ?? 0 : 0;
   const availableCaptureFiles = input.captureFilesResult?.ok ? input.captureFilesResult.data?.files ?? [] : [];
   const captureFileEvidence = runCaptureFileEvidence(availableCaptureFiles, trafficSession, input.generatedAt);
   const savedCaptures = captureFileEvidence.files.length;
-  const activePorts = trafficSession?.endedAt && trafficSession.stopResult?.ok
+  const activePorts = trafficSession?.session.state === "stopped"
     ? 0
     : activePortCount(input.portRecords, stats);
-  const sessionStartResult = trafficSession?.startResult ?? input.startResult;
+  const trafficEvidence = persistedTrafficEvidence(
+    trafficSession,
+    input.startResult
+  );
+  const sessionStartResult = trafficEvidence.startResult;
+  const sessionStopEvidence = trafficEvidence.stopEvidence;
   const portErrors = portErrorTotal(stats, input.portRecords);
   const latencyErrors = latencyErrorTotalAll(stats?.latency);
   const txPackets = totalPacketCount(stats, "tx");
@@ -4526,7 +5010,7 @@ export function buildRunReportSnapshot(input: BuildRunReportInput): RunReportSna
     startResult: sessionStartResult,
     stats,
     statsResult: input.statsResult,
-    stopResult: trafficSession?.stopResult ?? null,
+    stopEvidence: sessionStopEvidence,
     txBps,
     rxBps,
     txPps,
@@ -4549,7 +5033,7 @@ export function buildRunReportSnapshot(input: BuildRunReportInput): RunReportSna
     startResult: sessionStartResult,
     stats,
     statsResult: input.statsResult,
-    stopResult: trafficSession?.stopResult ?? null,
+    stopEvidence: sessionStopEvidence,
     txBps,
     rxBps,
     txPps,
@@ -4571,7 +5055,7 @@ export function buildRunReportSnapshot(input: BuildRunReportInput): RunReportSna
     startResult: sessionStartResult,
     stats,
     statsResult: input.statsResult,
-    stopResult: trafficSession?.stopResult ?? null,
+    stopEvidence: sessionStopEvidence,
     template: selectedTemplate,
     txBps,
     rxBps,
@@ -4588,17 +5072,20 @@ export function buildRunReportSnapshot(input: BuildRunReportInput): RunReportSna
   }));
   const profileFieldEngineCount = profileStreams.reduce((total, stream) => total + stream.field_engine_count, 0);
   const generatedLabel = formatDateTime(input.generatedAt);
-  const runStartedLabel = trafficSession ? formatDateTime(trafficSession.startedAt) : "-";
-  const runEndedLabel = trafficSession?.endedAt ? formatDateTime(trafficSession.endedAt) : "-";
-  const runDurationLabel = runDurationText(trafficSession?.startedAt, trafficSession?.endedAt);
+  const runStartedLabel = trafficSession ? formatDateTime(trafficSession.session.started_at) : "-";
+  const runEndedLabel = trafficSession?.session.ended_at ? formatDateTime(trafficSession.session.ended_at) : "-";
+  const runDurationLabel = runDurationText(
+    trafficSession?.session.started_at,
+    trafficSession?.session.ended_at
+  );
   const title = `TRex Run Report ${generatedLabel}`;
   const fileName = `trex-run-report-${cleanFileTimestamp(input.generatedAt)}.json`;
   const metrics: RunReportMetric[] = [
     { label: "TRex host", value: input.overview ? `${input.overview.environment?.host ?? "unconfigured"}:${input.overview.environment?.sync_port ?? 4501}` : "-" },
     { label: "Profile", value: profileLabel },
-    { label: "Run ports", value: runPortsText(trafficSession?.ports) },
+    { label: "Run ports", value: runPortsText(trafficSession ? trafficSessionPorts(trafficSession.session) : null) },
     { label: "Run duration", value: runDurationLabel },
-    { label: "Runtime rate", value: input.trafficMultiplier ?? "-" },
+    { label: "Runtime rate", value: trafficSession ? trafficSessionRateLabel(trafficSession.session) : input.trafficMultiplier ?? "-" },
     { label: "Streams", value: profileStreams.length ? displayCount(profileStreams.length) : "-" },
     { label: "Field engines", value: profileStreams.length ? displayCount(profileFieldEngineCount) : "-" },
     { label: "Layer matches", value: captureLayerMatch.applicable ? `${displayCount(captureLayerMatch.matched.length)}/${displayCount(captureLayerMatch.expected.length)}` : "-" },
@@ -4670,11 +5157,17 @@ export function buildRunReportSnapshot(input: BuildRunReportInput): RunReportSna
       ["Started", runStartedLabel],
       ["Ended", runEndedLabel],
       ["Duration", runDurationLabel],
-      ["Ports", runPortsText(trafficSession?.ports)],
-      ["Requested rate", trafficSession?.multiplier ?? input.trafficMultiplier ?? "-"],
-      ["Requested duration", trafficSession ? (trafficSession.duration > 0 ? `${trafficSession.duration} s` : "continuous") : "-"],
-      ["Start result", trafficSession?.startResult ? (trafficSession.startResult.ok ? "accepted" : trafficSession.startResult.error ?? trafficSession.startResult.blocker ?? "blocked") : "-"],
-      ["Stop result", trafficSession?.stopResult ? (trafficSession.stopResult.ok ? "accepted" : trafficSession.stopResult.error ?? trafficSession.stopResult.blocker ?? "blocked") : "-"]
+      ["Ports", runPortsText(trafficSession ? trafficSessionPorts(trafficSession.session) : null)],
+      ["Requested rate", trafficSession ? trafficSessionRateLabel(trafficSession.session) : input.trafficMultiplier ?? "-"],
+      ["Requested duration", trafficSession ? trafficSessionDurationLabel(trafficSession.session) : "-"],
+      ["Start result", sessionStartResult
+        ? sessionStartResult.ok
+          ? trafficSession ? "persisted" : "accepted (non-canonical)"
+          : sessionStartResult.error ?? sessionStartResult.blocker ?? "blocked"
+        : "-"],
+      ["Stop result", sessionStopEvidence.verdict === "pass"
+        ? "persisted"
+        : sessionStopEvidence.detail]
     ]),
     "",
     "## Profile Streams",
@@ -4776,27 +5269,25 @@ export function buildRunReportSnapshot(input: BuildRunReportInput): RunReportSna
         window_end: captureFileEvidence.windowEnd
       },
       capture_packets: packetSummaries,
-      traffic_session: trafficSession
+      ...(trafficSession
         ? {
-            started_at: trafficSession.startedAt,
-            ended_at: trafficSession.endedAt,
-            ...(trafficSession.captureCompletedAt
-              ? { capture_completed_at: trafficSession.captureCompletedAt }
-              : {}),
-            duration: runDurationLabel,
-            profile: trafficSession.profilePath,
-            ports: trafficSession.ports,
-            multiplier: trafficSession.multiplier,
-            requested_duration: trafficSession.duration,
-            tunables: trafficSession.tunables,
-            start_result: trafficSession.startResult,
-            stop_result: trafficSession.stopResult
+            traffic_session: trafficSession.session,
+            traffic_run_summary: {
+              ...(trafficSession.captureCompletedAt
+                ? { capture_completed_at: trafficSession.captureCompletedAt }
+                : {}),
+              duration: runDurationLabel,
+              profile: profileLabel,
+              profiles: sessionProfiles,
+              ports: trafficSessionPorts(trafficSession.session),
+              multiplier: trafficSessionRateLabel(trafficSession.session),
+              requested_duration: trafficSessionDurationLabel(trafficSession.session)
+            }
           }
-        : null,
+        : {}),
       stats_ok: input.statsResult?.ok ?? false,
       stats_blocker: input.statsResult?.blocker ?? null,
       stats_error: input.statsResult?.error ?? null,
-      start_result: input.startResult,
       recent_logs: recentLogs
     }
   };
@@ -4857,6 +5348,9 @@ function buildRunReportCsvFromArchive(archive: RunReportArchive) {
   const trafficSession = payload.traffic_session && typeof payload.traffic_session === "object" && !Array.isArray(payload.traffic_session)
     ? payload.traffic_session as Record<string, unknown>
     : {};
+  const trafficRunSummary = payload.traffic_run_summary && typeof payload.traffic_run_summary === "object" && !Array.isArray(payload.traffic_run_summary)
+    ? payload.traffic_run_summary as Record<string, unknown>
+    : {};
   const conclusion = payload.conclusion && typeof payload.conclusion === "object" && !Array.isArray(payload.conclusion)
     ? payload.conclusion as Record<string, unknown>
     : {};
@@ -4880,9 +5374,9 @@ function buildRunReportCsvFromArchive(archive: RunReportArchive) {
     ["metadata", "traffic", "multiplier", textValue(payload.traffic_multiplier)],
     ["metadata", "run", "started_at", textValue(trafficSession.started_at)],
     ["metadata", "run", "ended_at", textValue(trafficSession.ended_at)],
-    ["metadata", "run", "duration", textValue(trafficSession.duration)],
-    ["metadata", "run", "ports", Array.isArray(trafficSession.ports) ? trafficSession.ports.join(" ") : textValue(trafficSession.ports)],
-    ["metadata", "run", "requested_duration", textValue(trafficSession.requested_duration)]
+    ["metadata", "run", "duration", textValue(trafficRunSummary.duration)],
+    ["metadata", "run", "ports", Array.isArray(trafficRunSummary.ports) ? trafficRunSummary.ports.join(" ") : textValue(trafficRunSummary.ports)],
+    ["metadata", "run", "requested_duration", textValue(trafficRunSummary.requested_duration)]
   ];
 
   if (Object.keys(conclusion).length > 0) {
@@ -5060,6 +5554,9 @@ function buildRunReportPdfFromArchive(archive: RunReportArchive) {
   const trafficSession = payload.traffic_session && typeof payload.traffic_session === "object" && !Array.isArray(payload.traffic_session)
     ? payload.traffic_session as Record<string, unknown>
     : {};
+  const trafficRunSummary = payload.traffic_run_summary && typeof payload.traffic_run_summary === "object" && !Array.isArray(payload.traffic_run_summary)
+    ? payload.traffic_run_summary as Record<string, unknown>
+    : {};
   const markdown = typeof archive.markdown === "string" ? archive.markdown : "";
   const title = textValue(archive.title) || "TRex Run Report";
   const lines = [
@@ -5116,8 +5613,8 @@ function buildRunReportPdfFromArchive(archive: RunReportArchive) {
     "Run Window",
     `Started: ${textValue(trafficSession.started_at) || "-"}`,
     `Ended: ${textValue(trafficSession.ended_at) || "-"}`,
-    `Duration: ${textValue(trafficSession.duration) || "-"}`,
-    `Ports: ${Array.isArray(trafficSession.ports) ? trafficSession.ports.join(", ") : textValue(trafficSession.ports) || "-"}`,
+    `Duration: ${textValue(trafficRunSummary.duration) || "-"}`,
+    `Ports: ${Array.isArray(trafficRunSummary.ports) ? trafficRunSummary.ports.join(", ") : textValue(trafficRunSummary.ports) || "-"}`,
     "",
     "Profile Streams",
     ...(

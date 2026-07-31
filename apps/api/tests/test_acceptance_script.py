@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -39,20 +40,158 @@ def test_parse_tunables_requires_key_value_pairs() -> None:
 def test_required_traffic_session_id_requires_exact_persisted_identity() -> None:
     assert (
         acceptance.required_traffic_session_id(
-            {"data": {"session": {"id": "session-123"}}},
+            {"data": {"session": {"id": "session-123", "revision": 3}}},
             "traffic start",
         )
         == "session-123"
     )
+    assert acceptance.required_traffic_session(
+        {"data": {"session": {"id": "session-123", "revision": 3}}},
+        "traffic start",
+    ) == {"id": "session-123", "revision": 3}
 
     for payload in (
         {},
         {"data": {}},
         {"data": {"session": {}}},
-        {"data": {"session": {"id": ""}}},
+        {"data": {"session": {"id": "", "revision": 1}}},
+        {"data": {"session": {"id": "session-123"}}},
+        {"data": {"session": {"id": "session-123", "revision": 0}}},
+        {"data": {"session": {"id": "session-123", "revision": True}}},
     ):
         with pytest.raises(acceptance.AcceptanceError):
             acceptance.required_traffic_session_id(payload, "traffic start")
+
+
+def test_report_save_payload_pairs_session_cas_or_stays_unbound() -> None:
+    run = {
+        "run_id": "20260605T000000Z",
+        "traffic_run_summary": {"run_id": "run-123"},
+        "traffic_session": {"id": "client-forged"},
+        "traffic_session_binding": {"id": "client-forged", "revision": 99},
+    }
+
+    unbound = acceptance.report_save_payload(
+        run,
+        report_name="acceptance.json",
+        markdown="# failure",
+        traffic_session=None,
+    )
+    assert "traffic_session_id" not in unbound
+    assert "traffic_session_revision" not in unbound
+    assert "traffic_session" not in unbound["payload"]
+    assert "traffic_session_binding" not in unbound["payload"]
+    assert unbound["payload"]["traffic_run_summary"] == {"run_id": "run-123"}
+
+    run["verdict"] = "pass"
+    bound = acceptance.report_save_payload(
+        run,
+        report_name="acceptance.json",
+        markdown="# pass",
+        traffic_session={"id": "session-123", "revision": 4},
+    )
+    assert bound["traffic_session_id"] == "session-123"
+    assert bound["traffic_session_revision"] == 4
+    assert "traffic_session" not in bound["payload"]
+    assert "traffic_session_binding" not in bound["payload"]
+
+
+def test_report_session_refresh_advances_stop_revision_before_save() -> None:
+    run_id = "12345678-1234-4234-8234-123456789abc"
+    stopped_session = acceptance.required_traffic_session(
+        {
+            "data": {
+                "session": {
+                    "id": "session-123",
+                    "revision": 2,
+                    "evidence_version": 1,
+                    "state": "stopped",
+                    "groups": [],
+                }
+            }
+        },
+        "traffic stop",
+    )
+    assert stopped_session["revision"] == 2
+
+    refreshed_session = acceptance.required_report_traffic_session(
+        {
+            "ok": True,
+            "data": {
+                "mutation_intent": None,
+                "session": {
+                    "id": "session-123",
+                    "revision": 3,
+                    "evidence_version": 1,
+                    "state": "stopped",
+                    "groups": [
+                        {
+                            "run_id": run_id,
+                            "ports": [0],
+                            "profile_path": "udp_1pkt_simple.py",
+                            "start_multiplier": "5kpps",
+                            "state": "stopped",
+                            "started_at": "2026-06-05T00:00:00Z",
+                            "ended_at": "2026-06-05T00:00:02Z",
+                            "cleanup_evidence": {"completion": "operator_stop"},
+                        }
+                    ],
+                    "completed_groups": [],
+                },
+            },
+        },
+        expected_session_id="session-123",
+    )
+    run = {
+        "run_id": "20260605T000000Z",
+        "verdict": "pass",
+        "traffic_run_summary": acceptance.traffic_run_summary(
+            refreshed_session,
+            tx_port=0,
+            fallback_profile="udp_1pkt_simple.py",
+            fallback_multiplier="5kpps",
+            requested_duration=2,
+            observe_seconds=1,
+            tunables={},
+        ),
+    }
+    payload = acceptance.report_save_payload(
+        run,
+        report_name="acceptance.json",
+        markdown="# pass",
+        traffic_session=refreshed_session,
+    )
+
+    assert run["traffic_run_summary"]["session_revision"] == 3
+    assert payload["traffic_session_id"] == "session-123"
+    assert payload["traffic_session_revision"] == 3
+
+
+def test_failed_report_with_observed_session_stays_unbound() -> None:
+    failed_run = {
+        "run_id": "20260605T000000Z",
+        "verdict": "fail",
+        "traffic_run_summary": {
+            "session_id": "session-123",
+            "session_revision": 7,
+            "run_id": "12345678-1234-4234-8234-123456789abc",
+        },
+        "traffic_session": {"id": "client-forged"},
+        "traffic_session_binding": {"id": "client-forged", "revision": 99},
+    }
+
+    payload = acceptance.report_save_payload(
+        failed_run,
+        report_name="acceptance-failure.json",
+        markdown="# failed acceptance",
+        traffic_session={"id": "session-123", "revision": 7},
+    )
+
+    assert "traffic_session_id" not in payload
+    assert "traffic_session_revision" not in payload
+    assert "traffic_session" not in payload["payload"]
+    assert "traffic_session_binding" not in payload["payload"]
+    assert payload["payload"]["traffic_run_summary"]["session_revision"] == 7
 
 
 def test_load_workbench_streams_accepts_list_or_document(tmp_path: Path) -> None:
@@ -3338,48 +3477,81 @@ def test_report_archive_payload_requires_capture_decode_summary() -> None:
 
 
 def test_report_archive_evidence_requires_clean_run_loop() -> None:
-    content = """
-    {
-      "payload": {
+    run_id = "12345678-1234-4234-8234-123456789abc"
+    payload = {
         "verdict": "pass",
-        "traffic_session": {
-          "started_at": "2026-06-05T00:00:00+00:00",
-          "ended_at": "2026-06-05T00:00:02+00:00",
-          "profile": "udp_1pkt_simple.py",
-          "ports": [0],
-          "multiplier": "5kpps",
-          "start_result": {"ok": true},
-          "stop_result": {"ok": true}
+        "traffic_run_summary": {
+            "session_id": "session-123",
+            "session_revision": 2,
+            "run_id": run_id,
         },
-        "stats_samples": [
-          {"opackets": 10, "ipackets": 10}
-        ],
+        "traffic_session_binding": {
+            "id": "session-123",
+            "revision": 2,
+            "evidence_version": 1,
+        },
+        "traffic_session": {
+            "id": "session-123",
+            "revision": 2,
+            "evidence_version": 1,
+            "groups": [
+                {
+                    "run_id": run_id,
+                    "profile_path": "udp_1pkt_simple.py",
+                    "ports": [0],
+                    "start_multiplier": "5kpps",
+                    "started_at": "2026-06-05T00:00:00Z",
+                    "ended_at": "2026-06-05T00:00:02Z",
+                    "state": "stopped",
+                    "start_evidence": {
+                        "intent_nonce": run_id,
+                        "operation": "start",
+                        "ports": [0],
+                        "acquisition_restored": True,
+                        "wal_cleared": True,
+                    },
+                    "cleanup_evidence": {
+                        "completion": "operator_stop",
+                        "completed_at": "2026-06-05T00:00:02Z",
+                        "final_port_states": {"0": "stopped"},
+                        "acquisition_restored": True,
+                        "wal_cleared": True,
+                    },
+                }
+            ],
+            "completed_groups": [],
+        },
+        "stats_samples": [{"opackets": 10, "ipackets": 10}],
         "stats_after_stop_sample": {"opackets": 10, "ipackets": 10},
-        "capture_status_after_stop": {"ok": true, "data": {"captures": []}},
+        "capture_status_after_stop": {"ok": True, "data": {"captures": []}},
         "ports_after_stop": {
-          "ok": true,
-          "data": {
-            "ports": [
-              {"id": 0, "info": {"status": "IDLE"}},
-              {"id": 1, "info": {"status": "IDLE"}}
-            ]
-          }
-        }
-      }
+            "ok": True,
+            "data": {
+                "ports": [
+                    {"id": 0, "info": {"status": "IDLE"}},
+                    {"id": 1, "info": {"status": "IDLE"}},
+                ]
+            },
+        },
     }
-    """
+    content = json.dumps({"payload": payload})
 
     evidence = acceptance.ensure_report_archive_run_evidence(content, 0)
 
     assert evidence["verdict"] == "pass"
     assert evidence["sample_count"] == 1
     assert evidence["traffic_session"]["profile"] == "udp_1pkt_simple.py"
+    assert evidence["traffic_session"]["revision"] == 2
+    assert evidence["traffic_session"]["cleanup_completion"] == "operator_stop"
 
-    missing_stop = content.replace('"stop_result": {"ok": true}', '"stop_result": {"ok": false}')
+    payload["traffic_session"]["groups"][0]["cleanup_evidence"]["completion"] = "observed"
+    missing_stop = json.dumps({"payload": payload})
     with pytest.raises(acceptance.AcceptanceError):
         acceptance.ensure_report_archive_run_evidence(missing_stop, 0)
 
-    active_port = content.replace('"status": "IDLE"', '"status": "TX"', 1)
+    payload["traffic_session"]["groups"][0]["cleanup_evidence"]["completion"] = "operator_stop"
+    payload["ports_after_stop"]["data"]["ports"][0]["info"]["status"] = "TX"
+    active_port = json.dumps({"payload": payload})
     with pytest.raises(acceptance.AcceptanceError):
         acceptance.ensure_report_archive_run_evidence(active_port, 0)
 
@@ -3566,7 +3738,12 @@ def test_report_markdown_summarizes_acceptance_verdict() -> None:
         "capture_status_after_stop": {"ok": True, "data": {"captures": []}},
         "ports_after_stop": {"ok": True, "data": {"ports": [{"id": 0, "info": {"status": "IDLE"}}]}},
         "report_save": {"ok": True, "data": {"file": {"name": "trex-acceptance.json"}}},
-        "traffic_session": {
+        "traffic_run_summary": {
+            "session_id": "session-123",
+            "session_revision": 2,
+            "evidence_version": 1,
+            "run_id": "12345678-1234-4234-8234-123456789abc",
+            "state": "stopped",
             "started_at": "2026-06-05T00:00:00+00:00",
             "ended_at": "2026-06-05T00:00:02+00:00",
             "profile": "udp_1pkt_simple.py",
@@ -3575,8 +3752,7 @@ def test_report_markdown_summarizes_acceptance_verdict() -> None:
             "requested_duration": 2,
             "observe_seconds": 1,
             "tunables": {},
-            "start_result": {"ok": True},
-            "stop_result": {"ok": True},
+            "cleanup_completion": "operator_stop",
         },
     }
 
@@ -3596,7 +3772,9 @@ def test_report_markdown_summarizes_acceptance_verdict() -> None:
     assert "## Profile Streams" in markdown
     assert "## Profile/Capture Match" in markdown
     assert "## Profile/Capture Fields" in markdown
-    assert '"stop_result": {' in markdown
+    assert '"cleanup_completion": "operator_stop"' in markdown
+    assert "start_result" not in markdown
+    assert "stop_result" not in markdown
 
 
 def test_report_markdown_omits_binary_payloads_from_failure_details() -> None:
@@ -3612,7 +3790,7 @@ def test_report_markdown_omits_binary_payloads_from_failure_details() -> None:
         "verdict": "fail",
         "stats_samples": [],
         "capture_stop": {"ok": True, "data": {"packet_count": 0}},
-        "traffic_session": {"stop_result": None},
+        "traffic_run_summary": {"state": "unknown", "cleanup_completion": None},
         "failure": {
             "stage": "capture stop",
             "payload": {"data": {"saved_file": {"content_base64": "AAAA", "name": "capture.pcap"}}},

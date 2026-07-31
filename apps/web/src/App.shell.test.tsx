@@ -201,7 +201,8 @@ describe("App / Shell", () => {
     await openProfiles();
     const dialog = screen.getByRole("dialog", { name: "Traffic Profiles" });
     const pair0 = await within(dialog).findByRole("row", { name: "P0 ↔ P1 ports P0 and P1" });
-    fireEvent.change(within(pair0).getByLabelText("Multiplier or rate for P0 ↔ P1"), {
+    const multiplierInput = within(pair0).getByLabelText("Multiplier or rate for P0 ↔ P1");
+    fireEvent.change(multiplierInput, {
       target: { value: "2kpps" }
     });
 
@@ -212,9 +213,40 @@ describe("App / Shell", () => {
       "Discard unsaved traffic plan assignments and close Traffic Profiles?"
     );
     expect(screen.getByRole("dialog", { name: "Traffic Profiles" })).toBeInTheDocument();
+    expect(multiplierInput).toHaveValue("2kpps");
 
     vi.mocked(window.confirm).mockReturnValueOnce(true);
     fireEvent.click(within(dialog).getByRole("button", { name: "Close Traffic Profiles" }));
+    expect(screen.queryByRole("dialog", { name: "Traffic Profiles" })).not.toBeInTheDocument();
+  });
+
+  it("keeps unsaved Stream Builder changes when Escape close is rejected", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => overview })
+      .mockResolvedValueOnce({ ok: true, json: async () => profileCatalog });
+    stubFetch(fetchMock);
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByText("Connected to TRex RPC")).toBeInTheDocument());
+    await openProfiles();
+    fireEvent.click(screen.getByRole("option", { name: "http_simple.yaml" }));
+    const dialog = screen.getByRole("dialog", { name: "Traffic Profiles" });
+    const rateInput = within(dialog).getByLabelText("Stream rate value");
+    fireEvent.change(rateInput, { target: { value: "250" } });
+
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+    fireEvent.keyDown(document, { key: "Escape" });
+
+    expect(window.confirm).toHaveBeenCalledWith(
+      "Discard the unsaved Stream Builder changes and close Traffic Profiles?"
+    );
+    expect(screen.getByRole("dialog", { name: "Traffic Profiles" })).toBeInTheDocument();
+    expect(rateInput).toHaveValue(250);
+
+    vi.mocked(window.confirm).mockReturnValueOnce(true);
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Traffic Profiles" })).not.toBeInTheDocument();
   });
 

@@ -292,14 +292,159 @@ class TrafficGroupState(StrictRuntimeStateModel):
         return value
 
 
+class TrafficMutationEvidenceState(StrictRuntimeStateModel):
+    intent_nonce: str = Field(min_length=36, max_length=36)
+    operation: Literal["start", "stop", "pause", "resume", "update"]
+    completion_mode: Literal["direct", "recovered", "replayed", "hard_stop"]
+    ports: list[int] = Field(min_length=1)
+    baseline_port_states: dict[
+        int,
+        Literal["running", "paused", "stopped", "unknown"],
+    ]
+    desired_port_states: dict[
+        int,
+        Literal["running", "paused", "stopped", "unknown"],
+    ]
+    baseline_acquired_ports: list[int] = Field(default_factory=list)
+    prepared_at: str
+    completed_at: str
+    acquisition_restored: Literal[True] = True
+    wal_cleared: Literal[True] = True
+
+    @field_validator("intent_nonce")
+    @classmethod
+    def intent_nonce_must_be_a_canonical_uuid(cls, value: str) -> str:
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError as exc:
+            raise ValueError(
+                "traffic evidence intent nonce must be a canonical UUID"
+            ) from exc
+        if str(parsed) != value:
+            raise ValueError(
+                "traffic evidence intent nonce must be a canonical UUID"
+            )
+        return value
+
+    @field_validator("ports", "baseline_acquired_ports")
+    @classmethod
+    def evidence_ports_must_be_unique_and_non_negative(
+        cls,
+        value: list[int],
+    ) -> list[int]:
+        if any(port < 0 for port in value):
+            raise ValueError("traffic evidence ports must be non-negative")
+        if len(value) != len(set(value)):
+            raise ValueError("traffic evidence ports must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def mutation_evidence_must_be_exact(self) -> "TrafficMutationEvidenceState":
+        target_ports = set(self.ports)
+        if self.completion_mode == "hard_stop" and self.operation != "stop":
+            raise ValueError(
+                "hard-stop completion evidence is only valid for stop mutations"
+            )
+        if not target_ports.issubset(self.baseline_port_states):
+            raise ValueError(
+                "traffic evidence baseline must include every target port"
+            )
+        if set(self.desired_port_states) != target_ports:
+            raise ValueError(
+                "traffic evidence desired states must exactly match target ports"
+            )
+        if not set(self.baseline_acquired_ports).issubset(target_ports):
+            raise ValueError(
+                "traffic evidence acquisition baseline must be within target ports"
+            )
+        return self
+
+
+class TrafficCleanupEvidenceState(StrictRuntimeStateModel):
+    completion: Literal["operator_stop", "hard_stop", "observed"]
+    completed_at: str
+    final_port_states: dict[int, Literal["stopped"]]
+    intent_nonce: str | None = Field(default=None, min_length=36, max_length=36)
+    acquisition_restored: Literal[True] | None = None
+    wal_cleared: bool = True
+
+    @field_validator("intent_nonce")
+    @classmethod
+    def cleanup_nonce_must_be_a_canonical_uuid(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+        try:
+            parsed = uuid.UUID(value)
+        except ValueError as exc:
+            raise ValueError(
+                "traffic cleanup intent nonce must be a canonical UUID"
+            ) from exc
+        if str(parsed) != value:
+            raise ValueError(
+                "traffic cleanup intent nonce must be a canonical UUID"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def cleanup_evidence_must_match_its_completion(
+        self,
+    ) -> "TrafficCleanupEvidenceState":
+        if self.completion == "observed":
+            if (
+                self.intent_nonce is not None
+                or self.acquisition_restored is not None
+                or self.wal_cleared is not True
+            ):
+                raise ValueError(
+                    "observed traffic cleanup cannot claim mutation evidence"
+                )
+        elif self.completion == "operator_stop" and (
+            self.intent_nonce is None
+            or self.acquisition_restored is not True
+            or self.wal_cleared is not True
+        ):
+            raise ValueError(
+                "commanded traffic cleanup requires exact mutation evidence"
+            )
+        elif (
+            self.completion == "hard_stop"
+            and self.acquisition_restored is not True
+        ):
+            raise ValueError(
+                "hard-stop cleanup must prove acquisition restoration"
+            )
+        return self
+
+
 class TrafficSessionGroupState(StrictRuntimeStateModel):
     group_id: str | None = None
+    run_id: str | None = Field(default=None, min_length=36, max_length=36)
+    source: Literal["plan", "ad_hoc"] | None = None
+    plan_revision: int | None = Field(default=None, ge=0)
     ports: list[int] = Field(min_length=1)
     profile_path: str
+    profile_sha256: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    start_multiplier: str | None = Field(default=None, min_length=1, max_length=64)
     multiplier: str
     duration: float
+    start_force: bool | None = None
+    start_total: bool | None = None
+    start_synchronized: bool | None = None
+    start_clear_existing: bool | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
     hard_stop_at: str | None = None
     tunables: dict[str, Any] = Field(default_factory=dict)
+    start_evidence: TrafficMutationEvidenceState | None = None
+    cleanup_evidence: TrafficCleanupEvidenceState | None = None
     state: Literal["running", "paused", "stopped", "mixed", "unknown"]
     port_states: dict[
         int,
@@ -354,12 +499,16 @@ class TrafficSessionGroupState(StrictRuntimeStateModel):
 
 class TrafficSessionState(StrictRuntimeStateModel):
     id: str
+    revision: int = Field(default=0, ge=0)
+    evidence_version: Literal[1] | None = None
     authority: RuntimeAuthorityIdentity
     state: Literal["running", "paused", "stopped", "mixed", "unknown"]
     started_at: str
     updated_at: str
     ended_at: str | None = None
     groups: list[TrafficSessionGroupState] = Field(default_factory=list)
+    completed_groups: list[TrafficSessionGroupState] = Field(default_factory=list)
+    mutation_evidence: list[TrafficMutationEvidenceState] = Field(default_factory=list)
     reconciliation: str | None = None
 
     @model_validator(mode="after")
@@ -382,6 +531,159 @@ class TrafficSessionState(StrictRuntimeStateModel):
         if self.state != aggregate:
             raise ValueError(
                 f"traffic session state must aggregate group states as {aggregate}"
+            )
+        if self.evidence_version is None:
+            evidence_fields_present = bool(
+                self.completed_groups
+                or self.mutation_evidence
+                or any(
+                    group.run_id is not None
+                    or group.source is not None
+                    or group.plan_revision is not None
+                    or group.profile_sha256 is not None
+                    or group.start_multiplier is not None
+                    or group.start_force is not None
+                    or group.start_total is not None
+                    or group.start_synchronized is not None
+                    or group.start_clear_existing is not None
+                    or group.started_at is not None
+                    or group.ended_at is not None
+                    or group.start_evidence is not None
+                    or group.cleanup_evidence is not None
+                    for group in self.groups
+                )
+            )
+            if evidence_fields_present:
+                raise ValueError(
+                    "legacy traffic sessions cannot contain certifiable evidence"
+                )
+            return self
+
+        if self.revision < 1:
+            raise ValueError(
+                "evidenced traffic sessions must have a positive revision"
+            )
+        if not self.mutation_evidence:
+            raise ValueError(
+                "evidenced traffic sessions require mutation evidence"
+            )
+        evidence_by_nonce: dict[str, TrafficMutationEvidenceState] = {}
+        for evidence in self.mutation_evidence:
+            if evidence.intent_nonce in evidence_by_nonce:
+                raise ValueError(
+                    "traffic session mutation evidence nonces must be unique"
+                )
+            evidence_by_nonce[evidence.intent_nonce] = evidence
+        first_evidence = self.mutation_evidence[0]
+        if (
+            first_evidence.operation != "start"
+            or first_evidence.intent_nonce != self.id
+        ):
+            raise ValueError(
+                "traffic session must begin with start evidence matching its id"
+            )
+        for group in [*self.groups, *self.completed_groups]:
+            required_start_fields = (
+                group.run_id,
+                group.source,
+                group.profile_sha256,
+                group.start_multiplier,
+                group.start_force,
+                group.start_total,
+                group.start_synchronized,
+                group.start_clear_existing,
+                group.started_at,
+                group.start_evidence,
+            )
+            if any(value is None for value in required_start_fields):
+                raise ValueError(
+                    "evidenced traffic groups require complete start evidence"
+                )
+            if group.source == "plan":
+                if group.group_id is None or group.plan_revision is None:
+                    raise ValueError(
+                        "plan traffic evidence requires group id and plan revision"
+                    )
+            elif group.group_id is not None or group.plan_revision is not None:
+                raise ValueError(
+                    "ad hoc traffic evidence cannot claim plan identity"
+                )
+            if (
+                group.start_evidence is None
+                or group.start_evidence.operation != "start"
+                or group.start_evidence.intent_nonce != group.run_id
+                or set(group.start_evidence.ports) != set(group.ports)
+            ):
+                raise ValueError(
+                    "traffic group start evidence must match its exact run"
+                )
+            canonical_start = evidence_by_nonce.get(
+                group.start_evidence.intent_nonce
+            )
+            if canonical_start != group.start_evidence:
+                raise ValueError(
+                    "traffic group start evidence must reference the exact "
+                    "session mutation evidence"
+                )
+            if group.state == "stopped":
+                cleanup = group.cleanup_evidence
+                if (
+                    group.ended_at is None
+                    or cleanup is None
+                    or cleanup.completed_at != group.ended_at
+                    or set(cleanup.final_port_states) != set(group.ports)
+                ):
+                    raise ValueError(
+                        "stopped evidenced traffic groups require exact cleanup evidence"
+                    )
+                if cleanup.intent_nonce is not None:
+                    cleanup_mutation = evidence_by_nonce.get(
+                        cleanup.intent_nonce
+                    )
+                    if (
+                        cleanup_mutation is None
+                        or cleanup_mutation.operation != "stop"
+                    ):
+                        raise ValueError(
+                            "traffic cleanup evidence must reference a stop "
+                            "mutation in the same session"
+                        )
+                    if cleanup_mutation.completed_at != cleanup.completed_at:
+                        raise ValueError(
+                            "traffic cleanup completion must match its stop mutation"
+                        )
+                    if (
+                        cleanup.completion == "operator_stop"
+                        and cleanup_mutation.completion_mode == "hard_stop"
+                    ):
+                        raise ValueError(
+                            "operator cleanup cannot reference hard-stop mutation evidence"
+                        )
+                    if (
+                        cleanup.completion == "hard_stop"
+                        and cleanup_mutation.completion_mode != "hard_stop"
+                    ):
+                        raise ValueError(
+                            "hard-stop cleanup must reference hard-stop mutation evidence"
+                        )
+            elif group.ended_at is not None or group.cleanup_evidence is not None:
+                raise ValueError(
+                    "active evidenced traffic groups cannot include cleanup evidence"
+                )
+        if any(group.state != "stopped" for group in self.completed_groups):
+            raise ValueError("completed traffic groups must be stopped")
+        group_start_nonces = {
+            group.run_id
+            for group in [*self.groups, *self.completed_groups]
+        }
+        session_start_nonces = {
+            evidence.intent_nonce
+            for evidence in self.mutation_evidence
+            if evidence.operation == "start"
+        }
+        if group_start_nonces != session_start_nonces:
+            raise ValueError(
+                "traffic session start mutations must exactly match its group runs"
             )
         return self
 
@@ -414,6 +716,8 @@ class TrafficMutationIntentState(StrictRuntimeStateModel):
     ]
     session_before: TrafficSessionState | None = None
     start_group: TrafficSessionGroupState | None = None
+    start_source: Literal["plan", "ad_hoc"] | None = None
+    start_plan_revision: int | None = Field(default=None, ge=0)
     start_profile_sha256: str | None = Field(
         default=None,
         min_length=64,
@@ -580,6 +884,26 @@ class TrafficMutationIntentState(StrictRuntimeStateModel):
                 raise ValueError(
                     "traffic start intent must include its profile content identity"
                 )
+            if self.start_source == "plan":
+                if (
+                    self.start_plan_revision is None
+                    or self.start_group.group_id is None
+                ):
+                    raise ValueError(
+                        "plan traffic start intent requires group and revision identity"
+                    )
+            elif self.start_source == "ad_hoc":
+                if (
+                    self.start_plan_revision is not None
+                    or self.start_group.group_id is not None
+                ):
+                    raise ValueError(
+                        "ad hoc traffic start intent cannot claim plan identity"
+                    )
+            elif self.start_plan_revision is not None:
+                raise ValueError(
+                    "legacy traffic start intent cannot claim a plan revision"
+                )
             if set(self.start_group.ports) != target_ports:
                 raise ValueError(
                     "traffic start intent group ports must match target ports"
@@ -645,6 +969,8 @@ class TrafficMutationIntentState(StrictRuntimeStateModel):
         elif self.operation == "update":
             if (
                 self.start_group is not None
+                or self.start_source is not None
+                or self.start_plan_revision is not None
                 or self.start_profile_sha256 is not None
                 or self.start_clear_existing is not None
                 or self.start_force is not None
@@ -672,6 +998,8 @@ class TrafficMutationIntentState(StrictRuntimeStateModel):
         else:
             if (
                 self.start_group is not None
+                or self.start_source is not None
+                or self.start_plan_revision is not None
                 or self.start_profile_sha256 is not None
                 or self.start_clear_existing is not None
                 or self.start_force is not None

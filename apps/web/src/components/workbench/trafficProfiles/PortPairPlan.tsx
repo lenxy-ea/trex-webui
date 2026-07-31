@@ -8,7 +8,9 @@ import {
   type ProfileRecord,
   type TrafficPlanGroup,
   type TrafficRuntimeSnapshot,
-  type TrexPortRecord
+  type TrafficStartResult,
+  type TrexPortRecord,
+  type TrexResult
 } from "../../../api";
 import {
   normalizeTrafficPlanMultiplier,
@@ -27,7 +29,8 @@ type PortPairPlanProps = {
   requireConfirmation: boolean;
   runtimeControlDisabledReason: string | null;
   onDirtyChange?: (dirty: boolean) => void;
-  onSessionAuthorityChange?: (sessionId: string) => void;
+  onRuntimeChange?: (snapshot: TrafficRuntimeSnapshot) => void;
+  onStartResult?: (result: TrexResult<TrafficStartResult>) => void;
 };
 
 type OperationStatus = {
@@ -100,7 +103,8 @@ export function PortPairPlan({
   requireConfirmation,
   runtimeControlDisabledReason,
   onDirtyChange,
-  onSessionAuthorityChange
+  onRuntimeChange,
+  onStartResult
 }: PortPairPlanProps) {
   const [runtime, setRuntime] = useState<TrafficRuntimeSnapshot | null>(null);
   const [draftGroups, setDraftGroups] = useState<TrafficPlanGroup[]>([]);
@@ -124,12 +128,13 @@ export function PortPairPlan({
     resetDraft: boolean
   ) => {
     setRuntime(snapshot);
+    onRuntimeChange?.(snapshot);
     if (resetDraft || !dirtyRef.current) {
       setDraftGroups(snapshot.groups);
       setDraftBaseRevision(snapshot.plan_revision);
       setDraftDirty(false);
     }
-  }, [setDraftDirty]);
+  }, [onRuntimeChange, setDraftDirty]);
 
   const loadRuntime = useCallback(async ({
     resetDraft = false
@@ -314,6 +319,7 @@ export function PortPairPlan({
           ? runtime.session.id
           : null
       });
+      onStartResult?.(result);
       if (!result.ok) {
         setOperationStatus({
           text: errorMessage(result.blocker, result.error),
@@ -323,10 +329,6 @@ export function PortPairPlan({
           await loadRuntime();
         }
         return;
-      }
-      const sessionId = result.data?.session?.id;
-      if (typeof sessionId === "string" && sessionId.trim() !== "") {
-        onSessionAuthorityChange?.(sessionId);
       }
       const refreshed = await loadRuntime();
       setOperationStatus({

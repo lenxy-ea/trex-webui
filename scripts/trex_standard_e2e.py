@@ -6,12 +6,13 @@ import ast
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import stat
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,6 @@ import yaml
 
 from trex_real_acceptance import (
     AcceptanceError,
-    active_port_ids,
     capture_decode_summary,
     capture_packet_count,
     capture_recorder_count,
@@ -49,6 +49,8 @@ DEFAULT_STATS_TIMEOUT_SECONDS = 12.0
 DEFAULT_CAPTURE_LIMIT = 256
 DEFAULT_CAPTURE_PACKETS = 64
 DEFAULT_CAPTURE_BPF = "udp"
+TRAFFIC_HARD_STOP_MAX_WINDOW_SECONDS = 300.0
+TRAFFIC_HARD_STOP_CLEANUP_MARGIN_SECONDS = 5.0
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE_IDENTITY_SCHEMA = "trex-webui-evidence/v1"
 SOURCE_IDENTITY_ALGORITHM = "sha256(canonical-json(git-sha,path,type,mode,size,content-sha256)-v1)"
@@ -99,6 +101,98 @@ STANDARD_E2E_CONSTRAINT = (
 
 class EvidenceIdentityError(RuntimeError):
     pass
+
+
+def canonical_hard_stop_at(
+    window_seconds: float,
+    *,
+    now: datetime | None = None,
+) -> str:
+    if (
+        isinstance(window_seconds, bool)
+        or not isinstance(window_seconds, (int, float))
+        or not math.isfinite(float(window_seconds))
+        or window_seconds <= 0
+        or window_seconds > TRAFFIC_HARD_STOP_MAX_WINDOW_SECONDS
+    ):
+        raise AcceptanceError(
+            "hard-stop budget",
+            "traffic hard-stop window must be greater than 0 and no more than "
+            f"{TRAFFIC_HARD_STOP_MAX_WINDOW_SECONDS:g} seconds",
+            window_seconds,
+        )
+    current = datetime.now(timezone.utc) if now is None else now
+    if current.tzinfo is None or current.utcoffset() != timedelta(0):
+        raise AcceptanceError(
+            "hard-stop budget",
+            "traffic hard-stop clock must use absolute UTC",
+            str(current),
+        )
+    return (
+        current.astimezone(timezone.utc) + timedelta(seconds=float(window_seconds))
+    ).isoformat().replace("+00:00", "Z")
+
+
+def standard_hard_stop_windows(args: argparse.Namespace) -> dict[str, float]:
+    numeric = {
+        "timeout": getattr(args, "timeout", None),
+        "stats_timeout": getattr(args, "stats_timeout", None),
+        "poll_interval": getattr(args, "poll_interval", None),
+        "latency_observe_seconds": getattr(args, "latency_observe_seconds", None),
+        "capture_observe_seconds": getattr(args, "capture_observe_seconds", None),
+    }
+    invalid = {
+        name: value
+        for name, value in numeric.items()
+        if isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or (name == "poll_interval" and value < 0)
+        or (name != "poll_interval" and value <= 0)
+    }
+    if invalid:
+        raise AcceptanceError(
+            "hard-stop budget",
+            "Standard E2E timing values must be finite and positive "
+            "(poll interval may be zero)",
+            invalid,
+        )
+    timeout = float(numeric["timeout"])
+    stats_timeout = float(numeric["stats_timeout"])
+    poll_interval = float(numeric["poll_interval"])
+    latency_observe = float(numeric["latency_observe_seconds"])
+    capture_observe = float(numeric["capture_observe_seconds"])
+    windows = {
+        # start response + final stats request + operator stop + runtime
+        # reconciliation + exact stop retry
+        "latency": max(
+            stats_timeout,
+            latency_observe + poll_interval,
+        )
+        + 5 * timeout
+        + TRAFFIC_HARD_STOP_CLEANUP_MARGIN_SECONDS,
+        # The capture phase additionally has capture-stop and capture-files
+        # requests before its normal traffic stop.
+        "capture": max(
+            stats_timeout,
+            capture_observe + poll_interval,
+        )
+        + 7 * timeout
+        + TRAFFIC_HARD_STOP_CLEANUP_MARGIN_SECONDS,
+    }
+    invalid_windows = {
+        phase: window
+        for phase, window in windows.items()
+        if window <= 0 or window > TRAFFIC_HARD_STOP_MAX_WINDOW_SECONDS
+    }
+    if invalid_windows:
+        raise AcceptanceError(
+            "hard-stop budget",
+            "derived Standard E2E hard-stop window exceeds the backend's "
+            f"{TRAFFIC_HARD_STOP_MAX_WINDOW_SECONDS:g}-second safety limit",
+            {"windows": windows, "invalid": invalid_windows},
+        )
+    return windows
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -896,6 +990,570 @@ def required_traffic_session_id(payload: dict[str, Any], stage: str) -> str:
     return session_id
 
 
+def runtime_data(payload: dict[str, Any], stage: str) -> dict[str, Any]:
+    result = require_ok(stage, payload)
+    data = result.get("data")
+    if not isinstance(data, dict):
+        raise AcceptanceError(
+            stage,
+            "traffic runtime response did not include object data",
+            payload,
+        )
+    return data
+
+
+def all_session_groups(session: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        group
+        for collection in ("groups", "completed_groups")
+        for group in (
+            session.get(collection)
+            if isinstance(session.get(collection), list)
+            else []
+        )
+        if isinstance(group, dict)
+    ]
+
+
+def integer_state_map(value: Any) -> dict[int, Any]:
+    if not isinstance(value, dict):
+        return {}
+    try:
+        return {int(port): state for port, state in value.items()}
+    except (TypeError, ValueError):
+        return {}
+
+
+def profile_path_matches(expected: str, observed: Any) -> bool:
+    if not isinstance(observed, str) or not observed:
+        return False
+    expected_path = Path(expected)
+    observed_path = Path(observed)
+    if expected_path.is_absolute():
+        return observed_path == expected_path
+    return (
+        observed == expected
+        or observed_path.name == expected_path.name
+        and (
+            len(expected_path.parts) == 1
+            or observed_path.parts[-len(expected_path.parts) :] == expected_path.parts
+        )
+    )
+
+
+def mutation_evidence_is_exact(
+    evidence: Any,
+    *,
+    operation: str,
+    ports: list[int],
+    nonce: str,
+) -> bool:
+    if not isinstance(evidence, dict):
+        return False
+    desired_state = "running" if operation == "start" else "stopped"
+    baseline = integer_state_map(evidence.get("baseline_port_states"))
+    desired = integer_state_map(evidence.get("desired_port_states"))
+    acquired = evidence.get("baseline_acquired_ports")
+    completion_mode = evidence.get("completion_mode")
+    return (
+        evidence.get("intent_nonce") == nonce
+        and evidence.get("operation") == operation
+        and completion_mode in {"direct", "recovered", "replayed"}
+        and evidence.get("ports") == ports
+        and set(ports).issubset(baseline)
+        and desired == {port: desired_state for port in ports}
+        and isinstance(acquired, list)
+        and all(
+            isinstance(port, int)
+            and not isinstance(port, bool)
+            and port in ports
+            for port in acquired
+        )
+        and isinstance(evidence.get("prepared_at"), str)
+        and bool(evidence.get("prepared_at"))
+        and isinstance(evidence.get("completed_at"), str)
+        and bool(evidence.get("completed_at"))
+        and evidence.get("acquisition_restored") is True
+        and evidence.get("wal_cleared") is True
+    )
+
+
+def standard_start_descriptor(
+    *,
+    phase: str,
+    profile_path: str,
+    multiplier: str,
+    hard_stop_at: str,
+    pre_runtime: dict[str, Any],
+    tx_port: int,
+    rx_port: int,
+) -> dict[str, Any]:
+    pre_session = pre_runtime.get("session")
+    pre_authority = pre_runtime.get("authority")
+    if not isinstance(pre_authority, dict):
+        raise AcceptanceError(
+            f"{phase} runtime preflight",
+            "traffic runtime did not expose its current authority",
+            pre_runtime,
+        )
+    return {
+        "phase": phase,
+        "profile_path": profile_path,
+        "multiplier": multiplier,
+        "duration": -1,
+        "ports": [tx_port],
+        "boundary_ports": sorted({tx_port, rx_port}),
+        "hard_stop_at": hard_stop_at,
+        "pre_plan_revision": pre_runtime.get("plan_revision"),
+        "pre_config": pre_runtime.get("config"),
+        "pre_session_id": (
+            pre_session.get("id") if isinstance(pre_session, dict) else None
+        ),
+        "pre_authority": pre_authority,
+        "status": "prepared",
+    }
+
+
+def validate_started_standard_session(
+    session: dict[str, Any],
+    descriptor: dict[str, Any],
+    *,
+    stage: str,
+) -> tuple[str, str, dict[str, Any]]:
+    session_id = session.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        raise AcceptanceError(stage, "started session id is missing", session)
+    if (
+        session.get("evidence_version") != 1
+        or session.get("state") != "running"
+    ):
+        raise AcceptanceError(
+            stage,
+            "started traffic session was not a running v1 evidence session",
+            session,
+        )
+    pre_session_id = descriptor.get("pre_session_id")
+    if isinstance(pre_session_id, str) and session_id == pre_session_id:
+        raise AcceptanceError(
+            stage,
+            "ambiguous start did not create a new managed session",
+            {"pre_session_id": pre_session_id, "session": session},
+        )
+    pre_authority = descriptor.get("pre_authority")
+    if session.get("authority") != pre_authority:
+        raise AcceptanceError(
+            stage,
+            "started session belongs to a different runtime authority",
+            {"expected": pre_authority, "observed": session.get("authority")},
+        )
+    groups = all_session_groups(session)
+    if len(groups) != 1:
+        raise AcceptanceError(
+            stage,
+            "Standard phase did not create exactly one canonical traffic group",
+            session,
+        )
+    group = groups[0]
+    ports = list(descriptor["ports"])
+    run_id = group.get("run_id")
+    expected_fields = {
+        "source": "ad_hoc",
+        "group_id": None,
+        "plan_revision": None,
+        "ports": ports,
+        "start_multiplier": descriptor["multiplier"],
+        "duration": descriptor["duration"],
+        "hard_stop_at": descriptor["hard_stop_at"],
+        "state": "running",
+    }
+    mismatches = {
+        name: {"expected": expected, "observed": group.get(name)}
+        for name, expected in expected_fields.items()
+        if group.get(name) != expected
+    }
+    if not profile_path_matches(str(descriptor["profile_path"]), group.get("profile_path")):
+        mismatches["profile_path"] = {
+            "expected": descriptor["profile_path"],
+            "observed": group.get("profile_path"),
+        }
+    if integer_state_map(group.get("port_states")) != {
+        port: "running" for port in ports
+    }:
+        mismatches["port_states"] = group.get("port_states")
+    if not isinstance(run_id, str) or run_id != session_id:
+        mismatches["run_id"] = {"expected": session_id, "observed": run_id}
+    start_evidence = group.get("start_evidence")
+    if not isinstance(run_id, str) or not mutation_evidence_is_exact(
+        start_evidence,
+        operation="start",
+        ports=ports,
+        nonce=run_id,
+    ):
+        mismatches["start_evidence"] = start_evidence
+    mutations = session.get("mutation_evidence")
+    if not isinstance(mutations, list) or mutations != [start_evidence]:
+        mismatches["mutation_evidence"] = mutations
+    if mismatches:
+        raise AcceptanceError(
+            stage,
+            "started Standard traffic did not match its exact safety lease",
+            mismatches,
+        )
+    return session_id, run_id, group
+
+
+def validate_stopped_standard_session(
+    session: dict[str, Any],
+    descriptor: dict[str, Any],
+    *,
+    expected_session_id: str,
+    stage: str,
+) -> dict[str, Any]:
+    if (
+        session.get("id") != expected_session_id
+        or session.get("evidence_version") != 1
+        or session.get("state") != "stopped"
+    ):
+        raise AcceptanceError(
+            stage,
+            "stopped Standard session did not preserve its exact authority",
+            session,
+        )
+    pre_authority = descriptor.get("pre_authority")
+    if session.get("authority") != pre_authority:
+        raise AcceptanceError(
+            stage,
+            "stopped session belongs to a different runtime authority",
+            session,
+        )
+    groups = all_session_groups(session)
+    if len(groups) != 1:
+        raise AcceptanceError(
+            stage,
+            "stopped Standard session did not contain exactly one group",
+            session,
+        )
+    group = groups[0]
+    ports = list(descriptor["ports"])
+    run_id = descriptor.get("run_id")
+    cleanup = group.get("cleanup_evidence")
+    mutations = session.get("mutation_evidence")
+    mutation_by_nonce = {
+        evidence.get("intent_nonce"): evidence
+        for evidence in mutations
+        if isinstance(evidence, dict)
+        and isinstance(evidence.get("intent_nonce"), str)
+    } if isinstance(mutations, list) else {}
+    start_evidence = group.get("start_evidence")
+    problems: list[str] = []
+    if (
+        group.get("source") != "ad_hoc"
+        or group.get("group_id") is not None
+        or group.get("plan_revision") is not None
+        or group.get("ports") != ports
+        or group.get("start_multiplier") != descriptor.get("multiplier")
+        or group.get("duration") != -1
+        or group.get("state") != "stopped"
+    ):
+        problems.append("canonical group identity changed")
+    if not profile_path_matches(str(descriptor["profile_path"]), group.get("profile_path")):
+        problems.append("canonical profile changed")
+    if group.get("hard_stop_at") is not None:
+        problems.append("hard-stop lease was not cleared")
+    if integer_state_map(group.get("port_states")) != {
+        port: "stopped" for port in ports
+    }:
+        problems.append("final port states were not exactly stopped")
+    if not isinstance(run_id, str) or group.get("run_id") != run_id:
+        problems.append("canonical run id changed")
+    elif (
+        not mutation_evidence_is_exact(
+            start_evidence,
+            operation="start",
+            ports=ports,
+            nonce=run_id,
+        )
+        or mutation_by_nonce.get(run_id) != start_evidence
+    ):
+        problems.append("start mutation evidence is incomplete")
+    if not (
+        isinstance(cleanup, dict)
+        and cleanup.get("completion") == "operator_stop"
+        and cleanup.get("completed_at") == group.get("ended_at")
+        and isinstance(cleanup.get("intent_nonce"), str)
+        and cleanup.get("acquisition_restored") is True
+        and cleanup.get("wal_cleared") is True
+        and integer_state_map(cleanup.get("final_port_states"))
+        == {port: "stopped" for port in ports}
+    ):
+        problems.append("operator cleanup evidence is incomplete")
+    else:
+        stop_evidence = mutation_by_nonce.get(cleanup["intent_nonce"])
+        if not mutation_evidence_is_exact(
+            stop_evidence,
+            operation="stop",
+            ports=ports,
+            nonce=cleanup["intent_nonce"],
+        ) or stop_evidence.get("completed_at") != cleanup.get("completed_at"):
+            problems.append("operator stop mutation evidence is incomplete or hard-stop")
+    if not isinstance(mutations, list) or len(mutations) != 2:
+        problems.append("session did not contain exactly start and operator stop mutations")
+    if problems:
+        raise AcceptanceError(stage, "; ".join(problems), session)
+    return group
+
+
+def runtime_context_matches(
+    runtime: dict[str, Any],
+    descriptor: dict[str, Any],
+) -> bool:
+    return (
+        runtime.get("plan_revision") == descriptor.get("pre_plan_revision")
+        and runtime.get("config") == descriptor.get("pre_config")
+        and runtime.get("authority") == descriptor.get("pre_authority")
+    )
+
+
+def recover_standard_start_from_runtime(
+    args: argparse.Namespace,
+    run: dict[str, Any],
+    descriptor: dict[str, Any],
+    *,
+    stage: str,
+) -> dict[str, Any] | None:
+    try:
+        payload = request_json(
+            args.base_url,
+            "GET",
+            "/api/trex/traffic/runtime",
+            None,
+            args.timeout,
+        )
+        runtime = runtime_data(payload, f"{stage} runtime reconciliation")
+    except AcceptanceError as exc:
+        descriptor["runtime_recovery_error"] = exc.to_record()
+        return None
+    descriptor["runtime_recovery"] = sanitize_report_payload(payload)
+    if not runtime_context_matches(runtime, descriptor):
+        descriptor["runtime_recovery_rejected"] = {
+            "reason": "runtime context changed; refusing to adopt a different authority",
+            "expected_authority": descriptor.get("pre_authority"),
+            "observed_authority": runtime.get("authority"),
+            "expected_plan_revision": descriptor.get("pre_plan_revision"),
+            "observed_plan_revision": runtime.get("plan_revision"),
+            "expected_config": descriptor.get("pre_config"),
+            "observed_config": runtime.get("config"),
+        }
+        return None
+    intent = runtime.get("mutation_intent")
+    if intent is not None:
+        start_group = intent.get("start_group") if isinstance(intent, dict) else None
+        if (
+            isinstance(intent, dict)
+            and intent.get("operation") == "start"
+            and intent.get("expected_session_id") is None
+            and intent.get("ports") == descriptor.get("ports")
+            and isinstance(start_group, dict)
+            and start_group.get("ports") == descriptor.get("ports")
+            and start_group.get("hard_stop_at") == descriptor.get("hard_stop_at")
+            and start_group.get("start_multiplier") == descriptor.get("multiplier")
+            and profile_path_matches(
+                str(descriptor["profile_path"]),
+                start_group.get("profile_path"),
+            )
+        ):
+            descriptor["durable_lease_confirmed"] = True
+            descriptor["status"] = "pending-runtime-recovery"
+        else:
+            descriptor["runtime_recovery_rejected"] = (
+                "pending mutation did not match this start"
+            )
+        return None
+    session = runtime.get("session")
+    if not isinstance(session, dict):
+        descriptor["runtime_recovery_rejected"] = "runtime had no session"
+        return None
+    try:
+        session_id, run_id, _group = validate_started_standard_session(
+            session,
+            descriptor,
+            stage=f"{stage} runtime reconciliation",
+        )
+    except AcceptanceError as exc:
+        descriptor["runtime_recovery_rejected"] = exc.to_record()
+        return None
+    if runtime.get("live_state_sampled") is not True:
+        descriptor["runtime_recovery_rejected"] = "live runtime was not sampled"
+        return None
+    records = runtime.get("port_states")
+    by_port = {
+        item.get("port"): item
+        for item in records
+        if isinstance(item, dict)
+        and isinstance(item.get("port"), int)
+        and not isinstance(item.get("port"), bool)
+    } if isinstance(records, list) else {}
+    expected_ports = set(descriptor["ports"])
+    boundary_ports = set(descriptor["boundary_ports"])
+    if any(
+        by_port.get(port, {}).get("state") != "running"
+        or by_port.get(port, {}).get("ownership") != "managed"
+        for port in expected_ports
+    ) or any(
+        by_port.get(port, {}).get("state") != "stopped"
+        or by_port.get(port, {}).get("ownership") != "none"
+        for port in boundary_ports.difference(expected_ports)
+    ):
+        descriptor["runtime_recovery_rejected"] = (
+            "live port ownership did not exactly match this start"
+        )
+        return None
+    descriptor.update(
+        {
+            "session_id": session_id,
+            "run_id": run_id,
+            "status": "recovered-active",
+        }
+    )
+    run["active_traffic_session_id"] = session_id
+    run["active_traffic_descriptor"] = descriptor
+    return session
+
+
+def start_standard_traffic(
+    args: argparse.Namespace,
+    run: dict[str, Any],
+    *,
+    phase: str,
+    profile_path: str,
+    multiplier: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    pre_payload = request_json(
+        args.base_url,
+        "GET",
+        "/api/trex/traffic/runtime",
+        None,
+        args.timeout,
+    )
+    pre_runtime = runtime_data(pre_payload, f"{phase} runtime preflight")
+    if pre_runtime.get("mutation_intent") is not None:
+        raise AcceptanceError(
+            f"{phase} runtime preflight",
+            "traffic runtime already had a pending mutation",
+            pre_runtime,
+        )
+    validate_runtime_port_boundary(
+        pre_payload,
+        target_ports=sorted({args.tx_port, args.rx_port}),
+        stage=f"{phase} runtime preflight",
+    )
+    windows = run.get("hard_stop_windows_seconds")
+    if not isinstance(windows, dict):
+        windows = standard_hard_stop_windows(args)
+        run["hard_stop_windows_seconds"] = windows
+    window = windows.get(phase)
+    if not isinstance(window, (int, float)) or isinstance(window, bool):
+        raise AcceptanceError(
+            "hard-stop budget",
+            f"no validated hard-stop window is available for {phase}",
+            windows,
+        )
+    hard_stop_at = canonical_hard_stop_at(float(window))
+    descriptor = standard_start_descriptor(
+        phase=phase,
+        profile_path=profile_path,
+        multiplier=multiplier,
+        hard_stop_at=hard_stop_at,
+        pre_runtime=pre_runtime,
+        tx_port=args.tx_port,
+        rx_port=args.rx_port,
+    )
+    run.setdefault("traffic_start_attempts", []).append(descriptor)
+    body = {
+        "profile_path": profile_path,
+        "ports": [args.tx_port],
+        "expected_session_id": None,
+        "multiplier": multiplier,
+        "duration": -1,
+        "force": True,
+        "confirmation": "start-traffic",
+        "tunables": {},
+        "hard_stop_at": hard_stop_at,
+    }
+    try:
+        result = require_ok(
+            f"{phase} traffic start",
+            request_json(
+                args.base_url,
+                "POST",
+                "/api/trex/traffic/start",
+                body,
+                args.timeout,
+            ),
+        )
+        session = read_path(result, "data.session")
+        if not isinstance(session, dict):
+            raise AcceptanceError(
+                f"{phase} traffic start",
+                "traffic response did not include a canonical session",
+                result,
+            )
+        session_id, run_id, _group = validate_started_standard_session(
+            session,
+            descriptor,
+            stage=f"{phase} traffic start",
+        )
+    except AcceptanceError as exc:
+        descriptor["start_error"] = exc.to_record()
+        recovered = recover_standard_start_from_runtime(
+            args,
+            run,
+            descriptor,
+            stage=f"{phase} ambiguous start",
+        )
+        if recovered is not None:
+            raise AcceptanceError(
+                f"{phase} traffic start",
+                "traffic start response was ambiguous; the exact leased session "
+                "was recovered for operator cleanup",
+                {
+                    "start_error": exc.to_record(),
+                    "session_id": descriptor.get("session_id"),
+                },
+            ) from exc
+        raise
+    descriptor.update(
+        {"session_id": session_id, "run_id": run_id, "status": "started"}
+    )
+    run["active_traffic_session_id"] = session_id
+    run["active_traffic_descriptor"] = descriptor
+    return result, descriptor
+
+
+def recover_standard_session_for_cleanup(
+    args: argparse.Namespace,
+    run: dict[str, Any],
+) -> None:
+    if isinstance(run.get("active_traffic_session_id"), str):
+        return
+    attempts = run.get("traffic_start_attempts")
+    if not isinstance(attempts, list):
+        return
+    for descriptor in reversed(attempts):
+        if not isinstance(descriptor, dict) or descriptor.get("status") in {
+            "stopped",
+            "watchdog-stopped",
+        }:
+            continue
+        if recover_standard_start_from_runtime(
+            args,
+            run,
+            descriptor,
+            stage=f"cleanup {descriptor.get('phase') or 'traffic'}",
+        ) is not None:
+            return
+
+
 def stop_traffic(args: argparse.Namespace, run: dict[str, Any], stage: str) -> dict[str, Any]:
     session_id = run.get("active_traffic_session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -929,7 +1587,18 @@ def stop_traffic(args: argparse.Namespace, run: dict[str, Any], stage: str) -> d
                 "response": result,
             },
         )
+    descriptor = run.get("active_traffic_descriptor")
+    session = read_path(result, "data.session")
+    if isinstance(descriptor, dict) and isinstance(session, dict):
+        validate_stopped_standard_session(
+            session,
+            descriptor,
+            expected_session_id=session_id,
+            stage=stage,
+        )
+        descriptor["status"] = "stopped"
     run["active_traffic_session_id"] = None
+    run["active_traffic_descriptor"] = None
     run.setdefault("traffic_stops", []).append({"stage": stage, "result": result})
     return result
 
@@ -1020,27 +1689,14 @@ def run_latency_phase(args: argparse.Namespace, run: dict[str, Any]) -> dict[str
             "another managed traffic session is already marked active",
             {"active_traffic_session_id": run.get("active_traffic_session_id")},
         )
-    start = require_ok(
-        "latency traffic start",
-        request_json(
-            args.base_url,
-            "POST",
-            "/api/trex/traffic/start",
-            {
-                "profile_path": args.latency_profile,
-                "ports": [args.tx_port],
-                "expected_session_id": None,
-                "multiplier": args.latency_multiplier,
-                "duration": -1,
-                "force": True,
-                "confirmation": "start-traffic",
-                "tunables": {},
-            },
-            args.timeout,
-        ),
+    start, descriptor = start_standard_traffic(
+        args,
+        run,
+        phase="latency",
+        profile_path=args.latency_profile,
+        multiplier=args.latency_multiplier,
     )
-    session_id = required_traffic_session_id(start, "latency traffic start")
-    run["active_traffic_session_id"] = session_id
+    session_id = str(descriptor["session_id"])
     phase: dict[str, Any] = {
         "profile": args.latency_profile,
         "tx_port": args.tx_port,
@@ -1049,6 +1705,9 @@ def run_latency_phase(args: argparse.Namespace, run: dict[str, Any]) -> dict[str
         "started_at": utc_now(),
         "start_result": start,
         "session_id": session_id,
+        "traffic_run_id": descriptor["run_id"],
+        "hard_stop_at": descriptor["hard_stop_at"],
+        "hard_stop_window_seconds": run["hard_stop_windows_seconds"]["latency"],
     }
     traffic_active = True
     try:
@@ -1124,31 +1783,23 @@ def run_capture_phase(args: argparse.Namespace, run: dict[str, Any], run_id: str
                 "another managed traffic session is already marked active",
                 {"active_traffic_session_id": run.get("active_traffic_session_id")},
             )
-        start = require_ok(
-            "capture traffic start",
-            request_json(
-                args.base_url,
-                "POST",
-                "/api/trex/traffic/start",
-                {
-                    "profile_path": args.capture_profile,
-                    "ports": [args.tx_port],
-                    "expected_session_id": None,
-                    "multiplier": args.capture_multiplier,
-                    "duration": -1,
-                    "force": True,
-                    "confirmation": "start-traffic",
-                    "tunables": {},
-                },
-                args.timeout,
-            ),
+        start, descriptor = start_standard_traffic(
+            args,
+            run,
+            phase="capture",
+            profile_path=args.capture_profile,
+            multiplier=args.capture_multiplier,
         )
-        session_id = required_traffic_session_id(start, "capture traffic start")
-        run["active_traffic_session_id"] = session_id
+        session_id = str(descriptor["session_id"])
         traffic_active = True
         phase["started_at"] = utc_now()
         phase["start_result"] = start
         phase["session_id"] = session_id
+        phase["traffic_run_id"] = descriptor["run_id"]
+        phase["hard_stop_at"] = descriptor["hard_stop_at"]
+        phase["hard_stop_window_seconds"] = run["hard_stop_windows_seconds"][
+            "capture"
+        ]
         samples, stats_last = sample_stats_until(
             args,
             run,
@@ -1230,18 +1881,180 @@ def run_capture_phase(args: argparse.Namespace, run: dict[str, Any], run_id: str
                 phase["stop_error"] = exc.to_record()
 
 
+def validate_live_port_boundary(
+    payload: dict[str, Any], *, target_ports: list[int], stage: str
+) -> dict[str, Any]:
+    result = require_ok(stage, payload)
+    data = result.get("data")
+    if not isinstance(data, dict):
+        raise AcceptanceError(stage, "ports response did not include object data", payload)
+    announced = data.get("port_ids")
+    if (
+        not isinstance(announced, list)
+        or any(
+            not isinstance(port, int) or isinstance(port, bool)
+            for port in announced
+        )
+        or not set(target_ports).issubset(set(announced))
+    ):
+        raise AcceptanceError(
+            stage,
+            "ports response did not include every selected target port",
+            {"target_ports": target_ports, "port_ids": announced},
+        )
+    raw_records = data.get("ports")
+    if not isinstance(raw_records, list):
+        raise AcceptanceError(stage, "ports response did not include port records", payload)
+    target_set = set(target_ports)
+    selected_records = [
+        record
+        for record in raw_records
+        if isinstance(record, dict)
+        and isinstance(record.get("id"), int)
+        and not isinstance(record.get("id"), bool)
+        and record.get("id") in target_set
+    ]
+    selected_ids = [record.get("id") for record in selected_records]
+    if sorted(selected_ids) != target_ports:
+        raise AcceptanceError(
+            stage,
+            "ports response did not include exactly one record for every selected port",
+            {"target_ports": target_ports, "record_ids": selected_ids},
+        )
+
+    by_port = {record["id"]: record for record in selected_records}
+    active_ports: list[int] = []
+    acquired_ports: list[int] = []
+    owned_ports: dict[int, Any] = {}
+    invalid: dict[int, Any] = {}
+    inactive_statuses = {"", "IDLE", "DOWN", "STREAMS"}
+    for port in target_ports:
+        record = by_port[port]
+        info = record.get("info")
+        status = info.get("status") if isinstance(info, dict) else None
+        normalized_status = status.strip().upper() if isinstance(status, str) else None
+        if normalized_status is None or normalized_status not in inactive_statuses:
+            active_ports.append(port)
+            invalid[port] = record
+        if record.get("acquired") is not False:
+            acquired_ports.append(port)
+            invalid[port] = record
+        if not isinstance(info, dict) or "owner" not in info:
+            owned_ports[port] = "missing"
+            invalid[port] = record
+        else:
+            owner = info["owner"]
+            if owner is not None and (
+                not isinstance(owner, str) or bool(owner.strip())
+            ):
+                owned_ports[port] = owner
+                invalid[port] = record
+    if invalid:
+        raise AcceptanceError(
+            stage,
+            "selected ports were not idle, explicitly unacquired, and unowned",
+            invalid,
+        )
+    return {
+        "target_ports": list(target_ports),
+        "ports_idle": True,
+        "active_ports": active_ports,
+        "ports_unowned": True,
+        "acquired_ports": acquired_ports,
+        "owned_ports": owned_ports,
+    }
+
+
+def validate_runtime_port_boundary(
+    payload: dict[str, Any], *, target_ports: list[int], stage: str
+) -> dict[str, Any]:
+    result = require_ok(stage, payload)
+    data = result.get("data")
+    if not isinstance(data, dict):
+        raise AcceptanceError(
+            stage, "traffic runtime response did not include object data", payload
+        )
+    if data.get("mutation_intent") is not None:
+        raise AcceptanceError(stage, "traffic runtime still had a mutation intent", data)
+    if data.get("live_state_sampled") is not True:
+        raise AcceptanceError(stage, "traffic runtime did not sample live state", data)
+    available = data.get("available_ports")
+    if (
+        not isinstance(available, list)
+        or any(
+            not isinstance(port, int) or isinstance(port, bool)
+            for port in available
+        )
+        or not set(target_ports).issubset(set(available))
+    ):
+        raise AcceptanceError(
+            stage,
+            "traffic runtime did not include every selected target port",
+            {"target_ports": target_ports, "available_ports": available},
+        )
+    records = data.get("port_states")
+    target_set = set(target_ports)
+    selected = [
+        record
+        for record in records
+        if isinstance(record, dict)
+        and isinstance(record.get("port"), int)
+        and not isinstance(record.get("port"), bool)
+        and record.get("port") in target_set
+    ] if isinstance(records, list) else []
+    selected_ids = [record.get("port") for record in selected]
+    if sorted(selected_ids) != target_ports:
+        raise AcceptanceError(
+            stage,
+            "traffic runtime did not include exactly one state for every selected port",
+            {"target_ports": target_ports, "port_state_ids": selected_ids},
+        )
+    by_port = {record["port"]: record for record in selected}
+    invalid = {
+        port: by_port[port]
+        for port in target_ports
+        if by_port[port].get("state") != "stopped"
+        or by_port[port].get("ownership") != "none"
+    }
+    if invalid:
+        raise AcceptanceError(
+            stage, "selected runtime ports were not stopped and unowned", invalid
+        )
+    return {
+        "target_ports": list(target_ports),
+        "runtime_ports_stopped": True,
+        "runtime_ports_unowned": True,
+    }
+
+
 def post_conditions(args: argparse.Namespace) -> dict[str, Any]:
     stats = request_json(args.base_url, "GET", "/api/trex/stats", None, args.timeout)
     capture_status = request_json(args.base_url, "GET", "/api/trex/capture/status", None, args.timeout)
     ports = request_json(args.base_url, "GET", "/api/trex/ports", None, args.timeout)
-    active = active_port_ids(ports if isinstance(ports, dict) else {}).intersection({args.tx_port})
+    runtime = request_json(
+        args.base_url, "GET", "/api/trex/traffic/runtime", None, args.timeout
+    )
+    target_ports = sorted({args.tx_port, args.rx_port})
+    live_boundary = validate_live_port_boundary(
+        ports, target_ports=target_ports, stage="postcondition ports"
+    )
+    runtime_boundary = validate_runtime_port_boundary(
+        runtime, target_ports=target_ports, stage="postcondition traffic runtime"
+    )
     active_recorders = capture_recorder_count(capture_status if isinstance(capture_status, dict) else {})
     return {
         "stats_after_stop": stats,
         "capture_status_after_stop": capture_status,
         "ports_after_stop": ports,
-        "traffic_ports_idle": not active,
-        "active_ports_after_stop": sorted(active),
+        "traffic_runtime_after_stop": runtime,
+        "target_ports": target_ports,
+        "traffic_ports_idle": live_boundary["ports_idle"],
+        "active_ports_after_stop": live_boundary["active_ports"],
+        "ports_unowned": live_boundary["ports_unowned"],
+        "acquired_ports_after_stop": live_boundary["acquired_ports"],
+        "owned_ports_after_stop": live_boundary["owned_ports"],
+        "runtime_ports_stopped": runtime_boundary["runtime_ports_stopped"],
+        "runtime_ports_unowned": runtime_boundary["runtime_ports_unowned"],
         "capture_recorders_after_stop": active_recorders,
     }
 
@@ -1312,8 +2125,20 @@ def report_checks(run: dict[str, Any]) -> list[dict[str, str]]:
         },
         {
             "label": "Stop and cleanup",
-            "status": "pass" if post.get("traffic_ports_idle") is True and post.get("capture_recorders_after_stop") == 0 else "fail",
-            "detail": f"active ports {post.get('active_ports_after_stop') or []}, recorders {post.get('capture_recorders_after_stop', '-')}",
+            "status": "pass" if (
+                post.get("traffic_ports_idle") is True
+                and post.get("ports_unowned") is True
+                and post.get("acquired_ports_after_stop") == []
+                and post.get("runtime_ports_stopped") is True
+                and post.get("runtime_ports_unowned") is True
+                and post.get("capture_recorders_after_stop") == 0
+            ) else "fail",
+            "detail": (
+                f"active ports {post.get('active_ports_after_stop') or []}, "
+                f"acquired ports {post.get('acquired_ports_after_stop') or []}, "
+                f"owned ports {post.get('owned_ports_after_stop') or {}}, "
+                f"recorders {post.get('capture_recorders_after_stop', '-')}"
+            ),
         },
         {
             "label": "Failure state",
@@ -1400,6 +2225,8 @@ def report_markdown(run: dict[str, Any]) -> str:
         ("Capture layer chain", str(capture.get("layer_chain") or "-")),
         ("Saved PCAP", str(capture.get("pcap") or "-")),
         ("Traffic stopped", str(read_path(run, "post_conditions.traffic_ports_idle") is True)),
+        ("Ports unowned", str(read_path(run, "post_conditions.ports_unowned") is True)),
+        ("Runtime unowned", str(read_path(run, "post_conditions.runtime_ports_unowned") is True)),
     ]
     table = "\n".join(["| Field | Value |", "| --- | --- |", *[f"| {field} | {value} |" for field, value in rows]])
     return (
@@ -1415,6 +2242,11 @@ def build_report_archive(run: dict[str, Any]) -> dict[str, Any]:
     checks = report_checks(run)
     conclusion = report_conclusion(run, checks)
     payload = sanitize_report_payload(run)
+    # These fields belong exclusively to the backend runtime authority.  A
+    # report may reference a session through the save-request CAS below, but
+    # it must never provide its own copy of canonical traffic evidence.
+    payload.pop("traffic_session", None)
+    payload.pop("traffic_session_binding", None)
     payload["standard_e2e"] = True
     payload["workflow"] = "standard-e2e"
     payload["known_constraint"] = STANDARD_E2E_CONSTRAINT
@@ -1452,11 +2284,218 @@ def build_report_archive(run: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def latest_completed_traffic_session_id(run: dict[str, Any]) -> str | None:
+    traffic_stops = run.get("traffic_stops")
+    if not isinstance(traffic_stops, list):
+        return None
+    for record in reversed(traffic_stops):
+        session_id = read_path(record, "result.data.session.id")
+        if isinstance(session_id, str) and session_id:
+            return session_id
+    return None
+
+
+def standard_phase_descriptor(
+    run: dict[str, Any],
+    phase: str,
+) -> dict[str, Any] | None:
+    attempts = run.get("traffic_start_attempts")
+    if not isinstance(attempts, list):
+        return None
+    for descriptor in reversed(attempts):
+        if isinstance(descriptor, dict) and descriptor.get("phase") == phase:
+            return descriptor
+    return None
+
+
+def report_traffic_session_binding(
+    args: argparse.Namespace,
+    run: dict[str, Any],
+) -> dict[str, Any] | None:
+    # Failure archives must remain writable even when a later phase replaced,
+    # mutated, or lost an earlier traffic session.  Only passing evidence is
+    # eligible for a backend-owned canonical session binding.
+    if run.get("verdict") != "pass":
+        return None
+
+    expected_session_id = latest_completed_traffic_session_id(run)
+    if expected_session_id is None:
+        raise AcceptanceError(
+            "report traffic session",
+            "passing Standard E2E evidence has no completed traffic session from this run",
+        )
+
+    runtime = require_ok(
+        "report traffic runtime",
+        request_json(
+            args.base_url,
+            "GET",
+            "/api/trex/traffic/runtime",
+            None,
+            args.timeout,
+        ),
+    )
+    session = read_path(runtime, "data.session")
+    if not isinstance(session, dict):
+        raise AcceptanceError(
+            "report traffic session",
+            "traffic runtime did not include the completed session from this run",
+            runtime,
+        )
+
+    session_id = session.get("id")
+    revision = session.get("revision")
+    evidence_version = session.get("evidence_version")
+    state = session.get("state")
+    problems: list[str] = []
+    if session_id != expected_session_id:
+        problems.append(
+            f"expected session {expected_session_id}, observed {session_id or 'none'}"
+        )
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        problems.append("session revision is not a positive integer")
+    if (
+        isinstance(evidence_version, bool)
+        or not isinstance(evidence_version, int)
+        or evidence_version != 1
+    ):
+        problems.append("session evidence_version is not 1")
+    if state != "stopped":
+        problems.append(f"session state is {state or 'missing'}, not stopped")
+    if read_path(runtime, "data.mutation_intent") is not None:
+        problems.append("traffic runtime still has a pending mutation intent")
+    if problems:
+        raise AcceptanceError(
+            "report traffic session",
+            "; ".join(problems),
+            {
+                "expected_session_id": expected_session_id,
+                "runtime": runtime,
+            },
+        )
+
+    descriptor = standard_phase_descriptor(run, "capture")
+    if descriptor is None:
+        raise AcceptanceError(
+            "report traffic session",
+            "passing Standard E2E evidence has no exact capture start descriptor",
+        )
+    validate_stopped_standard_session(
+        session,
+        descriptor,
+        expected_session_id=expected_session_id,
+        stage="report traffic session",
+    )
+
+    validate_runtime_port_boundary(
+        runtime,
+        target_ports=sorted({args.tx_port, args.rx_port}),
+        stage="report traffic runtime boundary",
+    )
+
+    return {
+        "id": session_id,
+        "revision": revision,
+        "evidence_version": evidence_version,
+        "state": state,
+    }
+
+
+def verify_downloaded_report_session(
+    content: str,
+    binding: dict[str, Any] | None,
+    run: dict[str, Any],
+) -> None:
+    try:
+        document = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError(
+            "report download",
+            "downloaded report was not valid JSON",
+            str(exc),
+        ) from exc
+    payload = document.get("payload") if isinstance(document, dict) else None
+    if not isinstance(payload, dict):
+        raise AcceptanceError(
+            "report download",
+            "downloaded report did not include an object payload",
+        )
+
+    if binding is None:
+        reserved = sorted(
+            key
+            for key in ("traffic_session", "traffic_session_binding")
+            if key in payload
+        )
+        if reserved:
+            raise AcceptanceError(
+                "report download",
+                "unbound report unexpectedly included backend-owned traffic session fields",
+                {"reserved_fields": reserved},
+            )
+        return
+
+    session = payload.get("traffic_session")
+    persisted_binding = payload.get("traffic_session_binding")
+    expected_binding = {
+        "id": binding["id"],
+        "revision": binding["revision"],
+        "evidence_version": binding["evidence_version"],
+    }
+    if (
+        not isinstance(session, dict)
+        or session.get("id") != binding["id"]
+        or isinstance(session.get("revision"), bool)
+        or not isinstance(session.get("revision"), int)
+        or session.get("revision") != binding["revision"]
+        or isinstance(session.get("evidence_version"), bool)
+        or not isinstance(session.get("evidence_version"), int)
+        or session.get("evidence_version") != binding["evidence_version"]
+        or session.get("state") != "stopped"
+        or persisted_binding != expected_binding
+    ):
+        raise AcceptanceError(
+            "report download",
+            "downloaded report did not contain the backend-injected canonical traffic session",
+            {
+                "expected_binding": expected_binding,
+                "traffic_session": session,
+                "traffic_session_binding": persisted_binding,
+            },
+        )
+    descriptor = standard_phase_descriptor(run, "capture")
+    if descriptor is None:
+        raise AcceptanceError(
+            "report download",
+            "passing report has no exact capture start descriptor",
+        )
+    validate_stopped_standard_session(
+        session,
+        descriptor,
+        expected_session_id=str(binding["id"]),
+        stage="report download",
+    )
+
+
 def save_report(args: argparse.Namespace, run: dict[str, Any]) -> dict[str, Any]:
     archive = build_report_archive(run)
+    # Refresh immediately before save.  Snapshot reconciliation may advance
+    # the durable revision, so the CAS must come from this response rather
+    # than an earlier start/stop result.
+    binding = report_traffic_session_binding(args, run)
+    save_request = dict(archive)
+    if binding is not None:
+        save_request["traffic_session_id"] = binding["id"]
+        save_request["traffic_session_revision"] = binding["revision"]
     report_save = require_ok(
         "report save",
-        request_json(args.base_url, "POST", "/api/trex/reports/save", archive, args.timeout),
+        request_json(
+            args.base_url,
+            "POST",
+            "/api/trex/reports/save",
+            save_request,
+            args.timeout,
+        ),
     )
     run["report_save"] = report_save
     report_data = report_save.get("data") if isinstance(report_save, dict) else None
@@ -1472,43 +2511,17 @@ def save_report(args: argparse.Namespace, run: dict[str, Any]) -> dict[str, Any]
     if not isinstance(content, str) or str(archive["title"]) not in content:
         raise AcceptanceError("report download", "downloaded report did not contain this run title", download)
     ensure_report_archive_has_no_binary_payloads(content)
+    verify_downloaded_report_session(content, binding, run)
     run["local_report"] = str(write_local_report(Path(args.output_dir), str(saved_name), content))
     return report_save
 
 
 def cleanup(args: argparse.Namespace, run: dict[str, Any]) -> None:
+    recover_standard_session_for_cleanup(args, run)
     active_session_id = run.get("active_traffic_session_id")
     if isinstance(active_session_id, str) and active_session_id:
         try:
-            payload = require_ok(
-                "cleanup traffic stop",
-                request_json(
-                    args.base_url,
-                    "POST",
-                    "/api/trex/traffic/stop",
-                    {
-                        "ports": [args.tx_port],
-                        "confirmation": "stop",
-                        "expected_session_id": active_session_id,
-                    },
-                    args.timeout,
-                ),
-            )
-            observed_session_id = required_traffic_session_id(
-                payload,
-                "cleanup traffic stop",
-            )
-            if observed_session_id != active_session_id:
-                raise AcceptanceError(
-                    "cleanup traffic stop",
-                    "cleanup response belongs to a different managed session",
-                    {
-                        "expected_session_id": active_session_id,
-                        "observed_session_id": observed_session_id,
-                        "response": payload,
-                    },
-                )
-            run["active_traffic_session_id"] = None
+            payload = stop_traffic(args, run, "cleanup traffic stop")
             run.setdefault("cleanup", []).append(
                 {"endpoint": "/api/trex/traffic/stop", "payload": payload}
             )
@@ -1534,6 +2547,8 @@ def cleanup(args: argparse.Namespace, run: dict[str, Any]) -> None:
 
 
 def run_standard_e2e(args: argparse.Namespace) -> dict[str, Any]:
+    # Validate every traffic safety window before any API or hardware action.
+    hard_stop_windows = standard_hard_stop_windows(args)
     generated_at = utc_now()
     run_id = clean_file_timestamp(generated_at)
     config_content = config_content_from_args(args)
@@ -1559,6 +2574,9 @@ def run_standard_e2e(args: argparse.Namespace) -> dict[str, Any]:
         "stats_samples": [],
         "cleanup": [],
         "active_traffic_session_id": None,
+        "active_traffic_descriptor": None,
+        "traffic_start_attempts": [],
+        "hard_stop_windows_seconds": hard_stop_windows,
     }
     try:
         health = request_json(args.base_url, "GET", "/api/health", None, args.timeout)
@@ -1573,12 +2591,46 @@ def run_standard_e2e(args: argparse.Namespace) -> dict[str, Any]:
         refresh_backend_trex_connection(args, run)
         ports = wait_for_ports(args, {args.tx_port, args.rx_port})
         run["ports_before"] = ports
+        target_ports = sorted({args.tx_port, args.rx_port})
+        run["port_boundary_before"] = validate_live_port_boundary(
+            ports,
+            target_ports=target_ports,
+            stage="initial selected port boundary",
+        )
+        runtime_before = request_json(
+            args.base_url,
+            "GET",
+            "/api/trex/traffic/runtime",
+            None,
+            args.timeout,
+        )
+        run["traffic_runtime_before"] = runtime_before
+        run["runtime_boundary_before"] = validate_runtime_port_boundary(
+            runtime_before,
+            target_ports=target_ports,
+            stage="initial traffic runtime boundary",
+        )
         run["latency_phase"] = run_latency_phase(args, run)
         run["capture_phase"] = run_capture_phase(args, run, run_id)
         run["post_conditions"] = post_conditions(args)
         post = run["post_conditions"]
         if not post.get("traffic_ports_idle"):
             raise AcceptanceError("postconditions", "traffic port was still active after stop", post)
+        if post.get("ports_unowned") is not True or post.get("acquired_ports_after_stop") != []:
+            raise AcceptanceError(
+                "postconditions",
+                "selected ports were still acquired or owned after stop",
+                post,
+            )
+        if (
+            post.get("runtime_ports_stopped") is not True
+            or post.get("runtime_ports_unowned") is not True
+        ):
+            raise AcceptanceError(
+                "postconditions",
+                "traffic runtime ports were not stopped and unowned after stop",
+                post,
+            )
         if post.get("capture_recorders_after_stop") != 0:
             raise AcceptanceError("postconditions", "capture recorders were still active after stop", post)
         run["daemon_status_after"] = request_json(args.base_url, "GET", "/api/system/daemon/trex/status", None, args.timeout)

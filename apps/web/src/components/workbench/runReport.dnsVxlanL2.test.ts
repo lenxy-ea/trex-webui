@@ -6,6 +6,7 @@ import {
   ipv4EnvelopeFields,
   ipv6EnvelopeFields,
   it,
+  runReportTrafficSession,
   type ProfileWorkbenchStream
 } from "./runReportTestHarness";
 
@@ -311,7 +312,7 @@ describe("run report builder / DNS VXLAN L2", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:07:00.000Z",
         endedAt: "2026-06-09T00:07:02.000Z",
         profilePath: "dns-dhcp-fe.yaml",
@@ -331,7 +332,7 @@ describe("run report builder / DNS VXLAN L2", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [dnsStream, dhcpStream]
     });
@@ -654,7 +655,7 @@ describe("run report builder / DNS VXLAN L2", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:08:00.000Z",
         endedAt: "2026-06-10T00:08:02.000Z",
         profilePath: "ipv6-dns-fe.yaml",
@@ -674,7 +675,7 @@ describe("run report builder / DNS VXLAN L2", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [dnsStream]
     });
@@ -900,7 +901,7 @@ describe("run report builder / DNS VXLAN L2", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:08:00.000Z",
         endedAt: "2026-06-09T00:08:02.000Z",
         profilePath: "vxlan-vni-fe.yaml",
@@ -920,7 +921,7 @@ describe("run report builder / DNS VXLAN L2", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [vxlanStream]
     });
@@ -1218,7 +1219,7 @@ describe("run report builder / DNS VXLAN L2", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:00.000Z",
         endedAt: "2026-06-09T00:09:02.000Z",
         profilePath: "vxlan-inner-ipv6-fe.yaml",
@@ -1238,7 +1239,7 @@ describe("run report builder / DNS VXLAN L2", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [vxlanStream]
     });
@@ -1435,7 +1436,7 @@ describe("run report builder / DNS VXLAN L2", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:00.000Z",
         endedAt: "2026-06-09T00:09:02.000Z",
         profilePath: "qinq-fe.yaml",
@@ -1455,7 +1456,7 @@ describe("run report builder / DNS VXLAN L2", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [qinqStream]
     });
@@ -1675,7 +1676,7 @@ describe("run report builder / DNS VXLAN L2", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:10:00.000Z",
         endedAt: "2026-06-09T00:10:02.000Z",
         profilePath: "mpls-stack-fe.yaml",
@@ -1695,7 +1696,7 @@ describe("run report builder / DNS VXLAN L2", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [mplsStream]
     });

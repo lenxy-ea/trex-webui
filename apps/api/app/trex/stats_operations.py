@@ -52,6 +52,7 @@ def snapshot(
         for index, port_id in enumerate(port_ids):
             info = port_info[index] if index < len(port_info) else {}
             runtime_info = _port_info_with_runtime_state(client, port_id, info)
+            runtime_info.setdefault("owner", None)
             runtime_info.update(port_attribute_overrides.get(port_id, {}))
             port_acquired = port_id in acquired
             port_records.append(

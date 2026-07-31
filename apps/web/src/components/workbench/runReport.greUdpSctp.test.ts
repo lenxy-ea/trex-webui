@@ -6,6 +6,7 @@ import {
   ipv4EnvelopeFields,
   ipv6EnvelopeFields,
   it,
+  runReportTrafficSession,
   type ProfileWorkbenchStream
 } from "./runReportTestHarness";
 
@@ -147,7 +148,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:40.000Z",
         endedAt: "2026-06-09T00:09:42.000Z",
         profilePath: "gre-header-inner-fe.yaml",
@@ -167,7 +168,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [greStream]
     });
@@ -388,7 +389,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:10:40.000Z",
         endedAt: "2026-06-09T00:10:42.000Z",
         profilePath: "gre-checksum-override.yaml",
@@ -408,7 +409,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [greStream]
     });
@@ -568,7 +569,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:11:40.000Z",
         endedAt: "2026-06-09T00:11:42.000Z",
         profilePath: "ipv6-gre-outer.yaml",
@@ -588,7 +589,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [greStream]
     });
@@ -789,7 +790,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:12:40.000Z",
         endedAt: "2026-06-09T00:12:42.000Z",
         profilePath: "gre-inner-ipv6.yaml",
@@ -809,7 +810,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [greStream]
     });
@@ -990,7 +991,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:10:00.000Z",
         endedAt: "2026-06-09T00:10:02.000Z",
         profilePath: "udp-header-fe.yaml",
@@ -1010,7 +1011,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [udpStream]
     });
@@ -1162,7 +1163,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:10:30.000Z",
         endedAt: "2026-06-09T00:10:32.000Z",
         profilePath: "udp-checksum-fe.yaml",
@@ -1182,7 +1183,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [udpStream]
     });
@@ -1350,7 +1351,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:06:00.000Z",
         endedAt: "2026-06-09T00:06:02.000Z",
         profilePath: "sctp-data-fe.yaml",
@@ -1370,7 +1371,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [sctpStream]
     });
@@ -1567,7 +1568,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:06:00.000Z",
         endedAt: "2026-06-10T00:06:02.000Z",
         profilePath: "ipv6-sctp-data-fe.yaml",
@@ -1587,7 +1588,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [sctpStream]
     });
@@ -1787,7 +1788,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:07:00.000Z",
         endedAt: "2026-06-09T00:07:02.000Z",
         profilePath: "sctp-checksum.yaml",
@@ -1807,7 +1808,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [sctpStream]
     });
@@ -1927,7 +1928,7 @@ describe("run report builder / GRE UDP SCTP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:07:00.000Z",
         endedAt: "2026-06-10T00:07:02.000Z",
         profilePath: "ipv6-sctp-checksum.yaml",
@@ -1947,7 +1948,7 @@ describe("run report builder / GRE UDP SCTP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ipv6SctpStream]
     });

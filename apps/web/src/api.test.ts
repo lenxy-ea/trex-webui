@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acquirePorts,
   applyPortConfiguration,
+  cancelQuickValidation,
   clearApiLogEntries,
   clearTrexStats,
   connectTrex,
@@ -28,6 +29,7 @@ import {
   fetchCaptureStatus,
   fetchPortXstats,
   fetchProfiles,
+  fetchQuickValidation,
   fetchRunReportTrends,
   fetchRunReports,
   fetchSystemOverview,
@@ -45,6 +47,7 @@ import {
   scanPortsIpv6,
   startCapture,
   startDaemonTrex,
+  startQuickValidation,
   stopCapture,
   stopDaemonTrex,
   subscribeApiLogEntries,
@@ -1883,7 +1886,9 @@ describe("daemon API client", () => {
       title: "Run",
       markdown: "# Run",
       payload: { ports: [0, 1] },
-      file_name: "run.json"
+      file_name: "run.json",
+      traffic_session_id: null,
+      traffic_session_revision: null
     });
     await downloadRunReport({ file_name: "run.json" });
 
@@ -1897,7 +1902,9 @@ describe("daemon API client", () => {
           title: "Run",
           markdown: "# Run",
           payload: { ports: [0, 1] },
-          file_name: "run.json"
+          file_name: "run.json",
+          traffic_session_id: null,
+          traffic_session_revision: null
         }),
         method: "POST"
       })
@@ -1908,6 +1915,68 @@ describe("daemon API client", () => {
       expect.objectContaining({
         body: JSON.stringify({ file_name: "run.json" }),
         method: "POST"
+      })
+    );
+  });
+
+  it("uses the typed Quick Validation status and exact CAS command routes", async () => {
+    const status = {
+      ok: true,
+      data: {
+        state_version: 1,
+        state_revision: 0,
+        active: false,
+        recovery_required: false,
+        run: null,
+        reconciliation: "no quick-validation run has been created"
+      },
+      blocker: null,
+      error: null
+    };
+    const fetchMock = vi.fn().mockResolvedValue(stubJsonResponse(status));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await fetchQuickValidation();
+    await startQuickValidation({
+      expected_run_id: null,
+      expected_run_revision: null,
+      group_id: "pair-0",
+      plan_revision: 7,
+      duration_seconds: 10,
+      confirmation: "start-quick-validation"
+    });
+    await cancelQuickValidation({
+      run_id: "11111111-1111-4111-8111-111111111111",
+      run_revision: 4,
+      confirmation: "cancel-quick-validation"
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, "/api/trex/quick-validation");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/trex/quick-validation/start",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          expected_run_id: null,
+          expected_run_revision: null,
+          group_id: "pair-0",
+          plan_revision: 7,
+          duration_seconds: 10,
+          confirmation: "start-quick-validation"
+        })
+      })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "/api/trex/quick-validation/cancel",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          run_id: "11111111-1111-4111-8111-111111111111",
+          run_revision: 4,
+          confirmation: "cancel-quick-validation"
+        })
       })
     );
   });
@@ -1979,7 +2048,7 @@ describe("api request log", () => {
 
   it("does not clone or record high-frequency read-model GET responses", async () => {
     clearApiLogEntries();
-    const responses = Array.from({ length: 6 }, () =>
+    const responses = Array.from({ length: 7 }, () =>
       stubRealJsonResponse({
         ok: true,
         data: {},
@@ -1995,13 +2064,15 @@ describe("api request log", () => {
       .mockResolvedValueOnce(responses[2])
       .mockResolvedValueOnce(responses[3])
       .mockResolvedValueOnce(responses[4])
-      .mockResolvedValueOnce(responses[5]);
+      .mockResolvedValueOnce(responses[5])
+      .mockResolvedValueOnce(responses[6]);
 
     await fetchCaptureStatus();
     await fetchCaptureFiles();
     await fetchRunReports();
     await fetchRunReportTrends(12);
     await fetchProfiles();
+    await fetchQuickValidation();
     await fetchTrafficRuntime();
 
     expect(fetchSpy.mock.calls.map(([path]) => path)).toEqual([
@@ -2010,6 +2081,7 @@ describe("api request log", () => {
       "/api/trex/reports",
       "/api/trex/reports/trends?limit=12",
       "/api/trex/profiles",
+      "/api/trex/quick-validation",
       "/api/trex/traffic/runtime"
     ]);
     for (const cloneSpy of cloneSpies) {

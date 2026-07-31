@@ -236,39 +236,41 @@ describe("Traffic Profiles / Builder Basics", () => {
   });
 
   it("exposes packet length Field Engine target with backend-aligned length writes", async () => {
+    const renderResponse = {
+      ok: true,
+      json: async () => ({
+        ok: true,
+        data: {
+          content: "---\n[]\n",
+          streams: [workbenchStream({ frame_length_type: "Increment", frame_length_min: 128, frame_length_max: 512 })],
+          packet_previews: [
+            {
+              index: 1,
+              name: "stream-1",
+              packet_type: "Ethernet/IPv4/UDP",
+              frame_length: 128,
+              wire_length: 128,
+              binary_base64: "AAAA",
+              hex: "ff ff",
+              hex_lines: [{ offset: "0000", hex: "ff ff", ascii: ".." }],
+              layers: [
+                { name: "Ethernet", fields: { type: "0x0800" } },
+                { name: "IPv4", fields: { source: "16.0.0.1", destination: "48.0.0.1" } },
+                { name: "UDP", fields: { source: 1025, destination: 12 } }
+              ]
+            }
+          ]
+        },
+        blocker: null,
+        error: null
+      })
+    };
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce({ ok: true, json: async () => overview })
       .mockResolvedValueOnce({ ok: true, json: async () => profileCatalog })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          ok: true,
-          data: {
-            content: "---\n[]\n",
-            streams: [workbenchStream({ frame_length_type: "Increment", frame_length_min: 128, frame_length_max: 512 })],
-            packet_previews: [
-              {
-                index: 1,
-                name: "stream-1",
-                packet_type: "Ethernet/IPv4/UDP",
-                frame_length: 128,
-                wire_length: 128,
-                binary_base64: "AAAA",
-                hex: "ff ff",
-                hex_lines: [{ offset: "0000", hex: "ff ff", ascii: ".." }],
-                layers: [
-                  { name: "Ethernet", fields: { type: "0x0800" } },
-                  { name: "IPv4", fields: { source: "16.0.0.1", destination: "48.0.0.1" } },
-                  { name: "UDP", fields: { source: 1025, destination: 12 } }
-                ]
-              }
-            ]
-          },
-          blocker: null,
-          error: null
-        })
-      });
+      .mockResolvedValueOnce(renderResponse)
+      .mockResolvedValueOnce(renderResponse);
     stubFetch(fetchMock);
 
     render(<App />);
@@ -323,7 +325,8 @@ describe("Traffic Profiles / Builder Basics", () => {
         type: "fix_checksum_hw"
       }
     ]);
-  });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  }, 10_000);
 
   it("blocks packet length Field Engine target on protocols without safe length checksum repair", async () => {
     const fetchMock = vi

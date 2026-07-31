@@ -4,6 +4,7 @@ import {
   acquirePorts,
   applyPortConfiguration,
   cancelDaemonTrexReservation,
+  cancelQuickValidation,
   clearTrexStats,
   connectTrex,
   controlTraffic,
@@ -26,6 +27,7 @@ import {
   fetchPortXstats,
   fetchProfileWorkbench,
   fetchProfiles,
+  fetchQuickValidation,
   fetchRunReportTrends,
   fetchRunReports,
   fetchSystemOverview,
@@ -52,6 +54,7 @@ import {
   saveRunReport,
   startCapture,
   startDaemonTrex,
+  startQuickValidation,
   startTraffic,
   setPortAttribute,
   setServiceMode,
@@ -84,6 +87,7 @@ import {
   type ProfileWorkbenchYamlExportResult,
   type ProfileWorkbenchSaveResult,
   type ProfileWorkbenchStream,
+  type QuickValidationStatus,
   type FlowControlMode,
   type PortAttributeName,
   type RunReportDownloadResult,
@@ -104,7 +108,9 @@ import {
   type TrexRunReportTrends,
   type TrexRunReports,
   type TrexStatsSnapshot,
-  type TrafficSession
+  type TrafficRuntimeSnapshot,
+  type TrafficSession,
+  type TrafficStartResult
 } from "./api";
 import { LogDock } from "./components/workbench/LogDock";
 import { StatusFooter } from "./components/workbench/StatusFooter";
@@ -115,6 +121,7 @@ import { FloatingWindow } from "./components/workbench/FloatingWindow";
 import { PreferencesWorkspace } from "./components/workbench/PreferencesWorkspace";
 import { PortControlWorkspace } from "./components/workbench/PortControlWorkspace";
 import type { PortConfigurationDraft } from "./components/workbench/PortConfigurationPanel";
+import type { QuickValidationStartConfirmation } from "./components/workbench/QuickValidationWorkspace";
 import { capturePortSummaryFromStatus } from "./components/workbench/capturePortSummary";
 import { appendCapturePackets } from "./components/workbench/capturePacketBuffer";
 import { displayValue } from "./components/workbench/format";
@@ -134,11 +141,16 @@ import type {
   RunReportTemplateId,
   RunReportTrafficSession
 } from "./components/workbench/runReport";
+import {
+  synchronizeRunReportTrafficSession,
+  trafficProfileByPort
+} from "./components/workbench/trafficRunAuthority";
 import { trexResultDiagnosticMessage } from "./components/workbench/trexDiagnostics";
 import type { LogRow, StatsHistorySample, StatsRow } from "./components/workbench/types";
 import "./styles.css";
 
 type RunReportTools = typeof import("./components/workbench/runReport");
+type ActiveDialog = "connect" | "dashboard" | "profiles" | "capture" | "quick-validation" | "reports" | "daemon" | "preferences" | "about" | null;
 
 function loadRunReportTools() {
   return import("./components/workbench/runReport");
@@ -169,6 +181,11 @@ const RunReportsWorkspace = lazy(() =>
     default: module.RunReportsWorkspace
   }))
 );
+const QuickValidationWorkspace = lazy(() =>
+  import("./components/workbench/QuickValidationWorkspace").then((module) => ({
+    default: module.QuickValidationWorkspace
+  }))
+);
 
 const WORKSPACE_LOADING_FALLBACK = (
   <div aria-label="Loading workspace" aria-live="polite" className="workspace-loading" role="status">
@@ -180,6 +197,8 @@ const STATS_POLL_ACTIVE_MS = 1000;
 const STATS_POLL_BACKGROUND_MS = 5000;
 const OVERVIEW_POLL_ACTIVE_MS = 3000;
 const OVERVIEW_POLL_BACKGROUND_MS = 10000;
+const QUICK_VALIDATION_POLL_MS = 1000;
+const QUICK_VALIDATION_IDLE_POLL_MS = 5000;
 const OPTIMISTIC_TRAFFIC_GRACE_MS = 3000;
 const STATS_HISTORY_RETENTION_MS = 10 * 60 * 1000;
 const STATS_HISTORY_MAX_SAMPLES = 1200;
@@ -2573,7 +2592,7 @@ function commandResultLogMessage(result: TrexResult<Record<string, unknown>>) {
   return `Port command accepted ${displayValue(data)}`;
 }
 
-function trafficStartLogMessage(result: TrexResult<Record<string, unknown>>) {
+function trafficStartLogMessage(result: TrexResult<unknown>) {
   if (!result.ok) {
     const diagnostic = trexResultDiagnosticMessage(result);
     if (diagnostic) {
@@ -2582,18 +2601,19 @@ function trafficStartLogMessage(result: TrexResult<Record<string, unknown>>) {
     return `${result.blocker ?? "traffic_blocked"} ${result.error ?? ""}`.trim();
   }
   const data = result.data;
-  if (!data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
     return "Traffic start accepted";
   }
+  const record = data as Record<string, unknown>;
 
-  const ports = Array.isArray(data.ports) ? data.ports.join(",") : data.ports;
+  const ports = Array.isArray(record.ports) ? record.ports.join(",") : record.ports;
   const portText = ports === null ? " all ports" : ports !== undefined && ports !== "" ? ` ports ${ports}` : "";
-  const rateText = typeof data.multiplier === "string" ? ` (${data.multiplier})` : "";
-  const durationText = typeof data.duration === "number" && data.duration > 0 ? ` duration ${data.duration}s` : "";
+  const rateText = typeof record.multiplier === "string" ? ` (${record.multiplier})` : "";
+  const durationText = typeof record.duration === "number" && record.duration > 0 ? ` duration ${record.duration}s` : "";
   if (portText || rateText || durationText) {
     return `Traffic start accepted${portText}${rateText}${durationText}`;
   }
-  return `Traffic start accepted ${displayValue(data)}`;
+  return `Traffic start accepted ${displayValue(record)}`;
 }
 
 type TrexCommandConfirmation = {
@@ -2869,8 +2889,41 @@ function buildTopologyPortStates(
   ) as Record<number, TopologyPortState>;
 }
 
+function quickValidationIsActive(status: QuickValidationStatus | null | undefined) {
+  const phase = status?.run?.phase;
+  return Boolean(
+    status?.active
+    || status?.recovery_required
+    || phase === "preflight"
+    || phase === "running"
+    || phase === "stopping"
+  );
+}
+
+function quickValidationCancelRetryRevision(
+  result: TrexResult<QuickValidationStatus>,
+  runId: string,
+  attemptedRevision: number
+) {
+  const status = result.data;
+  const run = status?.run;
+  const activePhase = run?.phase === "preflight" || run?.phase === "running" || run?.phase === "stopping";
+  if (
+    result.ok
+    || result.blocker !== "quick_validation_run_conflict"
+    || status?.active !== true
+    || !activePhase
+    || run?.id !== runId
+    || !Number.isInteger(run.revision)
+    || run.revision <= attemptedRevision
+  ) {
+    return null;
+  }
+  return run.revision;
+}
+
 export function App() {
-  const [activeDialog, setActiveDialog] = useState<"connect" | "dashboard" | "profiles" | "capture" | "reports" | "daemon" | "preferences" | "about" | null>(null);
+  const [activeDialog, setActiveDialog] = useState<ActiveDialog>(null);
   const [overview, setOverview] = useState<SystemOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [connectionEventMessage, setConnectionEventMessage] = useState<string | null>(null);
@@ -2898,7 +2951,7 @@ export function App() {
   const [trafficDurationEnabled, setTrafficDurationEnabled] = useState(false);
   const [trafficDurationValue, setTrafficDurationValue] = useState("30");
   const [forceStart] = useState(false);
-  const [startResult, setStartResult] = useState<TrexResult<Record<string, unknown>> | null>(null);
+  const [startResult, setStartResult] = useState<TrexResult<unknown> | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [commandResult, setCommandResult] = useState<TrexResult<Record<string, unknown>> | null>(null);
   const [activeCommand, setActiveCommand] = useState<string | null>(null);
@@ -2936,6 +2989,14 @@ export function App() {
   const runReportSnapshotRequestGenerationRef = useRef(0);
   const runReportTrendsRequestGenerationRef = useRef(0);
   const trafficSessionAuthorityRef = useRef<string | null>(null);
+  const [trafficRuntime, setTrafficRuntime] = useState<TrafficRuntimeSnapshot | null>(null);
+  const [quickValidationResult, setQuickValidationResult] = useState<TrexResult<QuickValidationStatus> | null>(null);
+  const [isQuickValidationLoading, setIsQuickValidationLoading] = useState(false);
+  const [isQuickValidationBusy, setIsQuickValidationBusy] = useState(false);
+  const [quickValidationPollEpoch, setQuickValidationPollEpoch] = useState(0);
+  const quickValidationRequestGenerationRef = useRef(0);
+  const quickValidationCommandActiveRef = useRef(false);
+  const quickValidationStatusAuthorityRef = useRef<QuickValidationStatus | null>(null);
   const [runReportGeneratedAt, setRunReportGeneratedAt] = useState(() => new Date().toISOString());
   const [runReportTemplateId, setRunReportTemplateId] = useState<RunReportTemplateId>("standard");
   const [runReportTools, setRunReportTools] = useState<RunReportTools | null>(null);
@@ -2961,6 +3022,120 @@ export function App() {
   const [isDaemonConfigVersionBusy, setIsDaemonConfigVersionBusy] = useState(false);
   const [apiLogEntries, setApiLogEntries] = useState<ApiLogEntry[]>(() => getApiLogEntries());
   const capturePackets = capturePacketBuffer.packets;
+  const quickValidationActive = isQuickValidationBusy
+    || quickValidationIsActive(quickValidationResult?.data);
+
+  const confirmQuickValidationWorkspaceExit = () => (
+    activeDialog !== "quick-validation"
+    || !quickValidationActive
+    || window.confirm(
+      "Quick Validation is still active. Leaving this workspace will not cancel traffic; "
+      + "the backend safety lease remains in force. Continue?"
+    )
+  );
+
+  const openWorkbenchDialog = (dialog: ActiveDialog) => {
+    if (dialog !== "quick-validation" && !confirmQuickValidationWorkspaceExit()) {
+      return false;
+    }
+    setActiveDialog(dialog);
+    return true;
+  };
+
+  const applyTrafficRuntimeSnapshot = useCallback((snapshot: TrafficRuntimeSnapshot) => {
+    setTrafficRuntime(snapshot);
+    const session = snapshot.session;
+    trafficSessionAuthorityRef.current = session !== null && session.state !== "stopped"
+      ? session.id
+      : null;
+    setTrafficRunSession((current) =>
+      synchronizeRunReportTrafficSession(current, snapshot)
+    );
+  }, []);
+
+  const applyTrafficSessionResponse = useCallback((session: TrafficSession) => {
+    trafficSessionAuthorityRef.current = session.state !== "stopped"
+      ? session.id
+      : null;
+    setTrafficRuntime((current) => current === null
+      ? current
+      : { ...current, session });
+    setTrafficRunSession((current) => ({
+      session,
+      captureCompletedAt: current?.session.id === session.id
+        ? current.captureCompletedAt
+        : null
+    }));
+  }, []);
+
+  const refreshTrafficRuntimeAuthority = useCallback(async () => {
+    try {
+      const result = await fetchTrafficRuntime();
+      if (result.data) {
+        applyTrafficRuntimeSnapshot(result.data);
+      }
+      return result;
+    } catch (caught) {
+      return {
+        ok: false,
+        data: null,
+        blocker: "frontend_request_failed",
+        error: caught instanceof Error ? caught.message : "Unable to load traffic runtime"
+      } satisfies TrexResult<TrafficRuntimeSnapshot>;
+    }
+  }, [applyTrafficRuntimeSnapshot]);
+
+  const applyQuickValidationResult = useCallback((result: TrexResult<QuickValidationStatus>) => {
+    if (result.data) {
+      quickValidationStatusAuthorityRef.current = result.data;
+      setQuickValidationResult(result);
+      return result;
+    }
+    const effectiveResult = !result.ok && quickValidationStatusAuthorityRef.current
+      ? { ...result, data: quickValidationStatusAuthorityRef.current }
+      : result;
+    setQuickValidationResult(effectiveResult);
+    return effectiveResult;
+  }, []);
+
+  const loadQuickValidation = useCallback(async (showLoading = true) => {
+    const requestGeneration = ++quickValidationRequestGenerationRef.current;
+    if (showLoading) {
+      setIsQuickValidationLoading(true);
+    }
+    try {
+      const result = await fetchQuickValidation();
+      if (
+        quickValidationRequestGenerationRef.current === requestGeneration
+        && !quickValidationCommandActiveRef.current
+      ) {
+        return applyQuickValidationResult(result);
+      }
+      return result;
+    } catch (caught) {
+      const result: TrexResult<QuickValidationStatus> = {
+        ok: false,
+        data: null,
+        blocker: "frontend_request_failed",
+        error: caught instanceof Error ? caught.message : "Unable to load Quick Validation"
+      };
+      if (
+        quickValidationRequestGenerationRef.current === requestGeneration
+        && !quickValidationCommandActiveRef.current
+      ) {
+        return applyQuickValidationResult(result);
+      }
+      return result;
+    } finally {
+      if (
+        showLoading
+        && quickValidationRequestGenerationRef.current === requestGeneration
+        && !quickValidationCommandActiveRef.current
+      ) {
+        setIsQuickValidationLoading(false);
+      }
+    }
+  }, [applyQuickValidationResult]);
 
   const refreshDaemonConfigVersions = useCallback(async () => {
     const result = await fetchDaemonConfigVersions();
@@ -3267,10 +3442,18 @@ export function App() {
         }
         return result;
       });
+    const trafficRuntimeRequest = fetchTrafficRuntime()
+      .then((result) => {
+        if (isCurrentRequest() && result.ok && result.data) {
+          applyTrafficRuntimeSnapshot(result.data);
+        }
+        return result;
+      });
     try {
       await Promise.allSettled([
         overviewRequest,
         statsRequest,
+        trafficRuntimeRequest,
         loadCaptureStatus(),
         loadCaptureFiles()
       ]);
@@ -3279,14 +3462,15 @@ export function App() {
         setIsRunReportSnapshotLoading(false);
       }
     }
-  }, [applyStatsResult, loadCaptureFiles, loadCaptureStatus]);
+  }, [applyStatsResult, applyTrafficRuntimeSnapshot, loadCaptureFiles, loadCaptureStatus]);
 
   const refreshWorkbenchLiveState = useCallback(async (ports: number[] | null = null) => {
     setIsStatsLoading(true);
     try {
-      const [overviewResult, statsRefresh] = await Promise.allSettled([
+      const [overviewResult, statsRefresh, trafficRuntimeRefresh] = await Promise.allSettled([
         fetchSystemOverview(),
-        fetchTrexStats(ports)
+        fetchTrexStats(ports),
+        fetchTrafficRuntime()
       ] as const);
 
       if (overviewResult.status === "fulfilled") {
@@ -3310,10 +3494,17 @@ export function App() {
           error: statsRefresh.reason instanceof Error ? statsRefresh.reason.message : "Unable to load stats"
         });
       }
+      if (
+        trafficRuntimeRefresh.status === "fulfilled"
+        && trafficRuntimeRefresh.value.ok
+        && trafficRuntimeRefresh.value.data
+      ) {
+        applyTrafficRuntimeSnapshot(trafficRuntimeRefresh.value.data);
+      }
     } finally {
       setIsStatsLoading(false);
     }
-  }, [applyStatsResult]);
+  }, [applyStatsResult, applyTrafficRuntimeSnapshot]);
 
   useEffect(() => {
     let isActive = true;
@@ -3350,15 +3541,9 @@ export function App() {
         if (
           trafficRuntimeResult.status === "fulfilled"
           && trafficRuntimeResult.value.ok
-          && trafficRuntimeResult.value.data?.session
-          && (
-            trafficRuntimeResult.value.data.session.state === "running"
-            || trafficRuntimeResult.value.data.session.state === "paused"
-            || trafficRuntimeResult.value.data.session.state === "mixed"
-          )
-          && trafficSessionAuthorityRef.current === null
+          && trafficRuntimeResult.value.data
         ) {
-          trafficSessionAuthorityRef.current = trafficRuntimeResult.value.data.session.id;
+          applyTrafficRuntimeSnapshot(trafficRuntimeResult.value.data);
         }
       })
       .finally(() => {
@@ -3370,7 +3555,7 @@ export function App() {
     return () => {
       isActive = false;
     };
-  }, []);
+  }, [applyTrafficRuntimeSnapshot]);
 
   useEffect(() => {
     if (typeof document === "undefined") {
@@ -3388,7 +3573,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if ((!profileStreamsDirty && !trafficPlanDirty) || typeof window === "undefined") {
+    if ((!profileStreamsDirty && !trafficPlanDirty && !quickValidationActive) || typeof window === "undefined") {
       return undefined;
     }
 
@@ -3398,7 +3583,7 @@ export function App() {
     };
     window.addEventListener("beforeunload", warnBeforeUnload);
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
-  }, [profileStreamsDirty, trafficPlanDirty]);
+  }, [profileStreamsDirty, quickValidationActive, trafficPlanDirty]);
 
   useEffect(() => {
     if (activeDialog !== "capture") {
@@ -3421,6 +3606,44 @@ export function App() {
       window.clearInterval(interval);
     };
   }, [activeDialog, loadCaptureFiles, loadCaptureStatus]);
+
+  useEffect(() => {
+    if (activeDialog !== "quick-validation") {
+      return undefined;
+    }
+
+    let isActive = true;
+    let timeoutId: number | undefined;
+
+    const refresh = async (showLoading: boolean) => {
+      if (!isActive || quickValidationCommandActiveRef.current) {
+        return;
+      }
+      const result = await loadQuickValidation(showLoading);
+      if (isActive && !quickValidationCommandActiveRef.current) {
+        const pollDelay = quickValidationIsActive(result.data)
+          ? QUICK_VALIDATION_POLL_MS
+          : QUICK_VALIDATION_IDLE_POLL_MS;
+        timeoutId = window.setTimeout(() => {
+          void refresh(false);
+        }, pollDelay);
+      }
+    };
+    const initialRefreshId = window.setTimeout(() => {
+      void refreshTrafficRuntimeAuthority();
+      void refresh(true);
+    }, 0);
+
+    return () => {
+      isActive = false;
+      quickValidationRequestGenerationRef.current += 1;
+      setIsQuickValidationLoading(false);
+      if (timeoutId !== undefined) {
+        window.clearTimeout(timeoutId);
+      }
+      window.clearTimeout(initialRefreshId);
+    };
+  }, [activeDialog, loadQuickValidation, quickValidationPollEpoch, refreshTrafficRuntimeAuthority]);
 
   useEffect(() => {
     if (activeDialog !== "reports") {
@@ -3510,6 +3733,10 @@ export function App() {
   const topologyPortStates = useMemo(
     () => buildTopologyPortStates(portRecords, statsResult?.data, optimisticTrafficPortIds, overview),
     [optimisticTrafficPortIds, overview, portRecords, statsResult]
+  );
+  const topologyProfileByPort = useMemo(
+    () => trafficProfileByPort(trafficRuntime),
+    [trafficRuntime]
   );
   const hasActivePortStatus = useMemo(
     () => portRecords.some((port) => isActivePortStatus(port.info.status ?? port.info.state)),
@@ -3749,6 +3976,17 @@ export function App() {
           : `${runReportResult.blocker ?? "run_report_blocked"} ${runReportResult.error ?? ""}`.trim()
       });
     }
+    if (quickValidationResult) {
+      const quickRun = quickValidationResult.data?.run;
+      rows.push({
+        level: quickValidationResult.ok
+          ? quickRun?.phase === "fail" ? "Warn" : "Event"
+          : "Warn",
+        message: quickValidationResult.ok
+          ? `Quick Validation ${quickRun?.group.group_id ?? "ready"}: ${quickRun?.phase ?? "ready"}`
+          : `${quickValidationResult.blocker ?? "quick_validation_blocked"} ${quickValidationResult.error ?? ""}`.trim()
+      });
+    }
     if (daemonResult) {
       rows.push({
         level: daemonResult.ok ? "Event" : "Warn",
@@ -3776,6 +4014,7 @@ export function App() {
     hardwareCounterResult,
     overview,
     profileWorkbenchResult,
+    quickValidationResult,
     runReportResult,
     selectedPort?.id,
     startResult,
@@ -4272,6 +4511,9 @@ export function App() {
   };
 
   const handleDisconnect = async () => {
+    if (!confirmQuickValidationWorkspaceExit()) {
+      return;
+    }
     const disconnectResult: TrexResult<TrexDisconnectResult> = await disconnectTrex().catch((caught) => ({
         ok: false,
         data: null,
@@ -4303,6 +4545,7 @@ export function App() {
     setHardwareCounterResult(null);
     setOptimisticTrafficPortIds([]);
     setOptimisticTrafficStartedAt(null);
+    setTrafficRuntime(null);
     setTrafficRunSession(null);
     trafficSessionAuthorityRef.current = null;
     setSelectedPortId(null);
@@ -4360,32 +4603,6 @@ export function App() {
       loadRunReports()
     ]);
   }, [loadRunReportSnapshotInputs, loadRunReports]);
-
-  const completeTrafficRunSession = (
-    endedAt: string,
-    stoppedPorts: number[] | null,
-    stopResult: TrexResult<Record<string, unknown>>
-  ) => {
-    setTrafficRunSession((current) => current
-      ? {
-          ...current,
-          endedAt,
-          ports: current.ports ?? stoppedPorts,
-          stopResult
-        }
-      : {
-          startedAt: endedAt,
-          endedAt,
-          profilePath: profilePath.trim(),
-          ports: stoppedPorts,
-          multiplier: trafficMultiplier.ok ? trafficMultiplier.value : "-",
-          duration: trafficDuration.ok ? trafficDuration.value : -1,
-          tunables: parsedProfileTunables.ok ? parsedProfileTunables.value : {},
-          startResult,
-          stopResult
-        });
-    void refreshRunReportBackingState(endedAt);
-  };
 
   const handleApplyPortConfiguration = async (
     draft: PortConfigurationDraft
@@ -4751,9 +4968,13 @@ export function App() {
         if (stoppedPorts === null || optimisticTrafficPortIds.every((portId) => stoppedPorts.includes(portId))) {
           setOptimisticTrafficStartedAt(null);
         }
-        completeTrafficRunSession(endedAt, stoppedPorts, result);
+        if (commandTrafficSessionState(result.data) === "stopped") {
+          await refreshWorkbenchLiveState(null);
+          void refreshRunReportBackingState(endedAt);
+          return;
+        }
       }
-      void refreshWorkbenchLiveState(null);
+      await refreshWorkbenchLiveState(null);
     }
   };
 
@@ -4781,10 +5002,11 @@ export function App() {
     );
     if (result?.ok) {
       trafficSessionAuthorityRef.current = null;
-      completeTrafficRunSession(new Date().toISOString(), null, result);
+      const endedAt = new Date().toISOString();
       setOptimisticTrafficPortIds([]);
       setOptimisticTrafficStartedAt(null);
-      void refreshWorkbenchLiveState(null);
+      await refreshWorkbenchLiveState(null);
+      void refreshRunReportBackingState(endedAt);
     }
   };
 
@@ -4919,27 +5141,14 @@ export function App() {
       });
       setStartResult(result);
       if (result.ok) {
-        const responseSessionId = commandTrafficSessionId(result.data);
-        if (responseSessionId !== null) {
-          trafficSessionAuthorityRef.current = responseSessionId;
+        if (result.data?.session) {
+          applyTrafficSessionResponse(result.data.session);
         }
-        const startedAt = new Date().toISOString();
         setCapturePacketBuffer({ dropped: 0, packets: [] });
-        setTrafficRunSession({
-          startedAt,
-          endedAt: null,
-          profilePath: profilePath.trim(),
-          ports: normalizedPortIds(parsed.ports, portRecords),
-          multiplier: trafficMultiplier.value,
-          duration: trafficDuration.value,
-          tunables: parsedProfileTunables.value,
-          startResult: result,
-          stopResult: null
-        });
-        setRunReportGeneratedAt(startedAt);
+        setRunReportGeneratedAt(result.data?.session?.started_at ?? new Date().toISOString());
         setOptimisticTrafficPortIds(normalizedPortIds(parsed.ports, portRecords));
         setOptimisticTrafficStartedAt(Date.now());
-        void refreshWorkbenchLiveState(null);
+        await refreshWorkbenchLiveState(null);
       }
     } catch (caught) {
       setStartResult({
@@ -5014,27 +5223,14 @@ export function App() {
       });
       setStartResult(result);
       if (result.ok) {
-        const responseSessionId = commandTrafficSessionId(result.data);
-        if (responseSessionId !== null) {
-          trafficSessionAuthorityRef.current = responseSessionId;
+        if (result.data?.session) {
+          applyTrafficSessionResponse(result.data.session);
         }
-        const startedAt = new Date().toISOString();
         setCapturePacketBuffer({ dropped: 0, packets: [] });
-        setTrafficRunSession({
-          startedAt,
-          endedAt: null,
-          profilePath: profilePath.trim(),
-          ports: null,
-          multiplier: trafficMultiplier.value,
-          duration: trafficDuration.value,
-          tunables: parsedProfileTunables.value,
-          startResult: result,
-          stopResult: null
-        });
-        setRunReportGeneratedAt(startedAt);
+        setRunReportGeneratedAt(result.data?.session?.started_at ?? new Date().toISOString());
         setOptimisticTrafficPortIds(normalizedPortIds(null, portRecords));
         setOptimisticTrafficStartedAt(Date.now());
-        void refreshWorkbenchLiveState(null);
+        await refreshWorkbenchLiveState(null);
       }
     } catch (caught) {
       setStartResult({
@@ -5172,17 +5368,169 @@ export function App() {
   };
 
   const handleOpenCapture = () => {
+    if (!openWorkbenchDialog("capture")) {
+      return;
+    }
     setIsCaptureFilesLoading(true);
     setIsCaptureStatusLoading(true);
-    setActiveDialog("capture");
+  };
+
+  const handleOpenQuickValidation = () => {
+    openWorkbenchDialog("quick-validation");
+  };
+
+  const handleRefreshQuickValidation = async () => {
+    await Promise.all([
+      loadQuickValidation(true),
+      refreshTrafficRuntimeAuthority()
+    ]);
+  };
+
+  const handleStartQuickValidation = async (
+    confirmation: QuickValidationStartConfirmation
+  ) => {
+    setIsQuickValidationBusy(true);
+    let commandFenced = false;
+    try {
+      const [statusResult, runtimeResult] = await Promise.all([
+        loadQuickValidation(false),
+        refreshTrafficRuntimeAuthority()
+      ]);
+      if (!statusResult.ok || !statusResult.data) {
+        return;
+      }
+      if (!runtimeResult.ok || !runtimeResult.data) {
+        applyQuickValidationResult({
+          ok: false,
+          data: statusResult.data,
+          blocker: runtimeResult.blocker ?? "traffic_runtime_unavailable",
+          error: runtimeResult.error ?? "Unable to read the current saved traffic plan"
+        });
+        return;
+      }
+      if (quickValidationIsActive(statusResult.data)) {
+        return;
+      }
+      const currentRun = statusResult.data.run;
+      const observedRunId = currentRun?.id ?? null;
+      const observedRunRevision = currentRun?.revision ?? null;
+      if (
+        runtimeResult.data.plan_revision !== confirmation.planRevision
+        || observedRunId !== confirmation.expectedRunId
+        || observedRunRevision !== confirmation.expectedRunRevision
+      ) {
+        applyQuickValidationResult({
+          ok: false,
+          data: statusResult.data,
+          blocker: "quick_validation_confirmation_stale",
+          error: (
+            "The saved traffic plan or Quick Validation run changed after confirmation; "
+            + "review the refreshed authority and confirm again"
+          )
+        });
+        return;
+      }
+      const group = runtimeResult.data.groups.find(
+        (candidate) => candidate.id === confirmation.groupId
+      );
+      if (!group) {
+        applyQuickValidationResult({
+          ok: false,
+          data: statusResult.data,
+          blocker: "quick_validation_group_changed",
+          error: "The selected saved group changed; refresh Quick Validation and select it again"
+        });
+        return;
+      }
+      quickValidationCommandActiveRef.current = true;
+      quickValidationRequestGenerationRef.current += 1;
+      setIsQuickValidationLoading(false);
+      commandFenced = true;
+      const result = await startQuickValidation({
+        expected_run_id: currentRun?.id ?? null,
+        expected_run_revision: currentRun?.revision ?? null,
+        group_id: group.id,
+        plan_revision: runtimeResult.data.plan_revision,
+        duration_seconds: confirmation.durationSeconds,
+        confirmation: "start-quick-validation"
+      });
+      quickValidationRequestGenerationRef.current += 1;
+      applyQuickValidationResult(result);
+    } catch (caught) {
+      if (commandFenced) {
+        quickValidationRequestGenerationRef.current += 1;
+      }
+      applyQuickValidationResult({
+        ok: false,
+        data: quickValidationStatusAuthorityRef.current,
+        blocker: "frontend_request_failed",
+        error: caught instanceof Error ? caught.message : "Unable to start Quick Validation"
+      });
+    } finally {
+      if (commandFenced) {
+        quickValidationCommandActiveRef.current = false;
+        setQuickValidationPollEpoch((current) => current + 1);
+        await Promise.all([
+          loadQuickValidation(false),
+          refreshTrafficRuntimeAuthority()
+        ]);
+      }
+      setIsQuickValidationBusy(false);
+    }
+  };
+
+  const handleCancelQuickValidation = async (runId: string, runRevision: number) => {
+    quickValidationCommandActiveRef.current = true;
+    quickValidationRequestGenerationRef.current += 1;
+    setIsQuickValidationLoading(false);
+    setIsQuickValidationBusy(true);
+    try {
+      let result = await cancelQuickValidation({
+        run_id: runId,
+        run_revision: runRevision,
+        confirmation: "cancel-quick-validation"
+      });
+      const retryRevision = quickValidationCancelRetryRevision(result, runId, runRevision);
+      if (retryRevision !== null) {
+        result = await cancelQuickValidation({
+          run_id: runId,
+          run_revision: retryRevision,
+          confirmation: "cancel-quick-validation"
+        });
+      }
+      quickValidationRequestGenerationRef.current += 1;
+      applyQuickValidationResult(result);
+      quickValidationCommandActiveRef.current = false;
+      setQuickValidationPollEpoch((current) => current + 1);
+      await refreshTrafficRuntimeAuthority();
+    } catch (caught) {
+      quickValidationRequestGenerationRef.current += 1;
+      applyQuickValidationResult({
+        ok: false,
+        data: quickValidationStatusAuthorityRef.current,
+        blocker: "frontend_request_failed",
+        error: caught instanceof Error ? caught.message : "Unable to cancel Quick Validation"
+      });
+      quickValidationCommandActiveRef.current = false;
+      setQuickValidationPollEpoch((current) => current + 1);
+    } finally {
+      quickValidationCommandActiveRef.current = false;
+      setIsQuickValidationBusy(false);
+    }
+  };
+
+  const handleCloseQuickValidation = () => {
+    openWorkbenchDialog(null);
   };
 
   const handleOpenReports = () => {
+    if (!openWorkbenchDialog("reports")) {
+      return;
+    }
     setRunReportGeneratedAt(new Date().toISOString());
     setIsRunReportsLoading(true);
     setIsRunReportSnapshotLoading(true);
     setIsRunReportTrendsLoading(true);
-    setActiveDialog("reports");
   };
 
   const handleRefreshRunReportSnapshot = async () => {
@@ -5208,7 +5556,9 @@ export function App() {
         title: runReportSnapshot.title,
         markdown: runReportSnapshot.markdown,
         payload: runReportSnapshot.payload,
-        file_name: runReportSnapshot.fileName
+        file_name: runReportSnapshot.fileName,
+        traffic_session_id: reportTrafficSession?.session.id ?? null,
+        traffic_session_revision: reportTrafficSession?.session.revision ?? null
       });
       setRunReportResult(result);
       if (result.ok) {
@@ -5588,7 +5938,9 @@ export function App() {
   };
 
   const handleOpenDaemon = () => {
-    setActiveDialog("daemon");
+    if (!openWorkbenchDialog("daemon")) {
+      return;
+    }
     void loadDaemonOverview();
   };
 
@@ -5829,19 +6181,27 @@ export function App() {
   }, []);
 
   const handleCloseProfiles = () => {
-    if (
-      trafficPlanDirty
-      && !window.confirm("Discard unsaved traffic plan assignments and close Traffic Profiles?")
-    ) {
+    const unsavedChangesMessage = profileStreamsDirty && trafficPlanDirty
+      ? "Discard the unsaved Stream Builder changes and traffic plan assignments and close Traffic Profiles?"
+      : profileStreamsDirty
+        ? "Discard the unsaved Stream Builder changes and close Traffic Profiles?"
+        : trafficPlanDirty
+          ? "Discard unsaved traffic plan assignments and close Traffic Profiles?"
+          : null;
+    if (unsavedChangesMessage && !window.confirm(unsavedChangesMessage)) {
       return;
     }
     setTrafficPlanDirty(false);
     setActiveDialog(null);
   };
 
-  const handleTrafficSessionAuthorityChange = useCallback((sessionId: string) => {
-    trafficSessionAuthorityRef.current = sessionId;
-  }, []);
+  const handleTrafficPlanStartResult = useCallback((result: TrexResult<TrafficStartResult>) => {
+    setStartResult(result);
+    const session = result.ok ? result.data?.session : null;
+    if (session) {
+      applyTrafficSessionResponse(session);
+    }
+  }, [applyTrafficSessionResponse]);
 
   return (
     <>
@@ -5859,14 +6219,15 @@ export function App() {
         onClearStats={handleClearStats}
         isConnected={Boolean(overview?.trex_probe?.ok)}
         onDisconnect={handleDisconnect}
-        onOpenConnect={() => setActiveDialog("connect")}
+        onOpenConnect={() => { openWorkbenchDialog("connect"); }}
         onOpenCapture={handleOpenCapture}
-        onOpenDashboard={() => setActiveDialog("dashboard")}
+        onOpenDashboard={() => { openWorkbenchDialog("dashboard"); }}
         onOpenDaemon={handleOpenDaemon}
-        onOpenProfiles={() => setActiveDialog("profiles")}
-        onOpenPreferences={() => setActiveDialog("preferences")}
+        onOpenProfiles={() => { openWorkbenchDialog("profiles"); }}
+        onOpenPreferences={() => { openWorkbenchDialog("preferences"); }}
+        onOpenQuickValidation={handleOpenQuickValidation}
         onOpenReports={handleOpenReports}
-        onOpenAbout={() => setActiveDialog("about")}
+        onOpenAbout={() => { openWorkbenchDialog("about"); }}
         onPauseTraffic={() => handleTrafficControl("pause")}
         onResumeTraffic={() => handleTrafficControl("resume")}
         onReleasePorts={handleReleasePorts}
@@ -5889,7 +6250,7 @@ export function App() {
           onSelectPort={setSelectedPortId}
           portStates={topologyPortStates}
           portRecords={portRecords}
-          profileLabel={selectedProfile?.relative_path ?? profilePath}
+          profileByPort={topologyProfileByPort}
           selectedPortId={selectedPort?.id ?? null}
         />
 
@@ -5975,7 +6336,8 @@ export function App() {
                     onTrafficDurationEnabledChange={setTrafficDurationEnabled}
                     onTrafficDurationValueChange={setTrafficDurationValue}
                     onTrafficPlanDirtyChange={setTrafficPlanDirty}
-                    onTrafficSessionAuthorityChange={handleTrafficSessionAuthorityChange}
+                    onTrafficRuntimeChange={applyTrafficRuntimeSnapshot}
+                    onTrafficStartResult={handleTrafficPlanStartResult}
                     onTrafficMultiplierUnitChange={setTrafficMultiplierUnit}
                     onTrafficMultiplierValueChange={setTrafficMultiplierValue}
                     onUpdateTraffic={handleUpdateTraffic}
@@ -6035,6 +6397,22 @@ export function App() {
                     onRemoveAllCaptures={handleRemoveAllCaptures}
                     onStartCapture={handleStartCapture}
                     onStopCapture={handleStopCapture}
+                  />
+                </Suspense>
+              </FloatingWindow>
+            ) : null}
+
+            {activeDialog === "quick-validation" ? (
+              <FloatingWindow title="Quick Validation" onClose={handleCloseQuickValidation} size="wide">
+                <Suspense fallback={WORKSPACE_LOADING_FALLBACK}>
+                  <QuickValidationWorkspace
+                    isBusy={isQuickValidationBusy}
+                    isLoading={isQuickValidationLoading}
+                    onCancel={handleCancelQuickValidation}
+                    onRefresh={handleRefreshQuickValidation}
+                    onStart={handleStartQuickValidation}
+                    result={quickValidationResult}
+                    trafficRuntime={trafficRuntime}
                   />
                 </Suspense>
               </FloatingWindow>

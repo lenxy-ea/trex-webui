@@ -1138,9 +1138,13 @@ export type StartTrafficRequest = {
   multiplier: string;
   duration: number;
   force: boolean;
+  total?: boolean;
+  synchronized?: boolean;
+  clear_existing?: boolean;
   confirmation: string | null;
   tunables: Record<string, string | number | boolean>;
   expected_session_id: string | null;
+  hard_stop_at?: string | null;
 };
 
 export type UpdateTrafficRequest = {
@@ -1152,6 +1156,7 @@ export type UpdateTrafficRequest = {
 };
 
 export type TrafficRunState = "running" | "paused" | "stopped" | "mixed" | "unknown";
+export type TrafficPortState = Exclude<TrafficRunState, "mixed">;
 
 export type TrafficPlanGroup = {
   id: string;
@@ -1169,14 +1174,51 @@ export type TrafficPlanGroup = {
 
 export type TrafficSessionGroup = {
   group_id: string | null;
+  run_id: string | null;
+  source: "plan" | "ad_hoc" | null;
+  plan_revision: number | null;
   ports: number[];
   profile_path: string;
+  profile_sha256: string | null;
+  start_multiplier: string | null;
   multiplier: string;
   duration: number;
+  start_force: boolean | null;
+  start_total: boolean | null;
+  start_synchronized: boolean | null;
+  start_clear_existing: boolean | null;
+  started_at: string | null;
+  ended_at: string | null;
+  hard_stop_at: string | null;
   tunables: Record<string, JsonValue>;
+  start_evidence: TrafficMutationEvidence | null;
+  cleanup_evidence: TrafficCleanupEvidence | null;
   state: TrafficRunState;
-  port_states: Record<number, Exclude<TrafficRunState, "mixed">>;
+  port_states: Record<number, TrafficPortState>;
   updated_at: string;
+};
+
+export type TrafficMutationEvidence = {
+  intent_nonce: string;
+  operation: "start" | "stop" | "pause" | "resume" | "update";
+  completion_mode: "direct" | "recovered" | "replayed" | "hard_stop";
+  ports: number[];
+  baseline_port_states: Record<number, TrafficPortState>;
+  desired_port_states: Record<number, TrafficPortState>;
+  baseline_acquired_ports: number[];
+  prepared_at: string;
+  completed_at: string;
+  acquisition_restored: true;
+  wal_cleared: true;
+};
+
+export type TrafficCleanupEvidence = {
+  completion: "operator_stop" | "hard_stop" | "observed";
+  completed_at: string;
+  final_port_states: Record<number, "stopped">;
+  intent_nonce: string | null;
+  acquisition_restored: true | null;
+  wal_cleared: boolean;
 };
 
 export type RuntimeAuthorityIdentity = {
@@ -1190,12 +1232,57 @@ export type RuntimeAuthorityIdentity = {
 
 export type TrafficSession = {
   id: string;
+  revision: number;
+  evidence_version: 1 | null;
   authority: RuntimeAuthorityIdentity;
   state: TrafficRunState;
   started_at: string;
   updated_at: string;
   ended_at: string | null;
   groups: TrafficSessionGroup[];
+  completed_groups: TrafficSessionGroup[];
+  mutation_evidence: TrafficMutationEvidence[];
+  reconciliation: string | null;
+};
+
+export type TrafficMutationIntent = {
+  nonce: string;
+  phase: "prepared" | "cleanup_required";
+  operation: "start" | "stop" | "pause" | "resume" | "update";
+  hardware_stage:
+    | "prepared"
+    | "acquire_intent"
+    | "acquired"
+    | "streams_remove_intent"
+    | "streams_removed"
+    | "profile_add_intent"
+    | "profile_added"
+    | "start_intent"
+    | "start_returned";
+  authority: RuntimeAuthorityIdentity;
+  expected_session_id: string | null;
+  ports: number[];
+  baseline_port_states: Record<number, TrafficPortState>;
+  desired_port_states: Record<number, TrafficPortState>;
+  session_before: TrafficSession | null;
+  start_group: TrafficSessionGroup | null;
+  start_source: "plan" | "ad_hoc" | null;
+  start_plan_revision: number | null;
+  start_profile_sha256: string | null;
+  start_clear_existing: boolean | null;
+  start_force: boolean | null;
+  start_total: boolean | null;
+  start_synchronized: boolean | null;
+  baseline_stream_ids: Record<number, number[]> | null;
+  baseline_acquired_ports: number[];
+  update_multiplier: string | null;
+  update_force: boolean | null;
+  update_total: boolean | null;
+  superseded_intent_nonce: string | null;
+  superseded_intent_operation: "start" | "stop" | "pause" | "resume" | "update" | null;
+  superseded_intent_ports: number[] | null;
+  superseded_reason: string | null;
+  prepared_at: string;
   reconciliation: string | null;
 };
 
@@ -1208,7 +1295,9 @@ export type TrafficPortRuntime = {
 export type TrafficRuntimeSnapshot = {
   plan_revision: number;
   groups: TrafficPlanGroup[];
+  authority: RuntimeAuthorityIdentity;
   session: TrafficSession | null;
+  mutation_intent: TrafficMutationIntent | null;
   config: {
     path: string;
     port_limit: number;
@@ -1220,6 +1309,131 @@ export type TrafficRuntimeSnapshot = {
   reconciliation: string;
 };
 
+export type QuickValidationPhase =
+  | "preflight"
+  | "running"
+  | "stopping"
+  | "pass"
+  | "fail"
+  | "cancelled";
+
+export type QuickValidationPortCounters = {
+  tx_packets: number;
+  rx_packets: number;
+};
+
+export type QuickValidationPortSample = {
+  port: number;
+  absolute_tx_packets: number;
+  absolute_rx_packets: number;
+  tx_packets: number;
+  rx_packets: number;
+  loss_packets: number;
+  loss_ratio: number;
+};
+
+export type QuickValidationSample = {
+  sampled_at: string;
+  ports: QuickValidationPortSample[];
+  total_tx_packets: number;
+  total_rx_packets: number;
+  total_loss_packets: number;
+  total_loss_ratio: number;
+};
+
+export type QuickValidationConfigSnapshot = {
+  path: string;
+  port_limit: number;
+  interfaces: string[];
+};
+
+export type QuickValidationPlanGroupSnapshot = {
+  group_id: string;
+  plan_revision: number;
+  name: string;
+  ports: number[];
+  profile_path: string;
+  profile_sha256: string | null;
+  multiplier: string;
+  plan_duration: number;
+  force: boolean;
+  total: boolean;
+  synchronized: boolean;
+  clear_existing: boolean;
+  tunables: Record<string, JsonValue>;
+};
+
+export type QuickValidationPreflightEvidence = {
+  observed_at: string;
+  runtime_reconciliation: string;
+  live_state_sampled: true;
+  initial_port_states: Record<number, "stopped">;
+  initial_port_ownership: Record<number, "none">;
+  link_states: Record<number, "up">;
+  port_statuses: Record<number, "idle">;
+  baseline_counters: Record<number, QuickValidationPortCounters>;
+};
+
+export type QuickValidationCleanupEvidence = {
+  mode: "not_started" | "operator_stop" | "hard_stop";
+  completed_at: string;
+  traffic_session_revision: number | null;
+  final_port_states: Record<number, "stopped">;
+  intent_nonce: string | null;
+  acquisition_restored: true | null;
+  wal_cleared: true;
+};
+
+export type QuickValidationRun = {
+  id: string;
+  revision: number;
+  process_instance_id: string;
+  phase: QuickValidationPhase;
+  group: QuickValidationPlanGroupSnapshot;
+  config: QuickValidationConfigSnapshot;
+  duration_seconds: number;
+  created_at: string;
+  started_at: string | null;
+  deadline_at: string;
+  watchdog_at: string;
+  ended_at: string | null;
+  traffic_session_id: string | null;
+  traffic_session_revision: number | null;
+  traffic_run_id: string | null;
+  preflight: QuickValidationPreflightEvidence;
+  samples: QuickValidationSample[];
+  pending_terminal: "pass" | "fail" | "cancelled" | null;
+  recovery_required: boolean;
+  failure_code: string | null;
+  failure_detail: string | null;
+  cleanup: QuickValidationCleanupEvidence | null;
+  idle_verified: boolean;
+};
+
+export type QuickValidationStatus = {
+  state_version: 1;
+  state_revision: number;
+  active: boolean;
+  recovery_required: boolean;
+  run: QuickValidationRun | null;
+  reconciliation: string;
+};
+
+export type QuickValidationStartRequest = {
+  expected_run_id: string | null;
+  expected_run_revision: number | null;
+  group_id: string;
+  plan_revision: number;
+  duration_seconds: number;
+  confirmation: "start-quick-validation";
+};
+
+export type QuickValidationCancelRequest = {
+  run_id: string;
+  run_revision: number;
+  confirmation: "cancel-quick-validation";
+};
+
 export type TrafficPlanPutRequest = {
   plan_revision: number;
   groups: TrafficPlanGroup[];
@@ -1229,9 +1443,19 @@ export type TrafficGroupStartRequest = {
   plan_revision: number;
   confirmation: string | null;
   expected_session_id: string | null;
+  hard_stop_at?: string | null;
 };
 
-export type TrafficGroupStartResult = {
+export type TrafficCleanupResult = {
+  attempted: boolean;
+  ok: boolean;
+  action: "stop";
+  ports: number[];
+  blocker: string | null;
+  error: string | null;
+};
+
+export type TrafficStartResult = {
   accepted: boolean;
   profile_path: string;
   ports: number[];
@@ -1244,6 +1468,29 @@ export type TrafficGroupStartResult = {
   tunables: Record<string, JsonValue>;
   stream_ids: JsonValue;
   start_result: string | null;
+  state_persisted: boolean;
+  session?: TrafficSession | null;
+  cleanup?: TrafficCleanupResult | null;
+};
+
+export type TrafficGroupStartResult = TrafficStartResult;
+
+export type TrafficUpdateResult = {
+  accepted: boolean;
+  ports: number[];
+  multiplier: string;
+  force: boolean;
+  total: boolean;
+  update_result: string | null;
+  state_persisted: boolean;
+  session?: TrafficSession | null;
+};
+
+export type TrafficActionResult = {
+  accepted: boolean;
+  result: string | null;
+  action: "stop" | "pause" | "resume";
+  ports: number[];
   state_persisted: boolean;
   session?: TrafficSession | null;
 };
@@ -1551,6 +1798,8 @@ export type RunReportSaveRequest = {
   markdown: string;
   payload: Record<string, unknown>;
   file_name: string | null;
+  traffic_session_id: string | null;
+  traffic_session_revision: number | null;
 };
 
 export type RunReportFileRequest = {
@@ -1629,6 +1878,7 @@ const API_LOG_IGNORED_READ_MODEL_CALLS = new Set([
   "GET /api/trex/capture/files",
   "GET /api/trex/capture/status",
   "GET /api/trex/profiles",
+  "GET /api/trex/quick-validation",
   "GET /api/trex/reports",
   "GET /api/trex/reports/trends",
   "GET /api/trex/stats",
@@ -2491,6 +2741,32 @@ export async function fetchTrafficRuntime(): Promise<TrexResult<TrafficRuntimeSn
   return response.json() as Promise<TrexResult<TrafficRuntimeSnapshot>>;
 }
 
+export async function fetchQuickValidation(): Promise<TrexResult<QuickValidationStatus>> {
+  const response = await apiFetch("/api/trex/quick-validation");
+  if (!response.ok) {
+    throw new Error(`Backend returned HTTP ${response.status}`);
+  }
+  return response.json() as Promise<TrexResult<QuickValidationStatus>>;
+}
+
+export async function startQuickValidation(
+  request: QuickValidationStartRequest
+): Promise<TrexResult<QuickValidationStatus>> {
+  return postTrexCommand<QuickValidationStatus, QuickValidationStartRequest>(
+    "/api/trex/quick-validation/start",
+    request
+  );
+}
+
+export async function cancelQuickValidation(
+  request: QuickValidationCancelRequest
+): Promise<TrexResult<QuickValidationStatus>> {
+  return postTrexCommand<QuickValidationStatus, QuickValidationCancelRequest>(
+    "/api/trex/quick-validation/cancel",
+    request
+  );
+}
+
 export async function replaceTrafficPlan(
   request: TrafficPlanPutRequest
 ): Promise<TrexResult<TrafficRuntimeSnapshot>> {
@@ -2520,14 +2796,17 @@ export async function startTrafficGroup(
 export async function controlTraffic(
   action: "stop" | "pause" | "resume",
   request: TrafficControlRequest
-): Promise<TrexResult<Record<string, unknown>>> {
-  return postTrexCommand(`/api/trex/traffic/${action}`, request);
+): Promise<TrexResult<TrafficActionResult>> {
+  return postTrexCommand<TrafficActionResult, TrafficControlRequest>(
+    `/api/trex/traffic/${action}`,
+    request
+  );
 }
 
-export async function startTraffic(request: StartTrafficRequest): Promise<TrexResult<Record<string, unknown>>> {
-  return postTrexCommand("/api/trex/traffic/start", request);
+export async function startTraffic(request: StartTrafficRequest): Promise<TrexResult<TrafficStartResult>> {
+  return postTrexCommand<TrafficStartResult, StartTrafficRequest>("/api/trex/traffic/start", request);
 }
 
-export async function updateTraffic(request: UpdateTrafficRequest): Promise<TrexResult<Record<string, unknown>>> {
-  return postTrexCommand("/api/trex/traffic/update", request);
+export async function updateTraffic(request: UpdateTrafficRequest): Promise<TrexResult<TrafficUpdateResult>> {
+  return postTrexCommand<TrafficUpdateResult, UpdateTrafficRequest>("/api/trex/traffic/update", request);
 }

@@ -197,6 +197,10 @@
             "16.0.0.1",
             "48.0.0.1"
           ],
+          "ipv6": [
+            "fe80::1",
+            "fe80::2"
+          ],
           "mac": [
             "00:11:22:33:44:50",
             "00:11:22:33:44:51",
@@ -526,6 +530,10 @@
             "16.0.0.1",
             "48.0.0.1"
           ],
+          "ipv6": [
+            "fe80::1",
+            "fe80::2"
+          ],
           "mac": [
             "66:55:44:33:22:11"
           ]
@@ -761,6 +769,9 @@
             "48.0.0.1",
             "48.0.0.250"
           ],
+          "ipv6": [
+            "fe80::1"
+          ],
           "mac": [
             "00:00:00:00:00:f0",
             "00:11:22:33:44:01",
@@ -846,6 +857,10 @@
             "0000:01:00.3",
             "0000:02:00.0",
             "0000:02:00.1",
+            "0000:03:00.0",
+            "0000:03:00.1",
+            "0000:03:00.2",
+            "0000:03:00.3",
             "03:00.0",
             "03:00.1"
           ]
@@ -940,6 +955,18 @@
     },
     {
       "bindings": {
+        "apps/api/tests/test_api_restart_e2e_script.py": {
+          "pci_bdf": [
+            "0000:02:00.0",
+            "0000:02:00.1"
+          ]
+        },
+        "apps/api/tests/test_quick_validation.py": {
+          "pci_bdf": [
+            "0000:01:00.0",
+            "0000:01:00.1"
+          ]
+        },
         "apps/api/tests/test_runtime.py": {
           "pci_bdf": [
             "0000:02:00.0",
@@ -956,14 +983,54 @@
             "0000:02:00.1"
           ]
         },
+        "apps/web/src/App.quickValidation.test.tsx": {
+          "pci_bdf": [
+            "0000:02:00.0",
+            "0000:02:00.1"
+          ]
+        },
+        "apps/web/src/components/workbench/QuickValidationWorkspace.test.tsx": {
+          "pci_bdf": [
+            "0000:02:00.0",
+            "0000:02:00.1",
+            "0000:03:00.0",
+            "0000:03:00.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficRunAuthority.test.ts": {
+          "pci_bdf": [
+            "0000:01:00.0",
+            "0000:01:00.1",
+            "0000:02:00.0",
+            "0000:02:00.1"
+          ]
+        },
         "apps/web/src/components/workbench/trafficProfiles/portPairPlanModel.test.ts": {
           "pci_bdf": [
             "0000:01:00.0",
             "0000:01:00.1"
           ]
+        },
+        "deploy/tests/release_transaction_test.py": {
+          "pci_bdf": [
+            "0000:01:00.0"
+          ]
         }
       },
-      "reason": "Synthetic port identifiers used only by runtime and pairing tests."
+      "reason": "Synthetic port identifiers used only by runtime, validation, pairing, and release-transaction tests."
+    },
+    {
+      "bindings": {
+        "scripts/tests/public_source_test.sh": {
+          "ipv4": [
+            "10.23.45.67"
+          ],
+          "ipv6": [
+            "::ffff:10.23.45.67"
+          ]
+        }
+      },
+      "reason": "Private-range literals are deterministic negative fixtures for the public-source scanner itself."
     }
   ],
   "generated_scopes": [

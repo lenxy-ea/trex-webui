@@ -54,10 +54,11 @@ if [[ "$ALLOW_DIRTY" -eq 0 ]] && [[ -n "$(git -C "$PROJECT_ROOT" status --porcel
 fi
 
 version="$(
-  sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-    "$PROJECT_ROOT/package.json" | head -1
+  git -C "$PROJECT_ROOT" show HEAD:package.json |
+    sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+    head -1
 )"
-[[ -n "$version" ]] || die "unable to read package version"
+[[ -n "$version" ]] || die "unable to read package version from HEAD"
 commit="$(git -C "$PROJECT_ROOT" rev-parse --short=12 HEAD)"
 source_epoch="$(git -C "$PROJECT_ROOT" show -s --format=%ct HEAD)"
 archive_name="trex-webui-${version}-source-${commit}"

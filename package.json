@@ -1,7 +1,7 @@
 {
   "name": "trex-webui",
   "private": true,
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "description": "Modern WebUI for Cisco TRex",
   "license": "Apache-2.0",
   "packageManager": "npm@11.13.0",
@@ -15,6 +15,8 @@
     "test:api": ".venv/bin/python -m pytest apps/api/tests",
     "acceptance:trex": ".venv/bin/python scripts/trex_real_acceptance.py",
     "e2e:standard": ".venv/bin/python scripts/trex_standard_e2e.py",
+    "e2e:six-port": ".venv/bin/python scripts/trex_six_port_e2e.py",
+    "e2e:api-restart": ".venv/bin/python scripts/trex_api_restart_e2e.py",
     "verify:major": "scripts/verify_major_change.sh",
     "test:web": "scripts/npmw --prefix apps/web test",
     "test:web:shard": "scripts/npmw --prefix apps/web test -- --shard",

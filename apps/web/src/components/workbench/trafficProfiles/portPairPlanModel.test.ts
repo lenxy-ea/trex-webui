@@ -33,7 +33,16 @@ function runtime(
   return {
     plan_revision: 4,
     groups: [group],
+    authority: {
+      host: "127.0.0.1",
+      sync_port: 4501,
+      async_port: 4500,
+      scapy_port: 4507,
+      daemon_supervisor: "systemd",
+      generation: "11111111-1111-4111-8111-111111111111"
+    },
     session: null,
+    mutation_intent: null,
     config: {
       path: "/var/lib/trex-webui/trex_cfg.yaml",
       port_limit: 2,
@@ -73,6 +82,8 @@ describe("portPairPlanModel", () => {
     const snapshot = runtime({
       session: {
         id: "session-123456789",
+        revision: 1,
+        evidence_version: null,
         authority: {
           host: "127.0.0.1",
           sync_port: 4501,
@@ -86,14 +97,30 @@ describe("portPairPlanModel", () => {
         updated_at: "2026-07-30T00:00:01Z",
         ended_at: null,
         reconciliation: "owned",
+        completed_groups: [],
+        mutation_evidence: [],
         groups: [
           {
             group_id: "pair-0",
+            run_id: null,
+            source: null,
+            plan_revision: null,
             ports: [0, 1],
             profile_path: group.profile_path,
+            profile_sha256: null,
+            start_multiplier: null,
             multiplier: "1",
             duration: -1,
+            start_force: null,
+            start_total: null,
+            start_synchronized: null,
+            start_clear_existing: null,
+            started_at: null,
+            ended_at: null,
+            hard_stop_at: null,
             tunables: {},
+            start_evidence: null,
+            cleanup_evidence: null,
             state: "running",
             port_states: { 0: "running", 1: "running" },
             updated_at: "2026-07-30T00:00:01Z"

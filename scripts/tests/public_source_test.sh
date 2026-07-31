@@ -34,10 +34,30 @@ mkdir -p "$SAFE_ROOT/docs" "$SAFE_ROOT/examples"
 printf '%s\n' \
   'Local API: 127.0.0.1' \
   'Documentation peer: 192.0.2.1' \
+  'Documentation IPv6 peer: 2001:db8::1' \
+  'IPv6 loopback: ::1' \
   'Unspecified MAC: 00:00:00:00:00:00' \
   >"$SAFE_ROOT/README.md"
 printf 'port_limit: 0\ninterfaces: []\n' >"$SAFE_ROOT/examples/trex_cfg.yaml"
 python3 "$PROJECT_ROOT/scripts/check_public_source.py" "$SAFE_ROOT" >/dev/null
+
+IPV6_ROOT="$TEST_ROOT/private-ipv6"
+mkdir -p "$IPV6_ROOT/src"
+printf 'MANAGEMENT_ADDRESS = "%s%s"\n' "fd12:3456:" "789a::10" \
+  >"$IPV6_ROOT/src/settings.py"
+expect_failure "outside the exact source-scope values" \
+  python3 "$PROJECT_ROOT/scripts/check_public_source.py" "$IPV6_ROOT"
+
+MAPPED_IPV6_ROOT="$TEST_ROOT/private-ipv4-mapped-ipv6"
+mkdir -p "$MAPPED_IPV6_ROOT/src"
+printf 'MANAGEMENT_ADDRESS = "%s%s"\n' "::ffff:a17:" "2d43" \
+  >"$MAPPED_IPV6_ROOT/src/settings.py"
+expect_failure "IPv6 address '::ffff:10.23.45.67'" \
+  python3 "$PROJECT_ROOT/scripts/check_public_source.py" "$MAPPED_IPV6_ROOT"
+printf 'EXPANDED_ADDRESS = "%s%s"\n' "0:0:0:0:0:ffff:a17:" "2d43" \
+  >"$MAPPED_IPV6_ROOT/src/settings.py"
+expect_failure "IPv6 address '::ffff:10.23.45.67'" \
+  python3 "$PROJECT_ROOT/scripts/check_public_source.py" "$MAPPED_IPV6_ROOT"
 
 PRIVATE_ROOT="$TEST_ROOT/private-address"
 mkdir -p "$PRIVATE_ROOT/src"
@@ -67,10 +87,12 @@ expect_failure "outside the exact source-scope values" \
 POLICY_ROOT="$TEST_ROOT/policy"
 mkdir -p "$POLICY_ROOT/tests"
 fixture_ipv4="10.23.""45.67"
+fixture_ipv6="fd12:3456:""789a::10"
 fixture_mac="0a:16:3e:""aa:bb:cc"
 fixture_bdf="0000:81:""00.0"
-printf 'peer: %s%s\nadapter: %s%s\ninterface: %s%s\n' \
+printf 'peer: %s%s\npeer6: %s%s\nadapter: %s%s\ninterface: %s%s\n' \
   "10.23." "45.67" \
+  "fd12:3456:" "789a::10" \
   "0a:16:3e:" "aa:bb:cc" \
   "0000:81:" "00.0" \
   >"$POLICY_ROOT/tests/fixture.txt"
@@ -82,6 +104,7 @@ printf '%s\n' \
   '      "bindings": {' \
   '        "tests/fixture.txt": {' \
   "          \"ipv4\": [\"$fixture_ipv4\"]," \
+  "          \"ipv6\": [\"$fixture_ipv6\"]," \
   "          \"mac\": [\"$fixture_mac\"]," \
   "          \"pci_bdf\": [\"$fixture_bdf\"]" \
   '        }' \
@@ -240,5 +263,56 @@ mkdir -p "$INTERNAL_ROOT/.pensieve"
 printf 'internal\n' >"$INTERNAL_ROOT/.pensieve/note.md"
 expect_failure "internal-only path" \
   python3 "$PROJECT_ROOT/scripts/check_public_source.py" "$INTERNAL_ROOT"
+
+NESTED_INTERNAL_ROOT="$TEST_ROOT/nested-internal"
+mkdir -p \
+  "$NESTED_INTERNAL_ROOT/sub/.agents" \
+  "$NESTED_INTERNAL_ROOT/sub/.logs" \
+  "$NESTED_INTERNAL_ROOT/sub/.pensieve"
+printf 'internal\n' >"$NESTED_INTERNAL_ROOT/sub/.agents/note.md"
+printf 'internal\n' >"$NESTED_INTERNAL_ROOT/sub/.logs/session.txt"
+printf 'internal\n' >"$NESTED_INTERNAL_ROOT/sub/.pensieve/note.md"
+printf 'internal\n' >"$NESTED_INTERNAL_ROOT/sub/AGENTS.md"
+printf 'internal\n' >"$NESTED_INTERNAL_ROOT/sub/CLAUDE.md"
+expect_failure "internal-only path" \
+  python3 "$PROJECT_ROOT/scripts/check_public_source.py" "$NESTED_INTERNAL_ROOT"
+
+RUNTIME_STATE_ROOT="$TEST_ROOT/runtime-state"
+mkdir -p "$RUNTIME_STATE_ROOT/nested"
+printf '{}\n' >"$RUNTIME_STATE_ROOT/nested/runtime-state.json"
+printf '{}\n' \
+  >"$RUNTIME_STATE_ROOT/nested/runtime-state-quick-validation.json"
+printf '{}\n' >"$RUNTIME_STATE_ROOT/nested/.runtime-state.json.fixture"
+printf '{}\n' \
+  >"$RUNTIME_STATE_ROOT/nested/.runtime-state-quick-validation.json.fixture"
+expect_failure "runtime or credential artifact" \
+  python3 "$PROJECT_ROOT/scripts/check_public_source.py" "$RUNTIME_STATE_ROOT"
+
+EXPORT_ROOT="$TEST_ROOT/export-version-authority"
+mkdir -p "$EXPORT_ROOT/scripts"
+cp "$PROJECT_ROOT/scripts/export_public_source.sh" "$EXPORT_ROOT/scripts/"
+cp "$PROJECT_ROOT/scripts/check_public_source.py" "$EXPORT_ROOT/scripts/"
+chmod 0755 "$EXPORT_ROOT/scripts/export_public_source.sh"
+printf '{"version":"1.2.3"}\n' >"$EXPORT_ROOT/package.json"
+printf 'fixture source\n' >"$EXPORT_ROOT/README.md"
+git -C "$EXPORT_ROOT" init --quiet
+git -C "$EXPORT_ROOT" add --all
+git -C "$EXPORT_ROOT" \
+  -c user.name='Public Source Test' \
+  -c user.email='public-source-test@example.invalid' \
+  commit --quiet -m 'fixture source'
+export_commit="$(git -C "$EXPORT_ROOT" rev-parse --short=12 HEAD)"
+printf '{"version":"9.9.9-dirty"}\n' >"$EXPORT_ROOT/package.json"
+"$EXPORT_ROOT/scripts/export_public_source.sh" \
+  --allow-dirty \
+  --output-dir "$EXPORT_ROOT/output" >/dev/null
+export_archive="$EXPORT_ROOT/output/trex-webui-1.2.3-source-$export_commit.tar.gz"
+[[ -f "$export_archive" ]] || fail "dirty export did not use the HEAD version"
+[[ ! -e "$EXPORT_ROOT/output/trex-webui-9.9.9-dirty-source-$export_commit.tar.gz" ]] || \
+  fail "dirty export used the working-tree version for a HEAD archive"
+tar -xOf "$export_archive" \
+  "trex-webui-1.2.3-source-$export_commit/package.json" |
+  grep -Fqx '{"version":"1.2.3"}' || \
+  fail "dirty export archive did not contain the committed package metadata"
 
 printf 'Public source validation tests passed.\n'

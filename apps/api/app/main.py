@@ -9,7 +9,7 @@ from typing import Literal, Optional, Union
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.background import BackgroundTask
 
 from app.core.settings import (
@@ -25,6 +25,7 @@ from app.trex.api_contracts import (
     CaptureRemoveResultResponse,
     CaptureStartResultResponse,
     CaptureStatusResultResponse,
+    QuickValidationResultResponse,
     SystemOverviewResponse,
     TrexConnectResponse,
     TrexDisconnectResultResponse,
@@ -69,6 +70,13 @@ from app.trex.capture_requests import (
     CAPTURE_SNAPLEN_MAX,
 )
 from app.trex.result import TrexCallResult, public_result_payload
+from app.trex.quick_validation import (
+    QUICK_VALIDATION_CANCEL_CONFIRMATION,
+    QUICK_VALIDATION_CONFIRMATION,
+    QuickValidationCancelRequest,
+    QuickValidationStartRequest,
+    get_quick_validation_authority,
+)
 from app.trex.runtime_authority import RuntimeAuthorityProvider
 from app.trex.runtime_mutation import runtime_mutation_fence
 from app.trex.runtime_state import RuntimeStateError, RuntimeStateStore
@@ -269,6 +277,18 @@ class RunReportSaveRequest(BaseModel):
     markdown: str = Field(max_length=RUN_REPORT_MARKDOWN_MAX_CHARS)
     payload: dict[str, object] = Field(default_factory=dict)
     file_name: Optional[str] = Field(default=None, max_length=128)
+    traffic_session_id: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    traffic_session_revision: Optional[int] = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def traffic_session_binding_must_be_complete(self) -> "RunReportSaveRequest":
+        if (self.traffic_session_id is None) != (
+            self.traffic_session_revision is None
+        ):
+            raise ValueError(
+                "traffic_session_id and traffic_session_revision must be supplied together"
+            )
+        return self
 
 
 class StrictTrafficRequest(BaseModel):
@@ -1828,6 +1848,8 @@ def save_trex_run_report(
             markdown=request.markdown,
             payload=request.payload,
             file_name=request.file_name,
+            traffic_session_id=request.traffic_session_id,
+            traffic_session_revision=request.traffic_session_revision,
         )
     )
 
@@ -1838,6 +1860,64 @@ def download_trex_run_report(
     service: RealStlClientService = Depends(get_stl_service),
 ) -> dict[str, object]:
     return result_payload(service.download_run_report(file_name=request.file_name))
+
+
+@app.get(
+    "/api/trex/quick-validation",
+    response_model=QuickValidationResultResponse,
+    response_model_exclude_unset=True,
+)
+def quick_validation_status(
+    service: RealStlClientService = Depends(get_stl_service),
+) -> dict[str, object]:
+    return result_payload(get_quick_validation_authority(service).status())
+
+
+@app.post(
+    "/api/trex/quick-validation/start",
+    response_model=QuickValidationResultResponse,
+    response_model_exclude_unset=True,
+)
+def start_quick_validation(
+    request: QuickValidationStartRequest,
+    service: RealStlClientService = Depends(get_stl_service),
+) -> dict[str, object]:
+    if (
+        get_environment().require_confirmation
+        and request.confirmation != QUICK_VALIDATION_CONFIRMATION
+    ):
+        return confirmation_blocker(QUICK_VALIDATION_CONFIRMATION)
+    return result_payload(
+        get_quick_validation_authority(service).start(
+            expected_run_id=request.expected_run_id,
+            expected_run_revision=request.expected_run_revision,
+            group_id=request.group_id,
+            plan_revision=request.plan_revision,
+            duration_seconds=request.duration_seconds,
+        )
+    )
+
+
+@app.post(
+    "/api/trex/quick-validation/cancel",
+    response_model=QuickValidationResultResponse,
+    response_model_exclude_unset=True,
+)
+def cancel_quick_validation(
+    request: QuickValidationCancelRequest,
+    service: RealStlClientService = Depends(get_stl_service),
+) -> dict[str, object]:
+    if (
+        get_environment().require_confirmation
+        and request.confirmation != QUICK_VALIDATION_CANCEL_CONFIRMATION
+    ):
+        return confirmation_blocker(QUICK_VALIDATION_CANCEL_CONFIRMATION)
+    return result_payload(
+        get_quick_validation_authority(service).cancel(
+            run_id=request.run_id,
+            run_revision=request.run_revision,
+        )
+    )
 
 
 @app.get(

@@ -6,6 +6,7 @@ import {
   ipv4EnvelopeFields,
   ipv6EnvelopeFields,
   it,
+  runReportTrafficSession,
   type ProfileWorkbenchStream
 } from "./runReportTestHarness";
 
@@ -124,7 +125,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:07:00.000Z",
         endedAt: "2026-06-09T00:07:02.000Z",
         profilePath: "ipv4-header-fe.yaml",
@@ -144,7 +145,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ipv4Stream]
     });
@@ -315,7 +316,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:30.000Z",
         endedAt: "2026-06-09T00:09:32.000Z",
         profilePath: "ipv4-l3-only-fe.yaml",
@@ -335,7 +336,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ipv4Stream]
     });
@@ -499,7 +500,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:01:00.000Z",
         endedAt: "2026-06-10T00:01:02.000Z",
         profilePath: "ethernet-mac-fe.yaml",
@@ -519,7 +520,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ethernetStream]
     });
@@ -746,7 +747,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:00.000Z",
         endedAt: "2026-06-09T00:09:02.000Z",
         profilePath: "ipv4-checksum.yaml",
@@ -766,7 +767,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ipv4Stream]
     });
@@ -912,7 +913,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:08:00.000Z",
         endedAt: "2026-06-09T00:08:02.000Z",
         profilePath: "ipv6-header-fe.yaml",
@@ -932,7 +933,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ipv6Stream]
     });
@@ -1096,7 +1097,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:08:20.000Z",
         endedAt: "2026-06-10T00:08:22.000Z",
         profilePath: "ipv6-udp-port-fe.yaml",
@@ -1116,7 +1117,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [udpStream]
     });
@@ -1286,7 +1287,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:09:20.000Z",
         endedAt: "2026-06-10T00:09:22.000Z",
         profilePath: "ipv6-udp-checksum-fe.yaml",
@@ -1306,7 +1307,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [udpStream]
     });
@@ -1451,7 +1452,7 @@ describe("run report builder / IP and Ethernet", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:00.000Z",
         endedAt: "2026-06-09T00:09:02.000Z",
         profilePath: "ipv6-l3-only-fe.yaml",
@@ -1471,7 +1472,7 @@ describe("run report builder / IP and Ethernet", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ipv6Stream]
     });

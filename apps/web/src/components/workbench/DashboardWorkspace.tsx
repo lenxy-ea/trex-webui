@@ -41,7 +41,7 @@ type LatencyMode = "Window" | "Histogram";
 type DashboardWorkspaceProps = {
   isStatsLoading: boolean;
   portRecords: TrexPortRecord[];
-  startResult: TrexResult<Record<string, unknown>> | null;
+  startResult: TrexResult<unknown> | null;
   statsHistory: StatsHistorySample[];
   statsResult: TrexResult<TrexStatsSnapshot> | null;
   onClearStats: () => void;
@@ -290,7 +290,7 @@ function historyTrendIssues(statsHistory: StatsHistorySample[]) {
 }
 
 function dashboardHealth(
-  startResult: TrexResult<Record<string, unknown>> | null,
+  startResult: TrexResult<unknown> | null,
   statsResult: TrexResult<TrexStatsSnapshot> | null,
   statsData: TrexStatsSnapshot | null | undefined,
   statsHistory: StatsHistorySample[],

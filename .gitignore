@@ -18,6 +18,13 @@ __pycache__/
 *.pcapng
 captures/
 reports/
+runtime-state.json
+runtime-state-quick-validation.json
+.runtime-state.json.*
+.runtime-state-quick-validation.json.*
+/current
+/previous
+/releases/
 .references/
 .tools/
 profiles/

@@ -7,8 +7,10 @@ import shutil
 import stat
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -28,6 +30,7 @@ README = PROJECT_ROOT / "README.md"
 DEVELOPMENT_DOC = PROJECT_ROOT / "docs" / "DEVELOPMENT.md"
 NGINX_DEPLOYMENT_DOC = PROJECT_ROOT / "docs" / "NGINX_DEPLOYMENT.md"
 ARCHIVE_SAFETY_SCRIPT = PROJECT_ROOT / "deploy" / "archive_safety.py"
+RELEASE_CONTRACT_SCRIPT = PROJECT_ROOT / "scripts" / "release_contract.py"
 PACKAGE_SCRIPT = PROJECT_ROOT / "deploy" / "package.sh"
 
 
@@ -43,6 +46,42 @@ def load_script_module():
 
 
 standard_e2e = load_script_module()
+
+
+def test_source_identity_ignores_versioned_runtime_state_at_checkout_root(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "tests@trex-webui.invalid"],
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "TRex WebUI tests"],
+        cwd=repository,
+        check=True,
+    )
+    (repository / ".gitignore").write_text(
+        "/current\n/previous\n/releases/\n",
+        encoding="utf-8",
+    )
+    (repository / "source.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", ".gitignore", "source.py"], cwd=repository, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repository, check=True)
+    before = standard_e2e.compute_git_source_identity(repository)
+
+    releases = repository / "releases"
+    (releases / f"sha256-{'a' * 64}").mkdir(parents=True)
+    (releases / f"sha256-{'a' * 64}" / "runtime.txt").write_text("runtime\n", encoding="utf-8")
+    (repository / "current").symlink_to(f"releases/sha256-{'a' * 64}")
+    (repository / "previous").symlink_to(f"releases/sha256-{'b' * 64}")
+
+    after = standard_e2e.compute_git_source_identity(repository)
+
+    assert after == before
 
 
 def test_source_identity_normalizes_checkout_umask(tmp_path: Path) -> None:
@@ -90,6 +129,9 @@ def write_test_release_manifest(project_root: Path) -> dict[str, object]:
     archive_script = project_root / "deploy" / "archive_safety.py"
     archive_script.parent.mkdir(parents=True)
     shutil.copy2(ARCHIVE_SAFETY_SCRIPT, archive_script)
+    release_contract_script = project_root / "scripts" / "release_contract.py"
+    release_contract_script.parent.mkdir(parents=True)
+    shutil.copy2(RELEASE_CONTRACT_SCRIPT, release_contract_script)
     app_source = project_root / "apps" / "api" / "app" / "main.py"
     app_source.parent.mkdir(parents=True)
     app_source.write_text("APP_VERSION = 'test-release'\n", encoding="utf-8")
@@ -118,6 +160,16 @@ def write_test_release_manifest(project_root: Path) -> dict[str, object]:
         "git_dirty": False,
         "source_digest": source_digest,
         "source_identity": source_identity,
+        "release_repository": None,
+        "release_ref": None,
+        "signer_workflow": None,
+        "release_provenance": {
+            "schema": "trex-webui-release-provenance/v1",
+            "kind": "local-build",
+            "publishable": False,
+            "source_sha": git_sha,
+            "source_dirty": False,
+        },
         "payload_identity": {
             "algorithm": archive_safety.PAYLOAD_IDENTITY_ALGORITHM,
             "digest": payload_digest,
@@ -320,6 +372,777 @@ def test_stop_traffic_rejects_missing_or_mismatched_session_id(monkeypatch) -> N
     assert run["active_traffic_session_id"] == "session-old"
 
 
+def selected_ports_payload() -> dict[str, object]:
+    return {
+        "ok": True,
+        "data": {
+            "port_ids": [0, 1, 2, 3],
+            "ports": [
+                {
+                    "id": port,
+                    "acquired": False,
+                    "info": {"status": "IDLE", "link": "UP", "owner": None},
+                }
+                for port in range(4)
+            ],
+        },
+    }
+
+
+def selected_runtime_payload() -> dict[str, object]:
+    return {
+        "ok": True,
+        "data": {
+            "plan_revision": 1,
+            "groups": [],
+            "authority": standard_runtime_authority(),
+            "session": None,
+            "mutation_intent": None,
+            "config": {
+                "path": "/etc/trex_cfg.yaml",
+                "port_limit": 4,
+                "interfaces": [
+                    "0000:03:00.0",
+                    "0000:03:00.1",
+                    "0000:03:00.2",
+                    "0000:03:00.3",
+                ],
+            },
+            "available_ports": [0, 1, 2, 3],
+            "port_states": [
+                {"port": port, "state": "stopped", "ownership": "none"}
+                for port in range(4)
+            ],
+            "live_state_sampled": True,
+        },
+    }
+
+
+STANDARD_SESSION_ID = "11111111-1111-4111-8111-111111111111"
+STANDARD_STOP_NONCE = "99999999-9999-4999-8999-999999999999"
+STANDARD_PROFILE = "profiles/udp_1pkt_simple.py"
+
+
+def standard_runtime_authority(
+    generation: str = "runtime-1",
+) -> dict[str, object]:
+    return {
+        "host": "127.0.0.1",
+        "sync_port": 4501,
+        "async_port": 4500,
+        "scapy_port": 4507,
+        "daemon_supervisor": "systemd",
+        "generation": generation,
+    }
+
+
+def standard_mutation_evidence(
+    nonce: str,
+    operation: str,
+    *,
+    completed_at: str,
+    completion_mode: str = "direct",
+) -> dict[str, object]:
+    return {
+        "intent_nonce": nonce,
+        "operation": operation,
+        "completion_mode": completion_mode,
+        "ports": [0],
+        "baseline_port_states": {
+            "0": "stopped" if operation == "start" else "running",
+        },
+        "desired_port_states": {
+            "0": "running" if operation == "start" else "stopped",
+        },
+        "baseline_acquired_ports": [],
+        "prepared_at": "2026-07-31T12:00:00.000000Z",
+        "completed_at": completed_at,
+        "acquisition_restored": True,
+        "wal_cleared": True,
+    }
+
+
+def canonical_standard_session(
+    hard_stop_at: str,
+    *,
+    stopped: bool = False,
+    retain_lease: bool = False,
+    hard_stop_cleanup: bool = False,
+    revision: int | None = None,
+    authority_generation: str = "runtime-1",
+    profile_path: str = STANDARD_PROFILE,
+    multiplier: str = "1kpps",
+) -> dict[str, object]:
+    started_at = "2026-07-31T12:00:00.500000Z"
+    stopped_at = "2026-07-31T12:00:03.000000Z"
+    start_evidence = standard_mutation_evidence(
+        STANDARD_SESSION_ID,
+        "start",
+        completed_at=started_at,
+    )
+    cleanup = None
+    mutations = [start_evidence]
+    if stopped:
+        stop_mode = "hard_stop" if hard_stop_cleanup else "direct"
+        stop_evidence = standard_mutation_evidence(
+            STANDARD_STOP_NONCE,
+            "stop",
+            completed_at=stopped_at,
+            completion_mode=stop_mode,
+        )
+        mutations.append(stop_evidence)
+        cleanup = {
+            "completion": "hard_stop" if hard_stop_cleanup else "operator_stop",
+            "completed_at": stopped_at,
+            "final_port_states": {"0": "stopped"},
+            "intent_nonce": STANDARD_STOP_NONCE,
+            "acquisition_restored": True,
+            "wal_cleared": True,
+        }
+    state = "stopped" if stopped else "running"
+    group = {
+        "group_id": None,
+        "run_id": STANDARD_SESSION_ID,
+        "source": "ad_hoc",
+        "plan_revision": None,
+        "ports": [0],
+        "profile_path": profile_path,
+        "profile_sha256": "1" * 64,
+        "start_multiplier": multiplier,
+        "multiplier": multiplier,
+        "duration": -1,
+        "start_force": True,
+        "start_total": False,
+        "start_synchronized": False,
+        "start_clear_existing": True,
+        "started_at": started_at,
+        "ended_at": stopped_at if stopped else None,
+        "hard_stop_at": hard_stop_at if not stopped or retain_lease else None,
+        "tunables": {},
+        "start_evidence": start_evidence,
+        "cleanup_evidence": cleanup,
+        "state": state,
+        "port_states": {"0": state},
+        "updated_at": stopped_at if stopped else started_at,
+    }
+    return {
+        "id": STANDARD_SESSION_ID,
+        "revision": revision if revision is not None else (2 if stopped else 1),
+        "evidence_version": 1,
+        "authority": standard_runtime_authority(authority_generation),
+        "state": state,
+        "started_at": started_at,
+        "updated_at": stopped_at if stopped else started_at,
+        "ended_at": stopped_at if stopped else None,
+        "groups": [group],
+        "completed_groups": [],
+        "mutation_evidence": mutations,
+        "reconciliation": None,
+    }
+
+
+def standard_start_descriptor_fixture(
+    hard_stop_at: str,
+    *,
+    phase: str = "capture",
+    profile_path: str = STANDARD_PROFILE,
+    multiplier: str = "1kpps",
+) -> dict[str, object]:
+    return {
+        "phase": phase,
+        "profile_path": profile_path,
+        "multiplier": multiplier,
+        "duration": -1,
+        "ports": [0],
+        "boundary_ports": [0, 1],
+        "hard_stop_at": hard_stop_at,
+        "pre_plan_revision": 1,
+        "pre_config": selected_runtime_payload()["data"]["config"],
+        "pre_session_id": None,
+        "pre_authority": standard_runtime_authority(),
+        "session_id": STANDARD_SESSION_ID,
+        "run_id": STANDARD_SESSION_ID,
+        "status": "stopped",
+    }
+
+
+def leased_standard_runtime_payload(
+    session: dict[str, object] | None = None,
+    *,
+    authority_generation: str = "runtime-1",
+    live_active: bool = False,
+) -> dict[str, object]:
+    payload = selected_runtime_payload()
+    data = payload["data"]
+    assert isinstance(data, dict)
+    data["authority"] = standard_runtime_authority(authority_generation)
+    data["session"] = session
+    if live_active:
+        data["port_states"] = [
+            {"port": 0, "state": "running", "ownership": "managed"},
+            {"port": 1, "state": "stopped", "ownership": "none"},
+            {"port": 2, "state": "stopped", "ownership": "none"},
+            {"port": 3, "state": "stopped", "ownership": "none"},
+        ]
+    return payload
+
+
+def standard_traffic_args(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "base_url": "http://127.0.0.1",
+        "timeout": 3.0,
+        "tx_port": 0,
+        "rx_port": 1,
+        "stats_timeout": 1.0,
+        "poll_interval": 0.0,
+        "latency_observe_seconds": 1.0,
+        "capture_observe_seconds": 1.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class FakeStandardTrafficApi:
+    def __init__(
+        self,
+        *,
+        response_loss: bool = False,
+        recovery_authority_generation: str = "runtime-1",
+        retain_lease: bool = False,
+        hard_stop_cleanup: bool = False,
+    ) -> None:
+        self.calls: list[tuple[str, str, Any]] = []
+        self.response_loss = response_loss
+        self.recovery_authority_generation = recovery_authority_generation
+        self.retain_lease = retain_lease
+        self.hard_stop_cleanup = hard_stop_cleanup
+        self.started = False
+        self.stopped = False
+        self.hard_stop_at: str | None = None
+        self.active_session: dict[str, object] | None = None
+        self.final_session: dict[str, object] | None = None
+
+    def __call__(self, _base_url, method, path, payload, _timeout):
+        self.calls.append((method, path, payload))
+        if (method, path) == ("GET", "/api/trex/traffic/runtime"):
+            if not self.started:
+                return leased_standard_runtime_payload()
+            if not self.stopped:
+                return leased_standard_runtime_payload(
+                    self.active_session,
+                    authority_generation=self.recovery_authority_generation,
+                    live_active=True,
+                )
+            return leased_standard_runtime_payload(self.final_session)
+        if (method, path) == ("POST", "/api/trex/traffic/start"):
+            assert isinstance(payload, dict)
+            self.started = True
+            self.hard_stop_at = str(payload["hard_stop_at"])
+            self.active_session = canonical_standard_session(
+                self.hard_stop_at,
+                authority_generation=self.recovery_authority_generation,
+                profile_path=str(payload["profile_path"]),
+                multiplier=str(payload["multiplier"]),
+            )
+            if self.response_loss:
+                raise standard_e2e.AcceptanceError(
+                    "fixture traffic start",
+                    "response was lost after the leased session persisted",
+                )
+            return {"ok": True, "data": {"session": self.active_session}}
+        if (method, path) == ("POST", "/api/trex/traffic/stop"):
+            assert self.hard_stop_at is not None
+            self.stopped = True
+            self.final_session = canonical_standard_session(
+                self.hard_stop_at,
+                stopped=True,
+                retain_lease=self.retain_lease,
+                hard_stop_cleanup=self.hard_stop_cleanup,
+            )
+            return {"ok": True, "data": {"session": self.final_session}}
+        if (method, path) == ("POST", "/api/trex/capture/remove-all"):
+            return {"ok": True, "data": {"removed": []}}
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+
+def test_standard_boundary_covers_tx_and_rx_and_rejects_manual_ownership() -> None:
+    active_rx = selected_ports_payload()
+    active_rx["data"]["ports"][1]["info"]["status"] = "TRANSMITTING"
+    with pytest.raises(standard_e2e.AcceptanceError, match="not idle"):
+        standard_e2e.validate_live_port_boundary(
+            active_rx, target_ports=[0, 1], stage="selected ports"
+        )
+
+    acquired_rx = selected_ports_payload()
+    acquired_rx["data"]["ports"][1]["acquired"] = True
+    acquired_rx["data"]["ports"][1]["info"]["owner"] = "Client1"
+    with pytest.raises(standard_e2e.AcceptanceError, match="unacquired, and unowned"):
+        standard_e2e.validate_live_port_boundary(
+            acquired_rx, target_ports=[0, 1], stage="selected ports"
+        )
+
+
+def test_standard_runtime_boundary_requires_both_ports_stopped_and_unowned() -> None:
+    runtime = selected_runtime_payload()
+    runtime["data"]["port_states"][1]["ownership"] = "managed"
+
+    with pytest.raises(standard_e2e.AcceptanceError, match="stopped and unowned"):
+        standard_e2e.validate_runtime_port_boundary(
+            runtime, target_ports=[0, 1], stage="selected runtime"
+        )
+
+
+def test_standard_start_posts_and_validates_exact_canonical_hard_stop_lease(
+    monkeypatch,
+) -> None:
+    api = FakeStandardTrafficApi()
+    monkeypatch.setattr(standard_e2e, "request_json", api)
+    run: dict[str, object] = {
+        "hard_stop_windows_seconds": {"latency": 30.0, "capture": 45.0},
+        "traffic_start_attempts": [],
+        "active_traffic_session_id": None,
+        "active_traffic_descriptor": None,
+    }
+
+    result, descriptor = standard_e2e.start_standard_traffic(
+        standard_traffic_args(),
+        run,
+        phase="latency",
+        profile_path=STANDARD_PROFILE,
+        multiplier="1kpps",
+    )
+
+    start_request = next(
+        call[2] for call in api.calls if call[1] == "/api/trex/traffic/start"
+    )
+    deadline = datetime.fromisoformat(
+        start_request["hard_stop_at"].replace("Z", "+00:00")
+    )
+    now = datetime.now(timezone.utc)
+    assert now < deadline <= now + timedelta(seconds=300)
+    assert descriptor["hard_stop_at"] == start_request["hard_stop_at"]
+    assert result["data"]["session"]["groups"][0]["hard_stop_at"] == deadline.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert run["active_traffic_session_id"] == STANDARD_SESSION_ID
+
+    stopped = standard_e2e.stop_traffic(
+        standard_traffic_args(), run, "latency traffic stop"
+    )
+    assert stopped["data"]["session"]["groups"][0]["hard_stop_at"] is None
+    assert descriptor["status"] == "stopped"
+
+
+def test_lost_standard_start_response_adopts_exact_lease_for_operator_cleanup(
+    monkeypatch,
+) -> None:
+    api = FakeStandardTrafficApi(response_loss=True)
+    monkeypatch.setattr(standard_e2e, "request_json", api)
+    run: dict[str, object] = {
+        "hard_stop_windows_seconds": {"latency": 30.0, "capture": 45.0},
+        "traffic_start_attempts": [],
+        "active_traffic_session_id": None,
+        "active_traffic_descriptor": None,
+        "cleanup": [],
+    }
+    args = standard_traffic_args()
+
+    with pytest.raises(
+        standard_e2e.AcceptanceError,
+        match="exact leased session was recovered",
+    ):
+        standard_e2e.start_standard_traffic(
+            args,
+            run,
+            phase="capture",
+            profile_path=STANDARD_PROFILE,
+            multiplier="1kpps",
+        )
+
+    assert run["active_traffic_session_id"] == STANDARD_SESSION_ID
+    attempt = run["traffic_start_attempts"][0]
+    assert attempt["status"] == "recovered-active"
+    standard_e2e.cleanup(args, run)
+    stop_request = next(
+        call[2] for call in api.calls if call[1] == "/api/trex/traffic/stop"
+    )
+    assert stop_request == {
+        "ports": [0],
+        "confirmation": "stop",
+        "expected_session_id": STANDARD_SESSION_ID,
+    }
+    assert attempt["status"] == "stopped"
+    assert api.final_session["groups"][0]["cleanup_evidence"]["completion"] == (
+        "operator_stop"
+    )
+
+
+def test_lost_first_standard_start_rejects_foreign_authority_without_stop(
+    monkeypatch,
+) -> None:
+    api = FakeStandardTrafficApi(
+        response_loss=True,
+        recovery_authority_generation="runtime-foreign",
+    )
+    monkeypatch.setattr(standard_e2e, "request_json", api)
+    run: dict[str, object] = {
+        "hard_stop_windows_seconds": {"latency": 30.0, "capture": 45.0},
+        "traffic_start_attempts": [],
+        "active_traffic_session_id": None,
+        "active_traffic_descriptor": None,
+        "cleanup": [],
+    }
+    args = standard_traffic_args()
+
+    with pytest.raises(standard_e2e.AcceptanceError, match="response was lost"):
+        standard_e2e.start_standard_traffic(
+            args,
+            run,
+            phase="latency",
+            profile_path=STANDARD_PROFILE,
+            multiplier="1kpps",
+        )
+    standard_e2e.cleanup(args, run)
+
+    assert not any(call[1] == "/api/trex/traffic/stop" for call in api.calls)
+    attempt = run["traffic_start_attempts"][0]
+    rejected = attempt["runtime_recovery_rejected"]
+    assert rejected["expected_authority"]["generation"] == "runtime-1"
+    assert rejected["observed_authority"]["generation"] == "runtime-foreign"
+    deadline = datetime.fromisoformat(
+        api.hard_stop_at.replace("Z", "+00:00")
+    )
+    now = datetime.now(timezone.utc)
+    assert now < deadline <= now + timedelta(seconds=300)
+
+
+def test_standard_stop_rejects_retained_lease(monkeypatch) -> None:
+    api = FakeStandardTrafficApi(retain_lease=True)
+    monkeypatch.setattr(standard_e2e, "request_json", api)
+    run: dict[str, object] = {
+        "hard_stop_windows_seconds": {"latency": 30.0, "capture": 45.0},
+        "traffic_start_attempts": [],
+        "active_traffic_session_id": None,
+        "active_traffic_descriptor": None,
+    }
+    args = standard_traffic_args()
+    standard_e2e.start_standard_traffic(
+        args,
+        run,
+        phase="latency",
+        profile_path=STANDARD_PROFILE,
+        multiplier="1kpps",
+    )
+
+    with pytest.raises(standard_e2e.AcceptanceError, match="lease was not cleared"):
+        standard_e2e.stop_traffic(args, run, "latency traffic stop")
+
+    assert run["active_traffic_session_id"] == STANDARD_SESSION_ID
+
+
+def test_standard_stop_rejects_hard_stop_cleanup(monkeypatch) -> None:
+    api = FakeStandardTrafficApi(hard_stop_cleanup=True)
+    monkeypatch.setattr(standard_e2e, "request_json", api)
+    run: dict[str, object] = {
+        "hard_stop_windows_seconds": {"latency": 30.0, "capture": 45.0},
+        "traffic_start_attempts": [],
+        "active_traffic_session_id": None,
+        "active_traffic_descriptor": None,
+    }
+    args = standard_traffic_args()
+    standard_e2e.start_standard_traffic(
+        args,
+        run,
+        phase="capture",
+        profile_path=STANDARD_PROFILE,
+        multiplier="1kpps",
+    )
+
+    with pytest.raises(
+        standard_e2e.AcceptanceError,
+        match="operator cleanup evidence is incomplete",
+    ):
+        standard_e2e.stop_traffic(args, run, "capture traffic stop")
+
+    assert run["active_traffic_session_id"] == STANDARD_SESSION_ID
+
+
+def test_oversized_standard_hard_stop_budget_fails_before_any_api_write(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, str, object]] = []
+    monkeypatch.setattr(
+        standard_e2e,
+        "request_json",
+        lambda _base, method, path, payload, _timeout: calls.append(
+            (method, path, payload)
+        ),
+    )
+
+    with pytest.raises(standard_e2e.AcceptanceError, match="300-second safety limit"):
+        standard_e2e.run_standard_e2e(
+            standard_traffic_args(timeout=50.0)
+        )
+
+    assert calls == []
+
+
+def test_save_report_binds_backend_session_using_refreshed_revision(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[tuple[str, str, object]] = []
+    saved_document: dict[str, object] = {}
+    hard_stop_at = "2026-07-31T12:05:00Z"
+    canonical_session = canonical_standard_session(
+        hard_stop_at,
+        stopped=True,
+        revision=9,
+    )
+
+    def fake_request_json(base_url, method, path, payload, timeout):
+        calls.append((method, path, payload))
+        if (method, path) == ("GET", "/api/trex/traffic/runtime"):
+            return leased_standard_runtime_payload(canonical_session)
+        if (method, path) == ("POST", "/api/trex/reports/save"):
+            assert isinstance(payload, dict)
+            canonical_payload = json.loads(json.dumps(payload["payload"]))
+            canonical_payload["traffic_session"] = json.loads(
+                json.dumps(canonical_session)
+            )
+            canonical_payload["traffic_session_binding"] = {
+                "id": STANDARD_SESSION_ID,
+                "revision": 9,
+                "evidence_version": 1,
+            }
+            saved_document.update(
+                {
+                    "version": 2,
+                    "title": payload["title"],
+                    "markdown": payload["markdown"],
+                    "payload": canonical_payload,
+                }
+            )
+            return {
+                "ok": True,
+                "data": {"file": {"name": payload["file_name"]}},
+            }
+        if (method, path) == ("POST", "/api/trex/reports/download"):
+            return {
+                "ok": True,
+                "data": {
+                    "file": {
+                        "content": json.dumps(saved_document),
+                    }
+                },
+            }
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(standard_e2e, "request_json", fake_request_json)
+    args = SimpleNamespace(
+        base_url="http://127.0.0.1",
+        timeout=3.0,
+        output_dir=str(tmp_path),
+        tx_port=0,
+        rx_port=1,
+    )
+    run = {
+        "run_id": "20260731T120000Z",
+        "report_prefix": "standard-e2e",
+        "verdict": "pass",
+        "traffic_stops": [
+            {
+                "stage": "capture traffic stop",
+                "result": {
+                    "ok": True,
+                    "data": {
+                        "session": {
+                            "id": STANDARD_SESSION_ID,
+                            # The save CAS must not reuse this stale revision.
+                            "revision": 8,
+                        }
+                    },
+                },
+            }
+        ],
+        "traffic_start_attempts": [
+            standard_start_descriptor_fixture(hard_stop_at)
+        ],
+    }
+
+    result = standard_e2e.save_report(args, run)
+
+    assert result["ok"] is True
+    assert [(method, path) for method, path, _payload in calls] == [
+        ("GET", "/api/trex/traffic/runtime"),
+        ("POST", "/api/trex/reports/save"),
+        ("POST", "/api/trex/reports/download"),
+    ]
+    save_request = calls[1][2]
+    assert isinstance(save_request, dict)
+    assert save_request["traffic_session_id"] == STANDARD_SESSION_ID
+    assert save_request["traffic_session_revision"] == 9
+    assert "traffic_session" not in save_request["payload"]
+    assert "traffic_session_binding" not in save_request["payload"]
+
+
+@pytest.mark.parametrize(
+    "traffic_stops",
+    [
+        None,
+        [
+            {
+                "stage": "latency traffic stop",
+                "result": {
+                    "data": {
+                        "session": {
+                            "id": "session-earlier",
+                            "revision": 4,
+                        }
+                    }
+                },
+            }
+        ],
+    ],
+    ids=["early-failure", "failure-after-earlier-session"],
+)
+def test_save_report_keeps_failures_unbound_and_strips_reserved_payload(
+    monkeypatch,
+    tmp_path: Path,
+    traffic_stops: list[dict[str, object]] | None,
+) -> None:
+    calls: list[tuple[str, str, object]] = []
+    saved_document: dict[str, object] = {}
+
+    def fake_request_json(base_url, method, path, payload, timeout):
+        calls.append((method, path, payload))
+        if (method, path) == ("POST", "/api/trex/reports/save"):
+            assert isinstance(payload, dict)
+            saved_document.update(
+                {
+                    "version": 2,
+                    "title": payload["title"],
+                    "markdown": payload["markdown"],
+                    "payload": payload["payload"],
+                }
+            )
+            return {
+                "ok": True,
+                "data": {"file": {"name": payload["file_name"]}},
+            }
+        if (method, path) == ("POST", "/api/trex/reports/download"):
+            return {
+                "ok": True,
+                "data": {"file": {"content": json.dumps(saved_document)}},
+            }
+        raise AssertionError(f"unexpected request: {method} {path}")
+
+    monkeypatch.setattr(standard_e2e, "request_json", fake_request_json)
+    args = SimpleNamespace(
+        base_url="http://127.0.0.1",
+        timeout=3.0,
+        output_dir=str(tmp_path),
+    )
+    run = {
+        "run_id": "20260731T120001Z",
+        "report_prefix": "standard-e2e",
+        "verdict": "fail",
+        "failure": {"message": "daemon unavailable"},
+        "traffic_session": {"id": "client-fabricated"},
+        "traffic_session_binding": {
+            "id": "client-fabricated",
+            "revision": 1,
+            "evidence_version": 1,
+        },
+    }
+    if traffic_stops is not None:
+        run["traffic_stops"] = traffic_stops
+
+    standard_e2e.save_report(args, run)
+
+    assert [(method, path) for method, path, _payload in calls] == [
+        ("POST", "/api/trex/reports/save"),
+        ("POST", "/api/trex/reports/download"),
+    ]
+    save_request = calls[0][2]
+    assert isinstance(save_request, dict)
+    assert "traffic_session_id" not in save_request
+    assert "traffic_session_revision" not in save_request
+    assert "traffic_session" not in save_request["payload"]
+    assert "traffic_session_binding" not in save_request["payload"]
+
+
+@pytest.mark.parametrize(
+    ("session_update", "runtime_update", "expected_message"),
+    [
+        ({"id": "session-other"}, {}, "expected session session-current"),
+        ({"revision": True}, {}, "revision is not a positive integer"),
+        ({"revision": 0}, {}, "revision is not a positive integer"),
+        ({"evidence_version": None}, {}, "evidence_version is not 1"),
+        ({"state": "running"}, {}, "not stopped"),
+        ({}, {"mutation_intent": {"nonce": "pending"}}, "pending mutation intent"),
+    ],
+)
+def test_report_binding_rejects_noncanonical_runtime_session(
+    monkeypatch,
+    session_update: dict[str, object],
+    runtime_update: dict[str, object],
+    expected_message: str,
+) -> None:
+    session = {
+        "id": "session-current",
+        "revision": 9,
+        "evidence_version": 1,
+        "state": "stopped",
+    }
+    session.update(session_update)
+    runtime_data = {
+        "session": session,
+        "mutation_intent": None,
+        "available_ports": [0, 1],
+        "port_states": [
+            {"port": 0, "state": "stopped", "ownership": "none"},
+            {"port": 1, "state": "stopped", "ownership": "none"},
+        ],
+        "live_state_sampled": True,
+    }
+    runtime_data.update(runtime_update)
+    monkeypatch.setattr(
+        standard_e2e,
+        "request_json",
+        lambda *_args: {"ok": True, "data": runtime_data},
+    )
+    args = SimpleNamespace(
+        base_url="http://127.0.0.1",
+        timeout=3.0,
+        tx_port=0,
+        rx_port=1,
+    )
+    run = {
+        "verdict": "pass",
+        "traffic_stops": [
+            {
+                "result": {
+                    "data": {"session": {"id": "session-current"}},
+                }
+            }
+        ],
+    }
+
+    with pytest.raises(standard_e2e.AcceptanceError, match=expected_message):
+        standard_e2e.report_traffic_session_binding(args, run)
+
+
+def test_passing_report_requires_a_completed_session_from_this_run() -> None:
+    args = SimpleNamespace(
+        base_url="http://127.0.0.1",
+        timeout=3.0,
+    )
+
+    with pytest.raises(standard_e2e.AcceptanceError, match="no completed traffic session"):
+        standard_e2e.report_traffic_session_binding(args, {"verdict": "pass"})
+
+
 def test_latency_evidence_extracts_pg_average() -> None:
     stats = {
         "ok": True,
@@ -378,8 +1201,14 @@ def test_standard_report_archive_contains_product_metrics_and_conclusion() -> No
             "queue_full": 0,
         },
         "post_conditions": {
+            "target_ports": [0, 1],
             "traffic_ports_idle": True,
             "active_ports_after_stop": [],
+            "ports_unowned": True,
+            "acquired_ports_after_stop": [],
+            "owned_ports_after_stop": {},
+            "runtime_ports_stopped": True,
+            "runtime_ports_unowned": True,
             "capture_recorders_after_stop": 0,
         },
         "verdict": "pass",
@@ -674,6 +1503,9 @@ def test_major_change_gate_requires_standard_e2e_archive_evidence() -> None:
     assert 'payload.get("workflow") != "standard-e2e"' in gate
     assert 'payload.get("verdict") != "pass"' in gate
     assert "prepare_gate_identity" in gate
+    assert "verify_versioned_deployment_identity" in gate
+    assert "selected production release source identity does not match this gate" in gate
+    assert "selected production frontend build identity does not match this gate" in gate
     assert "capture_gate_source_baseline" in gate
     assert "BASELINE_SOURCE_IDENTITY" in gate
     assert "source changed while tests/build were running" in gate
@@ -700,12 +1532,21 @@ def test_major_change_gate_requires_standard_e2e_archive_evidence() -> None:
     assert 'current_build.get("digest") != expected_build_identity' in gate
     assert 'frontend.get("asset_manifest")' in gate
     assert 'api_config.get("summary")' in gate
+    assert 'post.get("target_ports") != target_ports' in gate
     assert 'post.get("traffic_ports_idle") is not True' in gate
+    assert 'post.get("ports_unowned") is not True' in gate
+    assert 'post.get("acquired_ports_after_stop") != []' in gate
+    assert 'post.get("runtime_ports_stopped") is not True' in gate
+    assert 'post.get("runtime_ports_unowned") is not True' in gate
     assert 'post.get("capture_recorders_after_stop") != 0' in gate
     assert "verify_python_baseline" in gate
     assert "major gate requires a Python 3.11 .venv" in gate
     assert "trex_assert_managed_path" in gate
     assert "trex_assert_disjoint_paths" in gate
+    assert 'if trex_path_is_within "$source_dist" "$DEPLOY_PROJECT_ROOT"; then' in gate
+    assert "gate checkout frontend dist belongs to the selected immutable release" in gate
+    assert '"$DEPLOY_PROJECT_ROOT/deploy/archive_safety.py"' in gate
+    assert "selected release payload verifier authority is unsafe" in gate
     assert "trex_write_managed_marker" in gate
     assert "rollback_gate_web_root" in gate
     assert "WEB_RELEASE_DIR" in gate
@@ -730,6 +1571,265 @@ def test_major_change_gate_requires_standard_e2e_archive_evidence() -> None:
     assert "`workflow=standard-e2e` and `verdict=pass`" in nginx_deployment
     assert ".logs/standard-e2e-gate/" in nginx_deployment
     assert "/var/log/trex/reports/" in nginx_deployment
+
+
+def run_gate_layout_fixture(
+    *,
+    project_root: Path,
+    web_root: Path,
+    deployed_root: Path,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            r'''
+set -Eeuo pipefail
+source "$1"
+PROJECT_ROOT="$2"
+WEB_ROOT="$3"
+DEPLOY_PROJECT_ROOT="$4"
+SERVICE_PROJECT_ROOT="/opt/trex-webui/current"
+VERSIONED_DEPLOYMENT=1
+SYNC_WEB_ROOT=0
+trex_assert_managed_path() { return 0; }
+validate_gate_layout
+''',
+            "bash",
+            str(VERIFY_MAJOR_SCRIPT),
+            str(project_root),
+            str(web_root),
+            str(deployed_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_major_gate_detects_a_consistent_versioned_deployment(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    digest = "c" * 64
+    selected_root = install_root / "releases" / f"sha256-{digest}"
+    selected_root.mkdir(parents=True)
+    (install_root / "current").symlink_to(f"releases/sha256-{digest}")
+    nginx_config = tmp_path / "trex-webui.conf"
+    nginx_config.write_text(
+        f"    root {install_root}/current/apps/web/dist;\n",
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -Eeuo pipefail\n"
+        "case \"$*\" in\n"
+        "  'show trex-webui-api.service --property=FragmentPath --value') printf '%s\\n' '/etc/systemd/system/trex-webui-api.service' ;;\n"
+        "  'show trex-webui-api.service --property=NeedDaemonReload --value') printf '%s\\n' \"${FAKE_NEED_DAEMON_RELOAD:-no}\" ;;\n"
+        "  'show trex-webui-api.service --property=WorkingDirectory --value') printf '%s\\n' \"${FAKE_WORKING_DIRECTORY:?}\" ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_systemctl.chmod(0o755)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r'''
+set -Eeuo pipefail
+source "$1"
+PROJECT_ROOT="$2"
+VERSIONED_INSTALL_ROOT="$3"
+VERSIONED_NGINX_CONFIG="$4"
+detect_versioned_deployment
+printf '%s\n' "$VERSIONED_DEPLOYMENT" "$DEPLOY_PROJECT_ROOT" "$SERVICE_PROJECT_ROOT" "$WEB_ROOT" "$SYNC_WEB_ROOT"
+''',
+            "bash",
+            str(VERIFY_MAJOR_SCRIPT),
+            str(checkout),
+            str(install_root),
+            str(nginx_config),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FAKE_WORKING_DIRECTORY": str(install_root / "current"),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "detected versioned deployment:" in result.stdout
+    assert "\n".join(
+        [
+            "1",
+            str(selected_root),
+            str(install_root / "current"),
+            str(selected_root / "apps" / "web" / "dist"),
+            "0",
+        ]
+    ) in result.stdout
+
+
+def test_major_gate_rejects_a_selector_with_legacy_api_authority(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    digest = "d" * 64
+    selected_root = install_root / "releases" / f"sha256-{digest}"
+    selected_root.mkdir(parents=True)
+    (install_root / "current").symlink_to(f"releases/sha256-{digest}")
+    nginx_config = tmp_path / "trex-webui.conf"
+    nginx_config.write_text(
+        f"    root {install_root}/current/apps/web/dist;\n",
+        encoding="utf-8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -Eeuo pipefail\n"
+        "case \"$*\" in\n"
+        "  'show trex-webui-api.service --property=FragmentPath --value') printf '%s\\n' '/etc/systemd/system/trex-webui-api.service' ;;\n"
+        "  'show trex-webui-api.service --property=NeedDaemonReload --value') printf '%s\\n' 'no' ;;\n"
+        "  'show trex-webui-api.service --property=WorkingDirectory --value') printf '%s\\n' '/opt/trex-webui' ;;\n"
+        "  *) exit 64 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_systemctl.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r'''
+set -Eeuo pipefail
+source "$1"
+PROJECT_ROOT="$2"
+VERSIONED_INSTALL_ROOT="$3"
+VERSIONED_NGINX_CONFIG="$4"
+detect_versioned_deployment
+''',
+            "bash",
+            str(VERIFY_MAJOR_SCRIPT),
+            str(tmp_path / "checkout"),
+            str(install_root),
+            str(nginx_config),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+    )
+
+    assert result.returncode != 0
+    assert "loaded API WorkingDirectory is not current" in result.stderr
+
+
+def test_major_gate_rejects_a_non_symlink_current_selector(
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    (install_root / "current").mkdir(parents=True)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            r'''
+set -Eeuo pipefail
+source "$1"
+PROJECT_ROOT="$2"
+VERSIONED_INSTALL_ROOT="$3"
+VERSIONED_NGINX_CONFIG="$4"
+detect_versioned_deployment
+''',
+            "bash",
+            str(VERIFY_MAJOR_SCRIPT),
+            str(tmp_path / "checkout"),
+            str(install_root),
+            str(tmp_path / "trex-webui.conf"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "selector path exists but is not a symbolic link" in result.stderr
+
+
+def test_versioned_gate_allows_install_root_to_contain_selected_web_root(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "trex-webui"
+    deployed_root = project_root / "releases" / f"sha256-{'a' * 64}"
+    web_root = deployed_root / "apps" / "web" / "dist"
+    (project_root / "apps" / "web" / "dist").mkdir(parents=True)
+    web_root.mkdir(parents=True)
+    verifier = deployed_root / "deploy" / "archive_safety.py"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("# trusted fixture\n", encoding="utf-8")
+
+    result = run_gate_layout_fixture(
+        project_root=project_root,
+        web_root=web_root,
+        deployed_root=deployed_root,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_versioned_gate_refuses_to_build_inside_selected_release(
+    tmp_path: Path,
+) -> None:
+    deployed_root = tmp_path / "trex-webui" / "releases" / f"sha256-{'b' * 64}"
+    web_root = deployed_root / "apps" / "web" / "dist"
+    web_root.mkdir(parents=True)
+
+    result = run_gate_layout_fixture(
+        project_root=deployed_root,
+        web_root=web_root,
+        deployed_root=deployed_root,
+    )
+
+    assert result.returncode != 0
+    assert "gate checkout frontend dist belongs to the selected immutable release" in result.stderr
+
+
+def test_versioned_gate_rejects_an_untrusted_release_payload_verifier(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "trex-webui"
+    deployed_root = project_root / "releases" / f"sha256-{'e' * 64}"
+    web_root = deployed_root / "apps" / "web" / "dist"
+    (project_root / "apps" / "web" / "dist").mkdir(parents=True)
+    web_root.mkdir(parents=True)
+    verifier = deployed_root / "deploy" / "archive_safety.py"
+    verifier.parent.mkdir(parents=True)
+    verifier.write_text("# writable fixture\n", encoding="utf-8")
+    verifier.chmod(0o666)
+
+    result = run_gate_layout_fixture(
+        project_root=project_root,
+        web_root=web_root,
+        deployed_root=deployed_root,
+    )
+
+    assert result.returncode != 0
+    assert "selected release payload verifier authority is unsafe" in result.stderr
+
 
 def test_ci_runs_on_main_and_master_with_python_311_locked_dependencies_and_web_shards() -> None:
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")

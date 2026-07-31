@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import uuid
@@ -24,6 +25,8 @@ from app.trex.runtime_state import (
     RuntimeStateDocument,
     RuntimeStateError,
     RuntimeStateStore,
+    TrafficSessionGroupState,
+    TrafficSessionState,
 )
 from app.trex.traffic_runtime import TrafficRuntimeAuthority
 
@@ -281,6 +284,15 @@ def test_empty_runtime_builds_three_pairs_from_six_port_config(tmp_path: Path) -
     assert result.ok is True
     assert result.data["live_state_sampled"] is True
     assert result.data["plan_revision"] == 1
+    assert result.data["session"] is None
+    assert result.data["authority"] == {
+        "host": "127.0.0.1",
+        "sync_port": 4501,
+        "async_port": 4500,
+        "scapy_port": 4507,
+        "daemon_supervisor": "systemd",
+        "generation": "11111111-1111-4111-8111-111111111111",
+    }
     assert [group["id"] for group in result.data["groups"]] == ["pair-0", "pair-1", "pair-2"]
     assert [group["ports"] for group in result.data["groups"]] == [[0, 1], [2, 3], [4, 5]]
     assert result.data["config"] == {
@@ -517,11 +529,12 @@ def test_plan_replace_allows_a_fully_stopped_lease_free_session(
     revision = snapshot.data["plan_revision"]
     started = runtime.start_group("pair-0", revision, None)
     assert started.ok is True
-    assert runtime.action(
+    stopped = runtime.action(
         "stop",
         [0, 1],
         expected_session_id=started.data["session"]["id"],
-    ).ok
+    )
+    assert stopped.ok
     replacement = [
         {**group, "name": f"{group['name']} replacement"}
         for group in snapshot.data["groups"]
@@ -532,6 +545,8 @@ def test_plan_replace_allows_a_fully_stopped_lease_free_session(
     assert result.ok is True
     assert result.data["plan_revision"] == revision + 1
     assert result.data["live_state_sampled"] is False
+    assert result.data["session"]["revision"] == stopped.data["session"]["revision"]
+    assert result.data["session"]["groups"][0]["plan_revision"] == revision
 
 
 def test_get_then_concurrent_start_prevents_stale_plan_put(
@@ -585,7 +600,19 @@ def test_group_start_uses_persisted_plan_and_records_actions(tmp_path: Path) -> 
     session_id = started.data["session"]["id"]
     assert started.data["ports"] == [0, 1]
     assert started.data["state_persisted"] is True
-    assert started.data["session"]["groups"][0]["group_id"] == "pair-0"
+    started_session = started.data["session"]
+    started_group = started_session["groups"][0]
+    assert started_session["revision"] == 1
+    assert started_session["evidence_version"] == 1
+    assert started_group["group_id"] == "pair-0"
+    assert started_group["source"] == "plan"
+    assert started_group["plan_revision"] == snapshot.data["plan_revision"]
+    assert started_group["profile_sha256"] == hashlib.sha256(b"profile").hexdigest()
+    assert started_group["start_multiplier"] == "1"
+    assert started_group["run_id"] == started_group["start_evidence"]["intent_nonce"]
+    assert started_group["start_evidence"]["completion_mode"] == "direct"
+    assert started_group["start_evidence"]["acquisition_restored"] is True
+    assert started_group["start_evidence"]["wal_cleared"] is True
 
     paused = runtime.action("pause", [0, 1], expected_session_id=session_id)
     assert paused.ok is True
@@ -602,11 +629,108 @@ def test_group_start_uses_persisted_plan_and_records_actions(tmp_path: Path) -> 
     )
     assert updated.ok is True
     assert updated.data["session"]["groups"][0]["multiplier"] == "25%"
+    assert updated.data["session"]["groups"][0]["start_multiplier"] == "1"
 
     stopped = runtime.action("stop", [0, 1], expected_session_id=session_id)
     assert stopped.ok is True
     assert stopped.data["session"]["state"] == "stopped"
+    assert stopped.data["session"]["revision"] == 4
+    assert [
+        evidence["operation"]
+        for evidence in stopped.data["session"]["mutation_evidence"]
+    ] == ["start", "pause", "update", "stop"]
+    assert stopped.data["session"]["groups"][0]["cleanup_evidence"][
+        "completion"
+    ] == "operator_stop"
     assert RuntimeStateStore(env.runtime_state_path).load().traffic_session.state == "stopped"  # type: ignore[union-attr]
+
+
+def test_ad_hoc_start_never_claims_matching_plan_group_identity(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path)
+    runtime = authority(env, FakeTrafficClient())
+    snapshot = runtime.snapshot()
+
+    started = runtime.start(
+        expected_session_id=None,
+        profile_path="udp_1pkt_simple.py",
+        ports=[0, 1],
+        multiplier="1kpps",
+        duration=-1,
+        force=False,
+        total=False,
+        synchronized=False,
+        clear_existing=True,
+        tunables={},
+    )
+
+    assert started.ok is True
+    group = started.data["session"]["groups"][0]
+    assert group["source"] == "ad_hoc"
+    assert group["group_id"] is None
+    assert group["plan_revision"] is None
+    assert group["multiplier"] == "1kpps"
+    assert snapshot.data["groups"][0]["id"] == "pair-0"
+    assert snapshot.data["groups"][0]["multiplier"] == "1"
+
+
+def test_legacy_active_session_is_stop_only_and_never_gains_evidence(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path)
+    client = FakeTrafficClient()
+    runtime = authority(env, client)
+    revision = runtime.snapshot().data["plan_revision"]
+    started = runtime.start_group("pair-0", revision, None)
+    session_id = started.data["session"]["id"]
+    persisted = RuntimeStateStore(env.runtime_state_path).load().traffic_session
+    assert persisted is not None
+    legacy = TrafficSessionState(
+        id=persisted.id,
+        authority=persisted.authority,
+        state="running",
+        started_at=persisted.started_at,
+        updated_at=persisted.updated_at,
+        groups=[
+            TrafficSessionGroupState(
+                group_id="pair-0",
+                ports=[0, 1],
+                profile_path=persisted.groups[0].profile_path,
+                multiplier="1",
+                duration=-1,
+                state="running",
+                port_states={0: "running", 1: "running"},
+                updated_at=persisted.updated_at,
+            )
+        ],
+    )
+    store = RuntimeStateStore(env.runtime_state_path)
+    store.update(
+        lambda document: document.model_copy(
+            update={"traffic_session": legacy},
+            deep=True,
+        )
+    )
+    client.calls.clear()
+
+    paused = runtime.action("pause", [0, 1], expected_session_id=session_id)
+    updated = runtime.update(
+        [0, 1],
+        "25%",
+        False,
+        False,
+        expected_session_id=session_id,
+    )
+
+    assert paused.blocker == "traffic_session_evidence_unavailable"
+    assert updated.blocker == "traffic_session_evidence_unavailable"
+    assert client.calls == []
+    stopped = runtime.action("stop", [0, 1], expected_session_id=session_id)
+    assert stopped.ok is True
+    assert stopped.data["session"]["state"] == "stopped"
+    assert stopped.data["session"]["evidence_version"] is None
+    assert stopped.data["session"]["mutation_evidence"] == []
 
 
 def test_hard_stop_lease_persists_across_pause_resume_and_clears_on_stop(
@@ -1271,9 +1395,19 @@ def test_reaper_session_cas_refuses_replaced_session_without_stop(
             document: RuntimeStateDocument,
         ) -> RuntimeStateDocument:
             assert document.traffic_session is not None
-            document.traffic_session.id = (
-                "99999999-9999-4999-8999-999999999999"
+            replacement_id = "99999999-9999-4999-8999-999999999999"
+            replacement = document.traffic_session.model_copy(deep=True)
+            replacement_start = replacement.mutation_evidence[0].model_copy(
+                update={"intent_nonce": replacement_id},
+                deep=True,
             )
+            replacement.id = replacement_id
+            replacement.mutation_evidence[0] = replacement_start
+            replacement.groups[0].run_id = replacement_id
+            replacement.groups[0].start_evidence = (
+                replacement_start.model_copy(deep=True)
+            )
+            document.traffic_session = replacement
             return document
 
         RuntimeStateStore(env.runtime_state_path).update(replace_session)
@@ -1613,6 +1747,12 @@ def test_crash_after_exact_hard_stop_recovers_promotion_idempotently(
     assert persisted.traffic_mutation_intent is None
     assert persisted.traffic_session is not None
     assert persisted.traffic_session.groups[0].hard_stop_at is None
+    assert persisted.traffic_session.mutation_evidence[-1].completion_mode == "hard_stop"
+    assert persisted.traffic_session.groups[0].cleanup_evidence is not None
+    assert (
+        persisted.traffic_session.groups[0].cleanup_evidence.completion
+        == "hard_stop"
+    )
 
 
 def test_expired_group_stops_before_disjoint_future_start_wal_replay(
@@ -2187,6 +2327,9 @@ def test_start_wal_recovers_systemexit_after_live_rpc_and_allows_exact_stop(
     assert recovered.ok is True
     assert recovered.data["mutation_intent"] is None
     assert recovered.data["session"]["state"] == "running"
+    assert recovered.data["session"]["mutation_evidence"][-1][
+        "completion_mode"
+    ] == "recovered"
     assert RuntimeStateStore(env.runtime_state_path).load().traffic_mutation_intent is None
     stopped = restarted.action(
         "stop",
@@ -2221,6 +2364,9 @@ def test_action_wal_recovers_pause_resume_and_stop_systemexit_boundaries(
         "0": "paused",
         "1": "running",
     }
+    assert paused.data["session"]["mutation_evidence"][-1][
+        "completion_mode"
+    ] == "recovered"
     assert paused.data["mutation_intent"] is None
 
     monkeypatch.setattr(
@@ -2238,6 +2384,9 @@ def test_action_wal_recovers_pause_resume_and_stop_systemexit_boundaries(
         "0": "running",
         "1": "running",
     }
+    assert resumed.data["session"]["mutation_evidence"][-1][
+        "completion_mode"
+    ] == "recovered"
 
     monkeypatch.setattr(
         after_resume,
@@ -2249,6 +2398,9 @@ def test_action_wal_recovers_pause_resume_and_stop_systemexit_boundaries(
 
     stopped = authority(env, client).snapshot()
     assert stopped.data["session"]["state"] == "stopped"
+    assert stopped.data["session"]["mutation_evidence"][-1][
+        "completion_mode"
+    ] == "recovered"
     assert stopped.data["mutation_intent"] is None
     assert RuntimeStateStore(env.runtime_state_path).load().traffic_mutation_intent is None
 
@@ -2286,6 +2438,9 @@ def test_update_wal_replays_idempotently_after_systemexit_before_promotion(
     assert recovered.ok is True
     assert recovered.data["mutation_intent"] is None
     assert recovered.data["session"]["groups"][0]["multiplier"] == "25%"
+    assert recovered.data["session"]["mutation_evidence"][-1][
+        "completion_mode"
+    ] == "replayed"
     assert len(
         [
             call
@@ -3083,7 +3238,10 @@ def test_completed_owned_session_cannot_later_claim_external_traffic(tmp_path: P
 
     client.ports[0].state = "running"
     external = runtime.snapshot()
-    assert external.data["session"]["state"] == "unknown"
+    assert external.data["session"]["state"] == "stopped"
+    assert external.data["session"]["groups"][0]["cleanup_evidence"][
+        "completion"
+    ] == "observed"
     assert external.data["port_states"][0] == {
         "port": 0,
         "state": "unknown",
@@ -3121,6 +3279,12 @@ def test_ad_hoc_start_replaces_any_stopped_session_group_with_overlapping_ports(
 
     assert started.ok is True
     assert [group["ports"] for group in started.data["session"]["groups"]] == [[2, 3], [0]]
+    assert [
+        group["ports"]
+        for group in started.data["session"]["completed_groups"]
+    ] == [[0, 1]]
+    assert started.data["session"]["groups"][1]["source"] == "ad_hoc"
+    assert started.data["session"]["groups"][1]["group_id"] is None
     snapshot = runtime.snapshot()
     assert snapshot.ok is True
     assert snapshot.data["session"]["state"] == "running"
@@ -3347,12 +3511,15 @@ def test_traffic_openapi_contracts_are_strict_and_typed() -> None:
         "superseded_reason",
     ):
         assert evidence_field in mutation_schema["required"]
-    assert "mutation_intent" in schema["components"]["schemas"][
+    runtime_schema = schema["components"]["schemas"][
         "TrafficRuntimeSnapshotResponse"
-    ]["required"]
-    assert "live_state_sampled" in schema["components"]["schemas"][
-        "TrafficRuntimeSnapshotResponse"
-    ]["required"]
+    ]
+    assert "authority" in runtime_schema["required"]
+    assert runtime_schema["properties"]["authority"] == {
+        "$ref": "#/components/schemas/RuntimeAuthorityIdentityResponse"
+    }
+    assert "mutation_intent" in runtime_schema["required"]
+    assert "live_state_sampled" in runtime_schema["required"]
 
     encoded = json.dumps(schema["paths"]["/api/trex/traffic/start"]["post"]["responses"]["200"])
     assert "TrafficStartResultResponse" in encoded

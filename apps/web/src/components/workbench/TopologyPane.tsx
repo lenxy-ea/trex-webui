@@ -15,7 +15,7 @@ type TopologyPaneProps = {
   overview: SystemOverview | null;
   portRecords: TrexPortRecord[];
   portStates: Record<number, TopologyPortState>;
-  profileLabel: string;
+  profileByPort: Record<number, string>;
   selectedPortId: number | null;
   onSelectPort: (portId: number) => void;
 };
@@ -28,11 +28,19 @@ function ownerLabel(port: TrexPortRecord) {
   return `(${displayValue(owner)})`;
 }
 
+function profileLabel(path: string | undefined) {
+  if (!path) {
+    return "No profile assigned";
+  }
+  const segments = path.split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? path;
+}
+
 export function TopologyPane({
   overview,
   portRecords,
   portStates,
-  profileLabel,
+  profileByPort,
   selectedPortId,
   onSelectPort
 }: TopologyPaneProps) {
@@ -92,7 +100,7 @@ export function TopologyPane({
               <small>{ownerLabel(port)}</small>
               <div className="tree-leaf">
                 <FileSliders aria-hidden="true" size={13} />
-                <span>{profileLabel}</span>
+                <span title={profileByPort[port.id]}>{profileLabel(profileByPort[port.id])}</span>
               </div>
             </button>
           ))

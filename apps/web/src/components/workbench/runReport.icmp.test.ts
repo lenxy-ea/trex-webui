@@ -5,6 +5,7 @@ import {
   expect,
   ipv4EnvelopeFields,
   it,
+  runReportTrafficSession,
   type ProfileWorkbenchStream
 } from "./runReportTestHarness";
 
@@ -109,7 +110,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:10:00.000Z",
         endedAt: "2026-06-10T00:10:02.000Z",
         profilePath: "icmp-echo-fe.yaml",
@@ -129,7 +130,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [icmpStream]
     });
@@ -358,7 +359,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:12:00.000Z",
         endedAt: "2026-06-10T00:12:02.000Z",
         profilePath: "icmp-reply-fe.yaml",
@@ -378,7 +379,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [ipv4Stream, ipv6Stream]
     });
@@ -541,7 +542,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:05:00.000Z",
         endedAt: "2026-06-09T00:05:02.000Z",
         profilePath: "icmpv6-echo-fe.yaml",
@@ -561,7 +562,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [icmpStream]
     });
@@ -728,7 +729,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:05:00.000Z",
         endedAt: "2026-06-09T00:05:02.000Z",
         profilePath: "icmpv6-type-code-fe.yaml",
@@ -748,7 +749,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [icmpStream]
     });
@@ -881,7 +882,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:08:00.000Z",
         endedAt: "2026-06-09T00:08:02.000Z",
         profilePath: "icmp-checksum.yaml",
@@ -901,7 +902,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [icmpStream]
     });
@@ -1036,7 +1037,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:10:00.000Z",
         endedAt: "2026-06-10T00:10:02.000Z",
         profilePath: "icmpv6-checksum.yaml",
@@ -1056,7 +1057,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [icmpv6Stream]
     });
@@ -1252,7 +1253,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:08:30.000Z",
         endedAt: "2026-06-09T00:08:32.000Z",
         profilePath: "icmp-echo-reply.yaml",
@@ -1272,7 +1273,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [icmpReplyStream, icmpv6ReplyStream]
     });
@@ -1449,7 +1450,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:06:00.000Z",
         endedAt: "2026-06-09T00:06:02.000Z",
         profilePath: "icmpv6-ra-fields.yaml",
@@ -1469,7 +1470,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [raStream]
     });
@@ -1623,7 +1624,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:07:30.000Z",
         endedAt: "2026-06-09T00:07:32.000Z",
         profilePath: "icmpv6-rs-fields.yaml",
@@ -1643,7 +1644,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [rsStream]
     });
@@ -1799,7 +1800,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:07:45.000Z",
         endedAt: "2026-06-09T00:07:47.000Z",
         profilePath: "icmpv6-ns-fields.yaml",
@@ -1819,7 +1820,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [nsStream]
     });
@@ -1978,7 +1979,7 @@ describe("run report builder / ICMP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:07:00.000Z",
         endedAt: "2026-06-09T00:07:02.000Z",
         profilePath: "icmpv6-na-fields.yaml",
@@ -1998,7 +1999,7 @@ describe("run report builder / ICMP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [naStream]
     });

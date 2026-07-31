@@ -6,6 +6,7 @@ import {
   ipv4EnvelopeFields,
   ipv6EnvelopeFields,
   it,
+  runReportTrafficSession,
   type ProfileWorkbenchStream
 } from "./runReportTestHarness";
 
@@ -133,7 +134,7 @@ describe("run report builder / TCP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:00.000Z",
         endedAt: "2026-06-09T00:09:02.000Z",
         profilePath: "tcp-header-fe.yaml",
@@ -153,7 +154,7 @@ describe("run report builder / TCP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [tcpStream]
     });
@@ -318,7 +319,7 @@ describe("run report builder / TCP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:15.000Z",
         endedAt: "2026-06-09T00:09:17.000Z",
         profilePath: "tcp-checksum.yaml",
@@ -338,7 +339,7 @@ describe("run report builder / TCP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [tcpStream]
     });
@@ -486,7 +487,7 @@ describe("run report builder / TCP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:11:00.000Z",
         endedAt: "2026-06-10T00:11:02.000Z",
         profilePath: "ipv6-tcp-checksum-fe.yaml",
@@ -506,7 +507,7 @@ describe("run report builder / TCP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [tcpStream]
     });
@@ -676,7 +677,7 @@ describe("run report builder / TCP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:12:00.000Z",
         endedAt: "2026-06-10T00:12:02.000Z",
         profilePath: "ipv6-tcp-header-fe.yaml",
@@ -696,7 +697,7 @@ describe("run report builder / TCP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [tcpStream]
     });
@@ -901,7 +902,7 @@ describe("run report builder / TCP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:09:30.000Z",
         endedAt: "2026-06-09T00:09:32.000Z",
         profilePath: "tcp-options-fe.yaml",
@@ -921,7 +922,7 @@ describe("run report builder / TCP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [tcpStream]
     });
@@ -1148,7 +1149,7 @@ describe("run report builder / TCP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:09:30.000Z",
         endedAt: "2026-06-10T00:09:32.000Z",
         profilePath: "ipv6-tcp-options-fe.yaml",
@@ -1168,7 +1169,7 @@ describe("run report builder / TCP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [tcpStream]
     });

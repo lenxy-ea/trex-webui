@@ -546,11 +546,20 @@ class RecordingStlService:
         markdown: str,
         payload: dict[str, object],
         file_name: str | None = None,
+        traffic_session_id: str | None = None,
+        traffic_session_revision: int | None = None,
     ) -> TrexCallResult:
         self.calls.append(
             (
                 "save_run_report",
-                {"title": title, "markdown": markdown, "payload": payload, "file_name": file_name},
+                {
+                    "title": title,
+                    "markdown": markdown,
+                    "payload": payload,
+                    "file_name": file_name,
+                    "traffic_session_id": traffic_session_id,
+                    "traffic_session_revision": traffic_session_revision,
+                },
             )
         )
         return TrexCallResult(
@@ -3709,9 +3718,25 @@ def test_save_run_report_calls_service(recording_service: RecordingStlService) -
     assert recording_service.calls == [
         (
             "save_run_report",
-            {"title": "Run", "markdown": "# Run", "payload": {"ports": [0, 1]}, "file_name": "run.json"},
+            {
+                "title": "Run",
+                "markdown": "# Run",
+                "payload": {"ports": [0, 1]},
+                "file_name": "run.json",
+                "traffic_session_id": None,
+                "traffic_session_revision": None,
+            },
         )
     ]
+
+
+def test_run_report_session_binding_requires_id_and_revision_together() -> None:
+    with pytest.raises(ValidationError, match="must be supplied together"):
+        RunReportSaveRequest(
+            title="Run",
+            markdown="# Run",
+            traffic_session_id="session-1",
+        )
 
 
 def test_download_run_report_calls_service(recording_service: RecordingStlService) -> None:

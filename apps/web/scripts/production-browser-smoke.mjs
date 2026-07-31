@@ -9,10 +9,25 @@ const defaultTimeoutMs = 20_000;
 const readOnlyMethods = new Set(["GET", "HEAD", "OPTIONS"]);
 
 export const readonlyWorkspaceChecks = Object.freeze([
-  { button: "Stats", dialog: "Dashboard", contentLabel: "Dashboard workspace" },
-  { button: "Traffic Profiles", dialog: "Traffic Profiles", contentLabel: "Traffic Profiles workspace" },
-  { button: "Capture", dialog: "Packet Capture", contentLabel: "Packet Capture workspace" },
-  { button: "Run Reports", dialog: "Run Reports", contentLabel: "Run Reports workspace" }
+  { button: "Stats", dialog: "Dashboard", contentLabel: "Dashboard workspace", assetStem: "DashboardWorkspace" },
+  { button: "Traffic Profiles", dialog: "Traffic Profiles", contentLabel: "Traffic Profiles workspace", assetStem: "TrafficProfilesWorkspace" },
+  { button: "Capture", dialog: "Packet Capture", contentLabel: "Packet Capture workspace", assetStem: "PacketCaptureWorkspace" },
+  {
+    button: "Tests",
+    dialog: "Quick Validation",
+    contentLabel: "Quick Validation workspace",
+    assetStem: "QuickValidationWorkspace",
+    responsePath: "/api/trex/quick-validation",
+    safeCloseConfirmation: "Leaving this workspace will not cancel traffic"
+  },
+  { button: "Run Reports", dialog: "Run Reports", contentLabel: "Run Reports workspace", assetStem: "RunReportsWorkspace" },
+  {
+    button: "TRex Daemon",
+    dialog: "TRex Daemon",
+    contentLabel: "TRex Daemon workspace",
+    assetStem: "TrexDaemonDialog",
+    responsePath: "/api/system/daemon"
+  }
 ]);
 
 export function isReadOnlyMethod(method) {
@@ -41,6 +56,39 @@ export async function captureEvidenceScreenshot(page, outputPath) {
   const screenshotPath = evidenceScreenshotPath(outputPath);
   await page.screenshot({ fullPage: true, path: screenshotPath });
   return screenshotPath;
+}
+
+export function configurePageTimeouts(page, timeoutMs) {
+  page.setDefaultTimeout(timeoutMs);
+  page.setDefaultNavigationTimeout(timeoutMs);
+}
+
+export function workspaceAssetEvidence(check, loadedAssets, loadedBefore) {
+  const asset = loadedAssets.find((candidate) => {
+    if (candidate.status !== 200 || !candidate.url.endsWith(".js")) {
+      return false;
+    }
+    const asset = candidate;
+    const filename = new URL(asset.url).pathname.split("/").at(-1) ?? "";
+    return filename.startsWith(`${check.assetStem}-`);
+  });
+  if (!asset) {
+    throw new Error(`${check.dialog} rendered without its expected ${check.assetStem} production chunk`);
+  }
+  return {
+    workspace: check.dialog,
+    url: asset.url,
+    status: asset.status,
+    source: loadedBefore.has(asset.url) ? "module-cache" : "network"
+  };
+}
+
+export function isSafeWorkspaceCloseConfirmation(check, type, message) {
+  return (
+    type === "confirm"
+    && typeof check.safeCloseConfirmation === "string"
+    && message.includes(check.safeCloseConfirmation)
+  );
 }
 
 function optionValue(argv, index, name) {
@@ -170,31 +218,50 @@ async function exerciseLazyWorkspace(page, result, check, timeoutMs) {
   const loadedJavascript = new Set(
     result.loaded_assets.filter((asset) => asset.url.endsWith(".js") && asset.status === 200).map((asset) => asset.url)
   );
-  const chunkResponsePromise = guardDeferredPageWait(
+  const dataResponsePromise = check.responsePath ? guardDeferredPageWait(
     page.waitForResponse(
-      (response) => {
-        const url = compactUrl(response.url());
-        return (
-          new URL(response.url()).pathname.startsWith("/assets/") &&
-          new URL(response.url()).pathname.endsWith(".js") &&
-          response.status() === 200 &&
-          !loadedJavascript.has(url)
-        );
-      },
+      (response) => new URL(response.url()).pathname === check.responsePath && response.request().method() === "GET",
       { timeout: timeoutMs }
     )
-  );
+  ) : null;
 
   await page.getByRole("button", { name: check.button, exact: true }).click();
   const dialog = page.getByRole("dialog", { name: check.dialog, exact: true });
   await dialog.waitFor({ state: "visible", timeout: timeoutMs });
   await dialog.locator(`[aria-label="${check.contentLabel}"]`).waitFor({ state: "visible", timeout: timeoutMs });
-  const chunkResponse = await chunkResponsePromise;
-  const chunkUrl = compactUrl(chunkResponse.url());
-  result.lazy_workspace_assets.push({ workspace: check.dialog, url: chunkUrl, status: chunkResponse.status() });
-  result.steps.push(`${check.dialog} lazy workspace loaded from ${chunkUrl}`);
+  if (dataResponsePromise) {
+    const dataResponse = await dataResponsePromise;
+    if (!dataResponse.ok()) {
+      throw new Error(`${check.dialog} read-only data load failed with HTTP ${dataResponse.status()}`);
+    }
+    result.steps.push(`${check.dialog} read-only data contract completed`);
+  }
 
-  await page.getByTitle(`Close ${check.dialog}`, { exact: true }).click();
+  const assetEvidence = workspaceAssetEvidence(check, result.loaded_assets, loadedJavascript);
+  result.lazy_workspace_assets.push(assetEvidence);
+  result.steps.push(assetEvidence.source === "network"
+    ? `${check.dialog} lazy workspace loaded from ${assetEvidence.url}`
+    : `${check.dialog} workspace rendered from an already-loaded module`);
+
+  let closeDialogError = null;
+  const handleCloseDialog = async (nativeDialog) => {
+    if (isSafeWorkspaceCloseConfirmation(check, nativeDialog.type(), nativeDialog.message())) {
+      await nativeDialog.accept();
+      result.steps.push(`${check.dialog} safe leave-running confirmation accepted`);
+      return;
+    }
+    closeDialogError = `unexpected ${nativeDialog.type()} dialog while closing ${check.dialog}: ${nativeDialog.message()}`;
+    await nativeDialog.dismiss();
+  };
+  page.on("dialog", handleCloseDialog);
+  try {
+    await dialog.getByTitle(`Close ${check.dialog}`, { exact: true }).click();
+  } finally {
+    page.off("dialog", handleCloseDialog);
+  }
+  if (closeDialogError) {
+    throw new Error(closeDialogError);
+  }
   await dialog.waitFor({ state: "detached", timeout: timeoutMs });
   result.steps.push(`${check.dialog} closed without a write request`);
 }
@@ -273,6 +340,15 @@ async function exerciseReadOnlyUi(page, result, timeoutMs) {
     await exerciseLazyWorkspace(page, result, check, timeoutMs);
   }
 
+  await page.getByRole("button", { name: "File", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Preferences", exact: true }).click();
+  const preferencesDialog = page.getByRole("dialog", { name: "Preferences", exact: true });
+  await preferencesDialog.waitFor({ state: "visible", timeout: timeoutMs });
+  await preferencesDialog.locator('[aria-label="Preferences"]').waitFor({ state: "visible", timeout: timeoutMs });
+  await preferencesDialog.getByRole("button", { name: "OK", exact: true }).click();
+  await preferencesDialog.waitFor({ state: "detached", timeout: timeoutMs });
+  result.steps.push("read-only Preferences dialog opened and closed");
+
   await page.getByRole("button", { name: "Help", exact: true }).click();
   await page.getByRole("dialog", { name: "TRex", exact: true }).waitFor({ state: "visible", timeout: timeoutMs });
   await page.locator('[aria-label="About TRex"]').waitFor({ state: "visible", timeout: timeoutMs });
@@ -336,6 +412,7 @@ export async function runProductionBrowserSmoke(options) {
       await route.continue();
     });
     page = await context.newPage();
+    configurePageTimeouts(page, options.timeoutMs);
     page.on("pageerror", (error) => {
       if (collecting) {
         result.page_errors.push(errorMessage(error));

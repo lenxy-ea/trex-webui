@@ -27,7 +27,9 @@ from app.trex.runtime_state import (
     RuntimeStateDocument,
     RuntimeStateError,
     RuntimeStateStore,
+    TrafficCleanupEvidenceState,
     TrafficGroupState,
+    TrafficMutationEvidenceState,
     TrafficMutationIntentState,
     TrafficSessionGroupState,
     TrafficSessionState,
@@ -53,6 +55,8 @@ ProfileResolver = Callable[[str], TrexCallResult]
 PortState = Literal["running", "paused", "stopped", "unknown"]
 GroupState = Literal["running", "paused", "stopped", "mixed", "unknown"]
 PortLinkState = Literal["up", "down", "unknown"]
+TrafficStartSource = Literal["plan", "ad_hoc"]
+TrafficCompletionMode = Literal["direct", "recovered", "replayed", "hard_stop"]
 
 DEFAULT_TRAFFIC_PROFILE = "udp_1pkt_simple.py"
 TREX_CONFIG_MAX_BYTES = 1024 * 1024
@@ -1000,6 +1004,21 @@ class TrafficRuntimeAuthority:
                         group.state = "stopped"
                         group.hard_stop_at = None
                         group.updated_at = now_text
+                        if (
+                            current_session.evidence_version == 1
+                            and group.cleanup_evidence is None
+                        ):
+                            group.ended_at = now_text
+                            group.cleanup_evidence = TrafficCleanupEvidenceState(
+                                completion="hard_stop",
+                                completed_at=now_text,
+                                final_port_states={
+                                    port: "stopped"
+                                    for port in group.ports
+                                },
+                                acquisition_restored=True,
+                                wal_cleared=False,
+                            )
                         matched = True
                     if not matched:
                         raise TrafficSessionIdConflict(
@@ -1010,6 +1029,7 @@ class TrafficRuntimeAuthority:
                         current_session.groups
                     )
                     current_session.updated_at = now_text
+                    current_session.revision += 1
                     current_session.ended_at = (
                         now_text
                         if current_session.state == "stopped"
@@ -1214,6 +1234,7 @@ class TrafficRuntimeAuthority:
                 target_ports,
                 current_authority,
                 hard_stop_intent.nonce,
+                completion_mode="hard_stop",
             )
         except RuntimeStateError as exc:
             self._retain_failed_mutation_intent(
@@ -1428,6 +1449,9 @@ class TrafficRuntimeAuthority:
                 group=group,
                 expected_session_id=expected_session_id,
                 hard_stop_at=hard_stop_at,
+                source="plan",
+                plan_revision=expected_revision,
+                persisted_group_id=group.id,
             )
 
     def start(
@@ -1453,7 +1477,7 @@ class TrafficRuntimeAuthority:
             if isinstance(normalized_ports, TrexCallResult):
                 return normalized_ports
             try:
-                document = self.store.load()
+                self.store.load()
                 fallback_ports = (
                     list(range(_load_config(self.env).port_limit))
                     if normalized_ports is None
@@ -1461,15 +1485,10 @@ class TrafficRuntimeAuthority:
                 )
             except RuntimeStateError as exc:
                 return _failure("traffic_runtime_state_invalid", str(exc))
-            group = self._matching_plan_group(document, normalized_ports)
-            if group is not None and group.profile_path == profile_path:
-                group_id = group.id
-            else:
-                group_id = None
             try:
                 transient_group = TrafficGroupState(
-                    id=group_id or "ad-hoc",
-                    name=group.name if group is not None else "Ad hoc traffic",
+                    id="ad-hoc",
+                    name="Ad hoc traffic",
                     ports=fallback_ports,
                     profile_path=profile_path,
                     multiplier=multiplier,
@@ -1486,7 +1505,9 @@ class TrafficRuntimeAuthority:
                 group=transient_group,
                 expected_session_id=expected_session_id,
                 hard_stop_at=hard_stop_at,
-                persisted_group_id=group_id,
+                source="ad_hoc",
+                plan_revision=None,
+                persisted_group_id=None,
                 ports_override=normalized_ports,
             )
 
@@ -1558,6 +1579,12 @@ class TrafficRuntimeAuthority:
                 return _failure("traffic_mutation_recovery_required", str(exc))
             except RuntimeStateError as exc:
                 return _failure("traffic_session_unowned", str(exc))
+            if session_before.evidence_version != 1:
+                return _failure(
+                    "traffic_session_evidence_unavailable",
+                    "legacy traffic sessions may only be stopped; start a new "
+                    "session before updating traffic",
+                )
             budget_failure = self._hard_stop_rpc_budget_failure(
                 [
                     group.hard_stop_at
@@ -1736,6 +1763,12 @@ class TrafficRuntimeAuthority:
                 return _failure("traffic_mutation_recovery_required", str(exc))
             except RuntimeStateError as exc:
                 return _failure("traffic_session_unowned", str(exc))
+            if session_before.evidence_version != 1 and action != "stop":
+                return _failure(
+                    "traffic_session_evidence_unavailable",
+                    "legacy traffic sessions may only be stopped; start a new "
+                    f"session before traffic {action}",
+                )
             leased_groups = [
                 group
                 for group in session_before.groups
@@ -1900,6 +1933,8 @@ class TrafficRuntimeAuthority:
         group: TrafficGroupState,
         expected_session_id: str | None,
         hard_stop_at: str | None,
+        source: TrafficStartSource,
+        plan_revision: int | None,
         persisted_group_id: str | None = None,
         ports_override: list[int] | None = None,
     ) -> TrexCallResult:
@@ -1973,6 +2008,20 @@ class TrafficRuntimeAuthority:
             if ports_override is None
             else list(ports_override)
         )
+        if current.traffic_session is not None:
+            active_overlaps = [
+                candidate.group_id
+                or "/".join(f"P{port}" for port in candidate.ports)
+                for candidate in current.traffic_session.groups
+                if set(candidate.ports).intersection(target_ports)
+                and candidate.state != "stopped"
+            ]
+            if active_overlaps:
+                return _failure(
+                    "traffic_group_runtime_busy",
+                    "traffic start cannot replace active managed groups: "
+                    + ", ".join(active_overlaps),
+                )
         resolved_profile = self.resolve_profile_path(group.profile_path)
         if not resolved_profile.ok:
             return resolved_profile
@@ -2021,11 +2070,7 @@ class TrafficRuntimeAuthority:
             return budget_failure
         now = utc_now_iso()
         start_group = TrafficSessionGroupState(
-            group_id=(
-                persisted_group_id
-                if persisted_group_id is not None
-                else group.id
-            ),
+            group_id=persisted_group_id,
             ports=target_ports,
             profile_path=str(resolved_profile.data),
             multiplier=group.multiplier,
@@ -2049,6 +2094,8 @@ class TrafficRuntimeAuthority:
                 },
                 session_before=current.traffic_session,
                 start_group=start_group,
+                start_source=source,
+                start_plan_revision=plan_revision,
                 start_profile_sha256=profile_sha256,
                 start_clear_existing=group.clear_existing,
                 start_force=group.force,
@@ -2167,16 +2214,6 @@ class TrafficRuntimeAuthority:
             group_ids.add(group.id)
             assigned_ports.update(group.ports)
         return normalized
-
-    def _matching_plan_group(
-        self,
-        document: RuntimeStateDocument,
-        ports: list[int] | None,
-    ) -> TrafficGroupState | None:
-        if ports is None:
-            return None
-        target = set(ports)
-        return next((group for group in document.traffic_groups if set(group.ports) == target), None)
 
     def _sample_mutation_baseline(
         self,
@@ -2393,6 +2430,8 @@ class TrafficRuntimeAuthority:
         desired_port_states: dict[int, PortState],
         session_before: TrafficSessionState | None,
         start_group: TrafficSessionGroupState | None = None,
+        start_source: TrafficStartSource | None = None,
+        start_plan_revision: int | None = None,
         start_profile_sha256: str | None = None,
         start_clear_existing: bool | None = None,
         start_force: bool | None = None,
@@ -2423,6 +2462,8 @@ class TrafficRuntimeAuthority:
                 if start_group is not None
                 else None
             ),
+            start_source=start_source,
+            start_plan_revision=start_plan_revision,
             start_profile_sha256=start_profile_sha256,
             start_clear_existing=start_clear_existing,
             start_force=start_force,
@@ -3052,6 +3093,7 @@ class TrafficRuntimeAuthority:
                 session = self._persist_start(
                     authority=current_authority,
                     intent_nonce=intent.nonce,
+                    completion_mode="recovered",
                 )
                 self._owned_session_id = session.id
                 return (
@@ -3104,6 +3146,7 @@ class TrafficRuntimeAuthority:
                 session = self._persist_start(
                     authority=current_authority,
                     intent_nonce=intent.nonce,
+                    completion_mode="replayed",
                 )
                 self._owned_session_id = session.id
                 return (
@@ -3185,6 +3228,7 @@ class TrafficRuntimeAuthority:
                 intent.update_multiplier,
                 current_authority,
                 intent.nonce,
+                completion_mode="replayed",
             )
             if session is not None:
                 self._owned_session_id = session.id
@@ -3210,6 +3254,7 @@ class TrafficRuntimeAuthority:
                 intent.ports,
                 current_authority,
                 intent.nonce,
+                completion_mode="recovered",
             )
             if session is not None and session.state != "stopped":
                 self._owned_session_id = session.id
@@ -3309,6 +3354,7 @@ class TrafficRuntimeAuthority:
             intent.ports,
             current_authority,
             intent.nonce,
+            completion_mode="replayed",
         )
         if session is not None and session.state != "stopped":
             self._owned_session_id = session.id
@@ -3373,7 +3419,21 @@ class TrafficRuntimeAuthority:
                     group.state = "stopped"
                     group.hard_stop_at = None
                     group.updated_at = now
+                    if (
+                        session.evidence_version == 1
+                        and group.cleanup_evidence is None
+                    ):
+                        group.ended_at = now
+                        group.cleanup_evidence = TrafficCleanupEvidenceState(
+                            completion="observed",
+                            completed_at=now,
+                            final_port_states={
+                                port: "stopped"
+                                for port in group.ports
+                            },
+                        )
                 session.state = "stopped"
+                session.revision += 1
                 session.updated_at = now
                 session.ended_at = now
                 session.reconciliation = (
@@ -3390,11 +3450,13 @@ class TrafficRuntimeAuthority:
         *,
         authority: RuntimeAuthorityIdentity,
         intent_nonce: str,
+        completion_mode: TrafficCompletionMode = "direct",
     ) -> TrafficSessionState:
         session = self._promote_traffic_mutation_intent(
             intent_nonce,
             "start",
             authority,
+            completion_mode,
         )
         if session is None:
             raise RuntimeStateError("persisted traffic session is missing after start")
@@ -3433,6 +3495,11 @@ class TrafficRuntimeAuthority:
             raise TrafficSessionIdConflict(
                 f"traffic session {session.id} is not safely active: {session.state}"
             )
+        if session.evidence_version != 1:
+            raise TrafficSessionIdConflict(
+                "legacy traffic sessions cannot accept additional starts; "
+                "stop the session and start a new evidenced run"
+            )
         if session.authority != current_authority:
             raise TrafficSessionIdConflict(
                 "traffic session belongs to a different TRex target or daemon generation"
@@ -3448,12 +3515,14 @@ class TrafficRuntimeAuthority:
         multiplier: str,
         authority: RuntimeAuthorityIdentity,
         intent_nonce: str,
+        completion_mode: TrafficCompletionMode = "direct",
     ) -> TrafficSessionState | None:
         del ports, multiplier
         return self._promote_traffic_mutation_intent(
             intent_nonce,
             "update",
             authority,
+            completion_mode,
         )
 
     def _persist_action(
@@ -3462,12 +3531,14 @@ class TrafficRuntimeAuthority:
         ports: list[int],
         authority: RuntimeAuthorityIdentity,
         intent_nonce: str,
+        completion_mode: TrafficCompletionMode = "direct",
     ) -> TrafficSessionState | None:
         del ports
         session = self._promote_traffic_mutation_intent(
             intent_nonce,
             action,
             authority,
+            completion_mode,
         )
         if session is not None and session.state == "stopped":
             self._owned_session_id = None
@@ -3478,6 +3549,7 @@ class TrafficRuntimeAuthority:
         intent_nonce: str,
         expected_operation: str,
         authority: RuntimeAuthorityIdentity,
+        completion_mode: TrafficCompletionMode,
     ) -> TrafficSessionState | None:
         now = utc_now_iso()
 
@@ -3499,6 +3571,17 @@ class TrafficRuntimeAuthority:
                 raise TrafficSessionIdConflict(
                     "the managed traffic session changed before mutation promotion"
                 )
+            evidence = TrafficMutationEvidenceState(
+                intent_nonce=intent.nonce,
+                operation=intent.operation,
+                completion_mode=completion_mode,
+                ports=list(intent.ports),
+                baseline_port_states=dict(intent.baseline_port_states),
+                desired_port_states=dict(intent.desired_port_states),
+                baseline_acquired_ports=list(intent.baseline_acquired_ports),
+                prepared_at=intent.prepared_at,
+                completed_at=now,
+            )
 
             if intent.operation == "start":
                 started_group = intent.start_group
@@ -3506,6 +3589,33 @@ class TrafficRuntimeAuthority:
                     raise RuntimeStateError(
                         "traffic start intent is missing its exact group"
                     )
+                evidenced_start = intent.start_source is not None
+                promoted_group = (
+                    started_group.model_copy(
+                        update={
+                            "run_id": intent.nonce,
+                            "source": intent.start_source,
+                            "plan_revision": intent.start_plan_revision,
+                            "profile_sha256": intent.start_profile_sha256,
+                            "start_multiplier": started_group.multiplier,
+                            "start_force": intent.start_force,
+                            "start_total": intent.start_total,
+                            "start_synchronized": intent.start_synchronized,
+                            "start_clear_existing": intent.start_clear_existing,
+                            "started_at": now,
+                            "ended_at": None,
+                            "start_evidence": evidence,
+                            "cleanup_evidence": None,
+                            "updated_at": now,
+                        },
+                        deep=True,
+                    )
+                    if evidenced_start
+                    else started_group.model_copy(
+                        update={"updated_at": now},
+                        deep=True,
+                    )
+                )
                 if intent.expected_session_id is not None:
                     existing = document.traffic_session
                     if (
@@ -3519,17 +3629,27 @@ class TrafficRuntimeAuthority:
                             "the managed traffic session changed before start promotion"
                         )
                     session = existing.model_copy(deep=True)
+                    replaced_groups = [
+                        candidate
+                        for candidate in session.groups
+                        if set(candidate.ports).intersection(intent.ports)
+                    ]
+                    if any(
+                        candidate.state != "stopped"
+                        for candidate in replaced_groups
+                    ):
+                        raise TrafficSessionIdConflict(
+                            "an active traffic group cannot be replaced by a new run"
+                        )
                     session.groups = [
                         candidate
                         for candidate in session.groups
                         if not set(candidate.ports).intersection(intent.ports)
                     ]
-                    session.groups.append(
-                        started_group.model_copy(
-                            update={"updated_at": now},
-                            deep=True,
-                        )
-                    )
+                    session.completed_groups.extend(replaced_groups)
+                    session.groups.append(promoted_group)
+                    session.revision += 1
+                    session.mutation_evidence.append(evidence)
                 else:
                     existing = document.traffic_session
                     if (
@@ -3542,16 +3662,14 @@ class TrafficRuntimeAuthority:
                         )
                     session = TrafficSessionState(
                         id=intent.nonce,
+                        revision=1 if evidenced_start else 0,
+                        evidence_version=1 if evidenced_start else None,
                         authority=authority,
                         state="running",
                         started_at=now,
                         updated_at=now,
-                        groups=[
-                            started_group.model_copy(
-                                update={"updated_at": now},
-                                deep=True,
-                            )
-                        ],
+                        groups=[promoted_group],
+                        mutation_evidence=[evidence] if evidenced_start else [],
                     )
                 session.state = self._aggregate_state(session.groups)
                 session.updated_at = now
@@ -3572,6 +3690,7 @@ class TrafficRuntimeAuthority:
                     )
                 session = session.model_copy(deep=True)
                 target = set(intent.ports)
+                evidenced_session = session.evidence_version == 1
                 if intent.operation == "update":
                     if intent.update_multiplier is None:
                         raise RuntimeStateError(
@@ -3611,6 +3730,31 @@ class TrafficRuntimeAuthority:
                     session.ended_at = (
                         now if session.state == "stopped" else None
                     )
+                    if evidenced_session:
+                        cleanup_completion = (
+                            "hard_stop"
+                            if completion_mode == "hard_stop"
+                            else "operator_stop"
+                        )
+                        for group in session.groups:
+                            if (
+                                group.state == "stopped"
+                                and group.cleanup_evidence is None
+                            ):
+                                group.ended_at = now
+                                group.cleanup_evidence = TrafficCleanupEvidenceState(
+                                    completion=cleanup_completion,
+                                    completed_at=now,
+                                    final_port_states={
+                                        port: "stopped"
+                                        for port in group.ports
+                                    },
+                                    intent_nonce=intent.nonce,
+                                    acquisition_restored=True,
+                                )
+                if evidenced_session:
+                    session.revision += 1
+                    session.mutation_evidence.append(evidence)
                 session.updated_at = now
                 session.reconciliation = (
                     f"promoted from durable traffic {intent.operation} intent"
@@ -3793,7 +3937,14 @@ class TrafficRuntimeAuthority:
         now = utc_now_iso()
         reconciled_groups: list[TrafficSessionGroupState] = []
         for group in session.groups:
-            if owned:
+            if session.evidence_version == 1 and group.cleanup_evidence is not None:
+                # A completed evidenced run is terminal. Later live traffic on
+                # the same port is external and must not rewrite this run.
+                port_states = {
+                    port: "stopped"
+                    for port in group.ports
+                }
+            elif owned:
                 port_states = {
                     port: live_states.get(port, "unknown")
                     for port in group.ports
@@ -3811,22 +3962,35 @@ class TrafficRuntimeAuthority:
             hard_stop_at = (
                 None if state == "stopped" else group.hard_stop_at
             )
-            reconciled_groups.append(
-                group.model_copy(
-                    update={
-                        "state": state,
-                        "port_states": port_states,
-                        "hard_stop_at": hard_stop_at,
-                        "updated_at": now,
-                    }
-                )
-                if (
-                    group.state != state
-                    or group.port_states != port_states
-                    or group.hard_stop_at != hard_stop_at
-                )
-                else group
+            group_changed = (
+                group.state != state
+                or group.port_states != port_states
+                or group.hard_stop_at != hard_stop_at
             )
+            if not group_changed:
+                reconciled_groups.append(group)
+                continue
+            group_updates: dict[str, Any] = {
+                "state": state,
+                "port_states": port_states,
+                "hard_stop_at": hard_stop_at,
+                "updated_at": now,
+            }
+            if (
+                session.evidence_version == 1
+                and state == "stopped"
+                and group.cleanup_evidence is None
+            ):
+                group_updates["ended_at"] = now
+                group_updates["cleanup_evidence"] = TrafficCleanupEvidenceState(
+                    completion="observed",
+                    completed_at=now,
+                    final_port_states={
+                        port: "stopped"
+                        for port in group.ports
+                    },
+                )
+            reconciled_groups.append(group.model_copy(update=group_updates))
         aggregate = self._aggregate_state(reconciled_groups)
         full_reconciliation = reconciliation
         if not authority_matches:
@@ -3850,7 +4014,12 @@ class TrafficRuntimeAuthority:
             current.traffic_session.groups = reconciled_groups
             current.traffic_session.state = aggregate
             current.traffic_session.updated_at = now
-            current.traffic_session.ended_at = now if aggregate == "stopped" else None
+            current.traffic_session.ended_at = (
+                current.traffic_session.ended_at or now
+                if aggregate == "stopped"
+                else None
+            )
+            current.traffic_session.revision += 1
             current.traffic_session.reconciliation = full_reconciliation
             return current
 
@@ -3900,6 +4069,10 @@ class TrafficRuntimeAuthority:
         return {
             "plan_revision": document.traffic_plan_revision,
             "groups": [group.model_dump(mode="json") for group in document.traffic_groups],
+            # Expose the currently sampled backend-owned authority even when
+            # there is no prior traffic session. Safety-critical clients need
+            # this generation CAS before adopting an ambiguous start response.
+            "authority": current_authority.model_dump(mode="json"),
             "session": session.model_dump(mode="json") if session is not None else None,
             "mutation_intent": (
                 document.traffic_mutation_intent.model_dump(mode="json")

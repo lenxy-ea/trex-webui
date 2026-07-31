@@ -2,12 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   captureEvidenceScreenshot,
+  configurePageTimeouts,
   evidenceScreenshotPath,
+  isSafeWorkspaceCloseConfirmation,
   isReadOnlyMethod,
   normalizeBaseUrl,
   parseOptions,
   readonlyWorkspaceChecks,
-  smokeFailureMessages
+  smokeFailureMessages,
+  workspaceAssetEvidence
 } from "./production-browser-smoke.mjs";
 
 describe("production browser smoke safeguards", () => {
@@ -33,6 +36,18 @@ describe("production browser smoke safeguards", () => {
     await expect(captureEvidenceScreenshot({ screenshot }, "/tmp/production-smoke.json")).rejects.toThrow("disk full");
   });
 
+  it("applies the requested timeout to locator actions and navigation", () => {
+    const page = {
+      setDefaultTimeout: vi.fn(),
+      setDefaultNavigationTimeout: vi.fn()
+    };
+
+    configurePageTimeouts(page, 4321);
+
+    expect(page.setDefaultTimeout).toHaveBeenCalledWith(4321);
+    expect(page.setDefaultNavigationTimeout).toHaveBeenCalledWith(4321);
+  });
+
   it("normalizes an API base URL to the production WebUI root", () => {
     expect(normalizeBaseUrl("http://127.0.0.1/api")).toBe("http://127.0.0.1/");
     expect(normalizeBaseUrl("https://trex.example/lab")).toBe("https://trex.example/lab/");
@@ -49,11 +64,75 @@ describe("production browser smoke safeguards", () => {
 
   it("covers every production lazy workspace through a read-only open/close path", () => {
     expect(readonlyWorkspaceChecks).toEqual([
-      { button: "Stats", dialog: "Dashboard", contentLabel: "Dashboard workspace" },
-      { button: "Traffic Profiles", dialog: "Traffic Profiles", contentLabel: "Traffic Profiles workspace" },
-      { button: "Capture", dialog: "Packet Capture", contentLabel: "Packet Capture workspace" },
-      { button: "Run Reports", dialog: "Run Reports", contentLabel: "Run Reports workspace" }
+      { button: "Stats", dialog: "Dashboard", contentLabel: "Dashboard workspace", assetStem: "DashboardWorkspace" },
+      { button: "Traffic Profiles", dialog: "Traffic Profiles", contentLabel: "Traffic Profiles workspace", assetStem: "TrafficProfilesWorkspace" },
+      { button: "Capture", dialog: "Packet Capture", contentLabel: "Packet Capture workspace", assetStem: "PacketCaptureWorkspace" },
+      {
+        button: "Tests",
+        dialog: "Quick Validation",
+        contentLabel: "Quick Validation workspace",
+        assetStem: "QuickValidationWorkspace",
+        responsePath: "/api/trex/quick-validation",
+        safeCloseConfirmation: "Leaving this workspace will not cancel traffic"
+      },
+      { button: "Run Reports", dialog: "Run Reports", contentLabel: "Run Reports workspace", assetStem: "RunReportsWorkspace" },
+      {
+        button: "TRex Daemon",
+        dialog: "TRex Daemon",
+        contentLabel: "TRex Daemon workspace",
+        assetStem: "TrexDaemonDialog",
+        responsePath: "/api/system/daemon"
+      }
     ]);
+  });
+
+  it("records the workspace entry chunk instead of an earlier shared chunk", () => {
+    const check = { dialog: "Traffic Profiles", assetStem: "TrafficProfilesWorkspace" };
+    const evidence = workspaceAssetEvidence(check, [
+      { url: "http://trex/assets/save-shared.js", status: 200 },
+      { url: "http://trex/assets/TrafficProfilesWorkspace-entry.js", status: 200 }
+    ], new Set());
+
+    expect(evidence).toEqual({
+      workspace: "Traffic Profiles",
+      url: "http://trex/assets/TrafficProfilesWorkspace-entry.js",
+      status: 200,
+      source: "network"
+    });
+  });
+
+  it("accepts an already-loaded workspace module without waiting for a duplicate response", () => {
+    const check = { dialog: "Dashboard", assetStem: "DashboardWorkspace" };
+    const url = "http://trex/assets/DashboardWorkspace-entry.js";
+
+    expect(workspaceAssetEvidence(check, [{ url, status: 200 }], new Set([url]))).toEqual({
+      workspace: "Dashboard",
+      url,
+      status: 200,
+      source: "module-cache"
+    });
+  });
+
+  it("rejects a shared chunk when the named workspace entry chunk is missing", () => {
+    const check = { dialog: "Dashboard", assetStem: "DashboardWorkspace" };
+
+    expect(() => workspaceAssetEvidence(
+      check,
+      [{ url: "http://trex/assets/save-shared.js", status: 200 }],
+      new Set()
+    )).toThrow("Dashboard rendered without its expected DashboardWorkspace production chunk");
+  });
+
+  it("only accepts the explicit leave-running confirmation while closing a workspace", () => {
+    const quickValidation = readonlyWorkspaceChecks.find((check) => check.dialog === "Quick Validation");
+
+    expect(isSafeWorkspaceCloseConfirmation(
+      quickValidation,
+      "confirm",
+      "Quick Validation is still active. Leaving this workspace will not cancel traffic; the backend safety lease remains in force. Continue?"
+    )).toBe(true);
+    expect(isSafeWorkspaceCloseConfirmation(quickValidation, "confirm", "Stop traffic now?")).toBe(false);
+    expect(isSafeWorkspaceCloseConfirmation(quickValidation, "alert", "Leaving this workspace will not cancel traffic")).toBe(false);
   });
 
   it("parses explicit gate evidence options", () => {

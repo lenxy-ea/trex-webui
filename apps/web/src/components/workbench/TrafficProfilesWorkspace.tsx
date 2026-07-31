@@ -192,7 +192,8 @@ export function TrafficProfilesWorkspace({
   onTrafficDurationEnabledChange,
   onTrafficDurationValueChange,
   onTrafficPlanDirtyChange,
-  onTrafficSessionAuthorityChange,
+  onTrafficRuntimeChange,
+  onTrafficStartResult,
   onStartTraffic,
   onStartAllTraffic,
   onUpdateTraffic,
@@ -803,7 +804,8 @@ export function TrafficProfilesWorkspace({
           requireConfirmation={requireConfirmation}
           runtimeControlDisabledReason={runtimeControlDisabledReason}
           onDirtyChange={onTrafficPlanDirtyChange}
-          onSessionAuthorityChange={onTrafficSessionAuthorityChange}
+          onRuntimeChange={onTrafficRuntimeChange}
+          onStartResult={onTrafficStartResult}
         />
 
         <div className="profile-workbar">

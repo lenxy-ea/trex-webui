@@ -4,6 +4,8 @@ from typing import Any, Generic, Literal, Optional, TypeVar, Union
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel
 
+from app.trex.quick_validation import QuickValidationStatusResponse
+
 
 TrexData = TypeVar("TrexData")
 CaptureId = Union[int, str]
@@ -200,14 +202,56 @@ class TrafficGroupResponse(StrictResponseModel):
     tunables: dict[str, Any]
 
 
+class TrafficMutationEvidenceResponse(StrictResponseModel):
+    intent_nonce: str
+    operation: Literal["start", "stop", "pause", "resume", "update"]
+    completion_mode: Literal["direct", "recovered", "replayed", "hard_stop"]
+    ports: list[int]
+    baseline_port_states: dict[
+        int,
+        Literal["running", "paused", "stopped", "unknown"],
+    ]
+    desired_port_states: dict[
+        int,
+        Literal["running", "paused", "stopped", "unknown"],
+    ]
+    baseline_acquired_ports: list[int]
+    prepared_at: str
+    completed_at: str
+    acquisition_restored: Literal[True]
+    wal_cleared: Literal[True]
+
+
+class TrafficCleanupEvidenceResponse(StrictResponseModel):
+    completion: Literal["operator_stop", "hard_stop", "observed"]
+    completed_at: str
+    final_port_states: dict[int, Literal["stopped"]]
+    intent_nonce: Optional[str]
+    acquisition_restored: Optional[Literal[True]]
+    wal_cleared: bool
+
+
 class TrafficSessionGroupResponse(StrictResponseModel):
     group_id: Optional[str]
+    run_id: Optional[str]
+    source: Optional[Literal["plan", "ad_hoc"]]
+    plan_revision: Optional[int]
     ports: list[int]
     profile_path: str
+    profile_sha256: Optional[str]
+    start_multiplier: Optional[str]
     multiplier: str
     duration: float
+    start_force: Optional[bool]
+    start_total: Optional[bool]
+    start_synchronized: Optional[bool]
+    start_clear_existing: Optional[bool]
+    started_at: Optional[str]
+    ended_at: Optional[str]
     hard_stop_at: Optional[str]
     tunables: dict[str, Any]
+    start_evidence: Optional[TrafficMutationEvidenceResponse]
+    cleanup_evidence: Optional[TrafficCleanupEvidenceResponse]
     state: TrafficRunState
     port_states: dict[int, Literal["running", "paused", "stopped", "unknown"]]
     updated_at: str
@@ -224,12 +268,16 @@ class RuntimeAuthorityIdentityResponse(StrictResponseModel):
 
 class TrafficSessionResponse(StrictResponseModel):
     id: str
+    revision: int
+    evidence_version: Optional[Literal[1]]
     authority: RuntimeAuthorityIdentityResponse
     state: TrafficRunState
     started_at: str
     updated_at: str
     ended_at: Optional[str]
     groups: list[TrafficSessionGroupResponse]
+    completed_groups: list[TrafficSessionGroupResponse]
+    mutation_evidence: list[TrafficMutationEvidenceResponse]
     reconciliation: Optional[str]
 
 
@@ -273,6 +321,8 @@ class TrafficMutationIntentResponse(StrictResponseModel):
     ]
     session_before: Optional[TrafficSessionResponse]
     start_group: Optional[TrafficSessionGroupResponse]
+    start_source: Optional[Literal["plan", "ad_hoc"]]
+    start_plan_revision: Optional[int]
     start_profile_sha256: Optional[str]
     start_clear_existing: Optional[bool]
     start_force: Optional[bool]
@@ -296,6 +346,7 @@ class TrafficMutationIntentResponse(StrictResponseModel):
 class TrafficRuntimeSnapshotResponse(StrictResponseModel):
     plan_revision: int
     groups: list[TrafficGroupResponse]
+    authority: RuntimeAuthorityIdentityResponse
     session: Optional[TrafficSessionResponse]
     mutation_intent: Optional[TrafficMutationIntentResponse]
     config: TrafficConfigIdentityResponse
@@ -306,6 +357,12 @@ class TrafficRuntimeSnapshotResponse(StrictResponseModel):
 
 
 class TrafficRuntimeResultResponse(TrexResultResponse[TrafficRuntimeSnapshotResponse]):
+    pass
+
+
+class QuickValidationResultResponse(
+    TrexResultResponse[QuickValidationStatusResponse]
+):
     pass
 
 

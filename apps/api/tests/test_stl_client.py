@@ -25,6 +25,7 @@ from app.trex.runtime_mutation import runtime_mutation_fence
 from app.trex.runtime_state import (
     RuntimeAuthorityIdentity,
     RuntimeStateStore,
+    TrafficMutationEvidenceState,
     TrafficSessionGroupState,
     TrafficSessionState,
 )
@@ -528,6 +529,7 @@ def test_stl_client_passes_client_name_and_timeouts_to_sdk(tmp_path: Path) -> No
     result = service.snapshot()
 
     assert result.ok is True
+    assert result.data["ports"][0]["info"]["owner"] is None
     assert init_kwargs == [
         {
             "username": "RuntimeClient",
@@ -4066,6 +4068,61 @@ def test_open_capture_file_keeps_saved_file_path_under_capture_directory(tmp_pat
     assert result.blocker == "capture_file_name_invalid"
 
 
+def _evidenced_report_session() -> TrafficSessionState:
+    timestamp = "2026-07-31T00:00:00Z"
+    run_id = "22222222-2222-4222-8222-222222222222"
+    evidence = TrafficMutationEvidenceState(
+        intent_nonce=run_id,
+        operation="start",
+        completion_mode="direct",
+        ports=[0],
+        baseline_port_states={0: "stopped"},
+        desired_port_states={0: "running"},
+        prepared_at=timestamp,
+        completed_at=timestamp,
+    )
+    return TrafficSessionState(
+        id=run_id,
+        revision=1,
+        evidence_version=1,
+        authority=RuntimeAuthorityIdentity(
+            host="127.0.0.1",
+            sync_port=4501,
+            async_port=4500,
+            scapy_port=4507,
+            daemon_supervisor="systemd",
+            generation="11111111-1111-4111-8111-111111111111",
+        ),
+        state="running",
+        started_at=timestamp,
+        updated_at=timestamp,
+        groups=[
+            TrafficSessionGroupState(
+                group_id=None,
+                run_id=run_id,
+                source="ad_hoc",
+                plan_revision=None,
+                ports=[0],
+                profile_path="/tmp/profile.py",
+                profile_sha256="a" * 64,
+                start_multiplier="1kpps",
+                multiplier="1kpps",
+                duration=-1,
+                start_force=False,
+                start_total=False,
+                start_synchronized=False,
+                start_clear_existing=True,
+                started_at=timestamp,
+                start_evidence=evidence,
+                state="running",
+                port_states={0: "running"},
+                updated_at=timestamp,
+            )
+        ],
+        mutation_evidence=[evidence],
+    )
+
+
 def test_run_report_save_list_and_download_stay_under_report_directory(tmp_path: Path) -> None:
     environment = env(tmp_path)
     service = RealStlClientService(environment)
@@ -4085,6 +4142,7 @@ def test_run_report_save_list_and_download_stay_under_report_directory(tmp_path:
     assert saved.data["file"]["generated_at"]
     assert saved.data["file"]["download_available"] is True
     assert "\"markdown\"" in saved.data["file"]["content"]
+    assert json.loads(report_file.read_text(encoding="utf-8"))["version"] == 2
 
     listed = service.list_run_reports()
     assert listed.ok is True
@@ -4100,6 +4158,135 @@ def test_run_report_save_list_and_download_stay_under_report_directory(tmp_path:
     denied = service.download_run_report("../line-rate-run.json")
     assert denied.ok is False
     assert denied.blocker == "run_report_file_name_invalid"
+
+
+def test_run_report_save_injects_exact_backend_session_under_revision_cas(
+    tmp_path: Path,
+) -> None:
+    environment = env(tmp_path)
+    store = RuntimeStateStore(environment.runtime_state_path)
+    session = _evidenced_report_session()
+    store.update(
+        lambda document: document.model_copy(
+            update={"traffic_session": session},
+            deep=True,
+        )
+    )
+    service = RealStlClientService(
+        environment,
+        runtime_state_store=store,
+    )
+
+    saved = service.save_run_report(
+        title="Canonical run",
+        markdown="# Canonical run",
+        payload={"traffic_session": {"id": "client-fabricated"}},
+        file_name="canonical-run.json",
+        traffic_session_id=session.id,
+        traffic_session_revision=session.revision,
+    )
+
+    assert saved.ok is True
+    archive = json.loads(
+        (tmp_path / "reports" / "canonical-run.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert archive["version"] == 2
+    assert archive["payload"]["traffic_session"] == session.model_dump(
+        mode="json"
+    )
+    assert archive["payload"]["traffic_session_binding"] == {
+        "id": session.id,
+        "revision": 1,
+        "evidence_version": 1,
+    }
+
+
+def test_run_report_session_binding_fails_closed_without_writing(
+    tmp_path: Path,
+) -> None:
+    environment = env(tmp_path)
+    store = RuntimeStateStore(environment.runtime_state_path)
+    session = _evidenced_report_session()
+    store.update(
+        lambda document: document.model_copy(
+            update={"traffic_session": session},
+            deep=True,
+        )
+    )
+    service = RealStlClientService(
+        environment,
+        runtime_state_store=store,
+    )
+
+    stale = service.save_run_report(
+        "Stale",
+        "# Stale",
+        {},
+        "stale.json",
+        traffic_session_id=session.id,
+        traffic_session_revision=session.revision + 1,
+    )
+    unbound = service.save_run_report(
+        "Unbound",
+        "# Unbound",
+        {"traffic_session": {"id": session.id}},
+        "unbound.json",
+    )
+
+    assert stale.blocker == "run_report_session_conflict"
+    assert unbound.blocker == "run_report_session_binding_required"
+    assert not (tmp_path / "reports").exists()
+
+
+def test_run_report_rejects_legacy_session_evidence_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    environment = env(tmp_path)
+    store = RuntimeStateStore(environment.runtime_state_path)
+    evidenced = _evidenced_report_session()
+    legacy = TrafficSessionState(
+        id=evidenced.id,
+        authority=evidenced.authority,
+        state="running",
+        started_at=evidenced.started_at,
+        updated_at=evidenced.updated_at,
+        groups=[
+            TrafficSessionGroupState(
+                group_id="pair-0",
+                ports=[0],
+                profile_path="/tmp/profile.py",
+                multiplier="1",
+                duration=-1,
+                state="running",
+                port_states={0: "running"},
+                updated_at=evidenced.updated_at,
+            )
+        ],
+    )
+    store.update(
+        lambda document: document.model_copy(
+            update={"traffic_session": legacy},
+            deep=True,
+        )
+    )
+    service = RealStlClientService(
+        environment,
+        runtime_state_store=store,
+    )
+
+    rejected = service.save_run_report(
+        "Legacy",
+        "# Legacy",
+        {},
+        "legacy.json",
+        traffic_session_id=legacy.id,
+        traffic_session_revision=legacy.revision,
+    )
+
+    assert rejected.blocker == "run_report_session_evidence_unavailable"
+    assert not (tmp_path / "reports").exists()
 
 
 def test_run_report_save_rejects_non_json_payload_and_dirty_name(tmp_path: Path) -> None:
@@ -4160,6 +4347,72 @@ def test_run_report_trends_summarize_archived_verdicts_and_metrics(tmp_path: Pat
     assert tx_pps_trend["previous"] == "10 Kpps"
     assert tx_pps_trend["delta"] == 2
     assert tx_pps_trend["direction"] == "up"
+
+
+def test_run_report_trends_reads_v2_summary_duration_and_keeps_v1_session_duration(
+    tmp_path: Path,
+) -> None:
+    reports_root = tmp_path / "reports"
+    reports_root.mkdir()
+    canonical_session = _evidenced_report_session().model_dump(mode="json")
+    archives = [
+        (
+            "legacy.json",
+            {
+                "version": 1,
+                "title": "Legacy run",
+                "generated_at": "2026-07-30T00:00:00+00:00",
+                "markdown": "# legacy",
+                "payload": {
+                    "profile": "legacy.py",
+                    "conclusion": {"verdict": "pass", "summary": "legacy pass"},
+                    "traffic_session": {"duration": "3.0 s"},
+                },
+            },
+        ),
+        (
+            "canonical.json",
+            {
+                "version": 2,
+                "title": "Canonical run",
+                "generated_at": "2026-07-31T00:00:00+00:00",
+                "markdown": "# canonical",
+                "payload": {
+                    "profile": "canonical.py",
+                    "duration_seconds": 99,
+                    "conclusion": {"verdict": "pass", "summary": "canonical pass"},
+                    "traffic_session": canonical_session,
+                    "traffic_session_binding": {
+                        "id": canonical_session["id"],
+                        "revision": canonical_session["revision"],
+                        "evidence_version": canonical_session["evidence_version"],
+                    },
+                    "traffic_run_summary": {"duration": "4.5 s"},
+                },
+            },
+        ),
+    ]
+    for file_name, archive in archives:
+        (reports_root / file_name).write_text(
+            json.dumps(archive, allow_nan=False),
+            encoding="utf-8",
+        )
+
+    result = RealStlClientService(env(tmp_path)).run_report_trends(limit=10)
+
+    assert result.ok is True
+    assert result.data["total"] == 2
+    assert [record["name"] for record in result.data["records"]] == [
+        "canonical.json",
+        "legacy.json",
+    ]
+    canonical, legacy = result.data["records"]
+    assert canonical["title"] == "Canonical run"
+    assert canonical["generated_at"] == "2026-07-31T00:00:00+00:00"
+    assert canonical["profile"] == "canonical.py"
+    assert canonical["run_duration"] == "4.5 s"
+    assert legacy["profile"] == "legacy.py"
+    assert legacy["run_duration"] == "3.0 s"
 
 
 def test_run_report_trends_recognizes_acceptance_archives(tmp_path: Path) -> None:

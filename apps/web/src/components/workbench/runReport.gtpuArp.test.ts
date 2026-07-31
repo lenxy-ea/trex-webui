@@ -5,6 +5,7 @@ import {
   expect,
   ipv4EnvelopeFields,
   it,
+  runReportTrafficSession,
   type ProfileWorkbenchStream
 } from "./runReportTestHarness";
 
@@ -370,7 +371,7 @@ describe("run report builder / GTP-U and ARP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-09T00:00:00.000Z",
         endedAt: "2026-06-09T00:00:02.000Z",
         profilePath: "arp-fe.yaml",
@@ -390,7 +391,7 @@ describe("run report builder / GTP-U and ARP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [arpStream]
     });
@@ -543,7 +544,7 @@ describe("run report builder / GTP-U and ARP", () => {
         blocker: null,
         error: null
       },
-      trafficSession: {
+      trafficSession: runReportTrafficSession({
         startedAt: "2026-06-10T00:00:00.000Z",
         endedAt: "2026-06-10T00:00:02.000Z",
         profilePath: "arp-reply.yaml",
@@ -563,7 +564,7 @@ describe("run report builder / GTP-U and ARP", () => {
           blocker: null,
           error: null
         }
-      },
+      }),
       trafficMultiplier: "1kpps",
       workbenchStreams: [arpStream]
     });

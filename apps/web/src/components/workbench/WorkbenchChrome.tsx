@@ -3,6 +3,7 @@ import {
   CirclePlay,
   ClipboardList,
   Eraser,
+  FlaskConical,
   Gauge,
   ListStart,
   ListX,
@@ -47,6 +48,7 @@ type WorkbenchChromeProps = {
   onOpenConnect: () => void;
   onOpenProfiles: () => void;
   onOpenDashboard: () => void;
+  onOpenQuickValidation: () => void;
   onOpenReports: () => void;
   onOpenCapture: () => void;
   onOpenDaemon: () => void;
@@ -115,6 +117,7 @@ export function WorkbenchChrome({
   onOpenConnect,
   onOpenProfiles,
   onOpenDashboard,
+  onOpenQuickValidation,
   onOpenReports,
   onOpenCapture,
   onOpenDaemon,
@@ -245,6 +248,7 @@ export function WorkbenchChrome({
         </div>
         <button onClick={onOpenProfiles} type="button">Traffic Profiles</button>
         <button onClick={onOpenDashboard} type="button">Stats</button>
+        <button onClick={onOpenQuickValidation} type="button">Tests</button>
         <button onClick={onOpenReports} type="button">Run Reports</button>
         <button onClick={onOpenCapture} type="button">Capture</button>
         <button onClick={onOpenDaemon} type="button">TRex Daemon</button>
@@ -282,6 +286,7 @@ export function WorkbenchChrome({
         />
         <span className="command-spacer" />
         <IconCommandButton icon={Gauge} label="Open dashboard" onClick={onOpenDashboard} />
+        <IconCommandButton icon={FlaskConical} label="Open Quick Validation" onClick={onOpenQuickValidation} />
         <IconCommandButton icon={ClipboardList} label="Open run reports" onClick={onOpenReports} />
       </div>
     </header>

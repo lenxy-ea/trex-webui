@@ -3551,15 +3551,113 @@ def ensure_report_archive_run_evidence(content: str, tx_port: int) -> dict[str, 
     traffic_session = payload.get("traffic_session")
     if not isinstance(traffic_session, dict):
         raise AcceptanceError("report download", "downloaded report did not include traffic_session", payload)
-    for key in ["started_at", "ended_at", "profile", "ports", "multiplier"]:
-        if not traffic_session.get(key):
-            raise AcceptanceError("report download", f"traffic_session missing {key}", traffic_session)
-    start_result = traffic_session.get("start_result")
-    stop_result = traffic_session.get("stop_result")
-    if not (isinstance(start_result, dict) and start_result.get("ok") is True):
-        raise AcceptanceError("report download", "traffic_session.start_result was not ok", traffic_session)
-    if not (isinstance(stop_result, dict) and stop_result.get("ok") is True):
-        raise AcceptanceError("report download", "traffic_session.stop_result was not ok", traffic_session)
+    if traffic_session.get("evidence_version") != 1:
+        raise AcceptanceError(
+            "report download",
+            "traffic_session did not include certifiable backend evidence",
+            traffic_session,
+        )
+    session_id = traffic_session.get("id")
+    revision = traffic_session.get("revision")
+    if not isinstance(session_id, str) or not session_id:
+        raise AcceptanceError("report download", "traffic_session missing id", traffic_session)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise AcceptanceError("report download", "traffic_session missing positive revision", traffic_session)
+    binding = payload.get("traffic_session_binding")
+    if not isinstance(binding, dict) or binding != {
+        "id": session_id,
+        "revision": revision,
+        "evidence_version": 1,
+    }:
+        raise AcceptanceError(
+            "report download",
+            "traffic_session_binding did not match the canonical traffic session",
+            {"binding": binding, "traffic_session": traffic_session},
+        )
+
+    run_summary = payload.get("traffic_run_summary")
+    expected_run_id = run_summary.get("run_id") if isinstance(run_summary, dict) else None
+    if not (
+        isinstance(run_summary, dict)
+        and run_summary.get("session_id") == session_id
+        and run_summary.get("session_revision") == revision
+    ):
+        raise AcceptanceError(
+            "report download",
+            "traffic_run_summary did not match the saved session CAS",
+            {"traffic_run_summary": run_summary, "binding": binding},
+        )
+    if not isinstance(expected_run_id, str) or not expected_run_id:
+        raise AcceptanceError(
+            "report download",
+            "traffic_run_summary did not identify the exact backend run",
+            run_summary,
+        )
+    groups = [
+        group
+        for collection in (
+            traffic_session.get("groups"),
+            traffic_session.get("completed_groups"),
+        )
+        if isinstance(collection, list)
+        for group in collection
+        if isinstance(group, dict)
+    ]
+    matching_groups = [
+        group
+        for group in groups
+        if isinstance(group.get("ports"), list)
+        and tx_port in group["ports"]
+        and group.get("run_id") == expected_run_id
+    ]
+    if len(matching_groups) != 1:
+        raise AcceptanceError(
+            "report download",
+            "canonical traffic_session did not identify exactly one acceptance run group",
+            {
+                "tx_port": tx_port,
+                "expected_run_id": expected_run_id,
+                "matching_groups": matching_groups,
+            },
+        )
+    traffic_group = matching_groups[0]
+    start_evidence = traffic_group.get("start_evidence")
+    if not (
+        isinstance(start_evidence, dict)
+        and start_evidence.get("operation") == "start"
+        and start_evidence.get("intent_nonce") == traffic_group.get("run_id")
+        and isinstance(start_evidence.get("ports"), list)
+        and tx_port in start_evidence["ports"]
+        and start_evidence.get("acquisition_restored") is True
+        and start_evidence.get("wal_cleared") is True
+    ):
+        raise AcceptanceError(
+            "report download",
+            "traffic run group did not include exact backend start evidence",
+            traffic_group,
+        )
+    cleanup_evidence = traffic_group.get("cleanup_evidence")
+    if not (
+        traffic_group.get("state") == "stopped"
+        and isinstance(cleanup_evidence, dict)
+        and cleanup_evidence.get("completion") in {"operator_stop", "hard_stop"}
+        and cleanup_evidence.get("completed_at") == traffic_group.get("ended_at")
+        and cleanup_evidence.get("acquisition_restored") is True
+        and cleanup_evidence.get("wal_cleared") is True
+        and str(tx_port) in {
+            str(port)
+            for port in (
+                cleanup_evidence.get("final_port_states")
+                if isinstance(cleanup_evidence.get("final_port_states"), dict)
+                else {}
+            )
+        }
+    ):
+        raise AcceptanceError(
+            "report download",
+            "traffic run group did not include commanded backend cleanup evidence",
+            traffic_group,
+        )
 
     samples = payload.get("stats_samples")
     if not isinstance(samples, list) or not samples:
@@ -3598,11 +3696,16 @@ def ensure_report_archive_run_evidence(content: str, tx_port: int) -> dict[str, 
         "last_sample": last_sample,
         "stats_after_stop_sample": after_stop_sample,
         "traffic_session": {
-            "profile": traffic_session.get("profile"),
-            "ports": traffic_session.get("ports"),
-            "multiplier": traffic_session.get("multiplier"),
-            "started_at": traffic_session.get("started_at"),
-            "ended_at": traffic_session.get("ended_at"),
+            "id": session_id,
+            "revision": revision,
+            "evidence_version": traffic_session.get("evidence_version"),
+            "run_id": traffic_group.get("run_id"),
+            "profile": traffic_group.get("profile_path"),
+            "ports": traffic_group.get("ports"),
+            "multiplier": traffic_group.get("start_multiplier"),
+            "started_at": traffic_group.get("started_at"),
+            "ended_at": traffic_group.get("ended_at"),
+            "cleanup_completion": cleanup_evidence.get("completion"),
         },
     }
 
@@ -3758,10 +3861,12 @@ def report_markdown(run: dict[str, Any]) -> str:
     capture_field_match = capture_field_match if isinstance(capture_field_match, dict) else {}
     layer_chains = decode_summary.get("layer_chains")
     layer_chain_text = "; ".join(str(chain) for chain in layer_chains) if isinstance(layer_chains, list) else "-"
-    traffic_session = run.get("traffic_session")
-    traffic_session = traffic_session if isinstance(traffic_session, dict) else {}
-    stop_result = traffic_session.get("stop_result")
-    traffic_stopped = isinstance(stop_result, dict) and stop_result.get("ok") is True
+    traffic_summary = run.get("traffic_run_summary")
+    traffic_summary = traffic_summary if isinstance(traffic_summary, dict) else {}
+    traffic_stopped = (
+        traffic_summary.get("state") == "stopped"
+        and traffic_summary.get("cleanup_completion") in {"operator_stop", "hard_stop"}
+    )
     ports_after_stop = run.get("ports_after_stop")
     active_after_stop = active_port_ids(ports_after_stop) if isinstance(ports_after_stop, dict) else set()
     capture_status_after_stop = run.get("capture_status_after_stop")
@@ -3812,7 +3917,7 @@ def report_markdown(run: dict[str, Any]) -> str:
             f"| Report archive | {report_file} |",
             "",
             "## Run Session",
-            json.dumps(sanitize_report_payload(traffic_session), indent=2, sort_keys=True),
+            json.dumps(sanitize_report_payload(traffic_summary), indent=2, sort_keys=True),
             "",
             "## Capture Decode",
             json.dumps(sanitize_report_payload(decode_summary), indent=2, sort_keys=True)
@@ -3860,15 +3965,148 @@ def cleanup_post(run: dict[str, Any], base_url: str, endpoint: str, body: dict[s
         run.setdefault("cleanup", []).append({"endpoint": endpoint, "error": exc.to_record()})
 
 
-def required_traffic_session_id(payload: dict[str, Any], stage: str) -> str:
-    session_id = read_path(payload, "data.session.id")
+def required_traffic_session(payload: dict[str, Any], stage: str) -> dict[str, Any]:
+    session = read_path(payload, "data.session")
+    if not isinstance(session, dict):
+        raise AcceptanceError(
+            stage,
+            "traffic response did not include a persisted session",
+            payload,
+        )
+    session_id = session.get("id")
+    revision = session.get("revision")
     if not isinstance(session_id, str) or not session_id:
         raise AcceptanceError(
             stage,
             "traffic response did not include a persisted session id",
             payload,
         )
-    return session_id
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise AcceptanceError(
+            stage,
+            "traffic response did not include a positive persisted session revision",
+            payload,
+        )
+    return session
+
+
+def required_traffic_session_id(payload: dict[str, Any], stage: str) -> str:
+    return str(required_traffic_session(payload, stage)["id"])
+
+
+def required_report_traffic_session(
+    payload: dict[str, Any],
+    *,
+    expected_session_id: str,
+) -> dict[str, Any]:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise AcceptanceError(
+            "report session refresh",
+            "traffic runtime response did not include a snapshot",
+            payload,
+        )
+    if "mutation_intent" not in data or data.get("mutation_intent") is not None:
+        raise AcceptanceError(
+            "report session refresh",
+            "traffic runtime still had a pending mutation intent",
+            payload,
+        )
+    session = required_traffic_session(payload, "report session refresh")
+    if session["id"] != expected_session_id:
+        raise AcceptanceError(
+            "report session refresh",
+            "traffic runtime belongs to a different managed session",
+            {
+                "expected_session_id": expected_session_id,
+                "observed_session_id": session["id"],
+                "response": payload,
+            },
+        )
+    if session.get("evidence_version") != 1:
+        raise AcceptanceError(
+            "report session refresh",
+            "traffic runtime session did not include certifiable v1 evidence",
+            session,
+        )
+    if session.get("state") != "stopped":
+        raise AcceptanceError(
+            "report session refresh",
+            "traffic runtime session was not stopped",
+            session,
+        )
+    return session
+
+
+def traffic_run_summary(
+    session: dict[str, Any],
+    *,
+    tx_port: int,
+    fallback_profile: str,
+    fallback_multiplier: str,
+    requested_duration: float,
+    observe_seconds: float,
+    tunables: dict[str, Any],
+) -> dict[str, Any]:
+    groups = [
+        group
+        for collection in (
+            session.get("groups"),
+            session.get("completed_groups"),
+        )
+        if isinstance(collection, list)
+        for group in collection
+    ]
+    candidates = [
+        group
+        for group in groups
+        if isinstance(group, dict)
+        and isinstance(group.get("ports"), list)
+        and tx_port in group["ports"]
+    ]
+    group = max(candidates, key=lambda item: str(item.get("started_at") or "")) if candidates else {}
+    cleanup = group.get("cleanup_evidence")
+    cleanup = cleanup if isinstance(cleanup, dict) else {}
+    return {
+        "session_id": session["id"],
+        "session_revision": session["revision"],
+        "evidence_version": session.get("evidence_version"),
+        "run_id": group.get("run_id"),
+        "state": group.get("state", session.get("state")),
+        "profile": group.get("profile_path", fallback_profile),
+        "ports": group.get("ports", [tx_port]),
+        "multiplier": group.get("start_multiplier", fallback_multiplier),
+        "requested_duration": requested_duration,
+        "observe_seconds": observe_seconds,
+        "tunables": group.get("tunables", tunables),
+        "started_at": group.get("started_at", session.get("started_at")),
+        "ended_at": group.get("ended_at", session.get("ended_at")),
+        "cleanup_completion": cleanup.get("completion"),
+    }
+
+
+def report_save_payload(
+    run: dict[str, Any],
+    *,
+    report_name: str,
+    markdown: str,
+    traffic_session: dict[str, Any] | None,
+) -> dict[str, Any]:
+    report_body = sanitize_report_payload(run)
+    if not isinstance(report_body, dict):
+        raise AcceptanceError("report save", "sanitized report payload was not an object")
+    report_body.pop("traffic_session", None)
+    report_body.pop("traffic_session_binding", None)
+    payload: dict[str, Any] = {
+        "title": f"TRex Acceptance Run {run['run_id']}",
+        "markdown": markdown,
+        "payload": report_body,
+        "file_name": report_name,
+    }
+    if run.get("verdict") == "pass" and traffic_session is not None:
+        payload["traffic_session_id"] = traffic_session["id"]
+        payload["traffic_session_revision"] = traffic_session["revision"]
+    return payload
 
 
 def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
@@ -3923,6 +4161,7 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     capture_id: int | None = None
     traffic_started = False
     traffic_session_id: str | None = None
+    authoritative_traffic_session: dict[str, Any] | None = None
 
     try:
         health = request_json(args.base_url, "GET", "/api/health", None, args.timeout)
@@ -4016,22 +4255,19 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
                 args.timeout,
             ),
         )
-        traffic_session_id = required_traffic_session_id(start, "traffic start")
+        authoritative_traffic_session = required_traffic_session(start, "traffic start")
+        traffic_session_id = str(authoritative_traffic_session["id"])
         traffic_started = True
         run["traffic_start"] = start
-        run["traffic_session"] = {
-            "id": traffic_session_id,
-            "started_at": utc_now(),
-            "ended_at": None,
-            "profile": profile_path,
-            "ports": [args.tx_port],
-            "multiplier": args.multiplier,
-            "requested_duration": args.duration,
-            "observe_seconds": args.observe_seconds,
-            "tunables": tunables,
-            "start_result": start,
-            "stop_result": None,
-        }
+        run["traffic_run_summary"] = traffic_run_summary(
+            authoritative_traffic_session,
+            tx_port=args.tx_port,
+            fallback_profile=profile_path,
+            fallback_multiplier=args.multiplier,
+            requested_duration=args.duration,
+            observe_seconds=args.observe_seconds,
+            tunables=tunables,
+        )
 
         started_at = time.monotonic()
         observe_seconds = max(0.0, args.observe_seconds)
@@ -4116,10 +4352,8 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
                 args.timeout,
             ),
         )
-        observed_session_id = required_traffic_session_id(
-            traffic_stop,
-            "traffic stop",
-        )
+        stopped_session = required_traffic_session(traffic_stop, "traffic stop")
+        observed_session_id = str(stopped_session["id"])
         if observed_session_id != traffic_session_id:
             raise AcceptanceError(
                 "traffic stop",
@@ -4131,11 +4365,17 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
                 },
             )
         traffic_started = False
+        authoritative_traffic_session = stopped_session
         run["traffic_stop"] = traffic_stop
-        traffic_session = run.get("traffic_session")
-        if isinstance(traffic_session, dict):
-            traffic_session["ended_at"] = utc_now()
-            traffic_session["stop_result"] = traffic_stop
+        run["traffic_run_summary"] = traffic_run_summary(
+            authoritative_traffic_session,
+            tx_port=args.tx_port,
+            fallback_profile=profile_path,
+            fallback_multiplier=args.multiplier,
+            requested_duration=args.duration,
+            observe_seconds=args.observe_seconds,
+            tunables=tunables,
+        )
 
         stats_after_stop = require_ok(
             "stats after stop",
@@ -4193,10 +4433,11 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
                         args.timeout,
                     ),
                 )
-                observed_session_id = required_traffic_session_id(
+                stopped_session = required_traffic_session(
                     cleanup_stop,
                     "cleanup traffic stop",
                 )
+                observed_session_id = str(stopped_session["id"])
                 if observed_session_id != traffic_session_id:
                     raise AcceptanceError(
                         "cleanup traffic stop",
@@ -4207,6 +4448,17 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
                             "response": cleanup_stop,
                         },
                     )
+                authoritative_traffic_session = stopped_session
+                traffic_started = False
+                run["traffic_run_summary"] = traffic_run_summary(
+                    authoritative_traffic_session,
+                    tx_port=args.tx_port,
+                    fallback_profile=profile_path,
+                    fallback_multiplier=args.multiplier,
+                    requested_duration=args.duration,
+                    observe_seconds=args.observe_seconds,
+                    tunables=tunables,
+                )
                 run.setdefault("cleanup", []).append(
                     {
                         "endpoint": "/api/trex/traffic/stop",
@@ -4234,13 +4486,52 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
         except AcceptanceError as exc:
             run["ports_after_error"] = exc.to_record()
 
+    if run["verdict"] == "pass":
+        try:
+            runtime_before_report = require_ok(
+                "report session refresh",
+                request_json(
+                    args.base_url,
+                    "GET",
+                    "/api/trex/traffic/runtime",
+                    None,
+                    args.timeout,
+                ),
+            )
+            if traffic_session_id is None:
+                raise AcceptanceError(
+                    "report session refresh",
+                    "acceptance run did not retain its managed session id",
+                )
+            authoritative_traffic_session = required_report_traffic_session(
+                runtime_before_report,
+                expected_session_id=traffic_session_id,
+            )
+            run["traffic_run_summary"] = traffic_run_summary(
+                authoritative_traffic_session,
+                tx_port=args.tx_port,
+                fallback_profile=profile_path,
+                fallback_multiplier=args.multiplier,
+                requested_duration=args.duration,
+                observe_seconds=args.observe_seconds,
+                tunables=tunables,
+            )
+        except AcceptanceError as exc:
+            run["verdict"] = "fail"
+            run["failure"] = exc.to_record()
+            authoritative_traffic_session = None
+
     markdown = report_markdown(run)
-    report_payload = {
-        "title": f"TRex Acceptance Run {run_id}",
-        "markdown": markdown,
-        "payload": sanitize_report_payload(run),
-        "file_name": report_name,
-    }
+    report_payload = report_save_payload(
+        run,
+        report_name=report_name,
+        markdown=markdown,
+        traffic_session=(
+            authoritative_traffic_session
+            if run["verdict"] == "pass"
+            else None
+        ),
+    )
     report_save = require_ok(
         "report save",
         request_json(args.base_url, "POST", "/api/trex/reports/save", report_payload, args.timeout),
@@ -4259,14 +4550,21 @@ def run_acceptance(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(content, str) or f"TRex Acceptance Run {run_id}" not in content:
         raise AcceptanceError("report download", "downloaded report did not contain this run title", download)
     ensure_report_archive_has_no_binary_payloads(content)
-    run["report_capture_decode_summary"] = ensure_report_archive_capture_decode(content, args.expected_layer_chain)
-    run["report_run_evidence"] = ensure_report_archive_run_evidence(content, args.tx_port)
-    run["report_profile_capture_match"] = ensure_report_archive_profile_capture_match(
-        content,
-        bool(profile_streams),
-        args.expected_layer_chain,
-    )
-    run["report_profile_capture_fields"] = ensure_report_archive_profile_capture_fields(content, bool(profile_streams))
+    if run["verdict"] == "pass":
+        run["report_capture_decode_summary"] = ensure_report_archive_capture_decode(
+            content,
+            args.expected_layer_chain,
+        )
+        run["report_run_evidence"] = ensure_report_archive_run_evidence(content, args.tx_port)
+        run["report_profile_capture_match"] = ensure_report_archive_profile_capture_match(
+            content,
+            bool(profile_streams),
+            args.expected_layer_chain,
+        )
+        run["report_profile_capture_fields"] = ensure_report_archive_profile_capture_fields(
+            content,
+            bool(profile_streams),
+        )
     run["local_report"] = str(write_local_report(Path(args.output_dir), report_name, content))
 
     if run["verdict"] != "pass":

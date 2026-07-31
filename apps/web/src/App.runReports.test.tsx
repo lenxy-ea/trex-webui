@@ -20,6 +20,7 @@ import {
   screen,
   statsResponse,
   stubFetch,
+  trafficRuntimeResult,
   vi,
   waitFor,
   within
@@ -253,6 +254,92 @@ describe("App / Run Reports", () => {
 
   it("saves run reports with the latest traffic and capture-finalization window", async () => {
     let savedCaptureTimestamp: string | null = null;
+    const startedAt = "2026-07-31T13:02:00.000Z";
+    const stoppedAt = "2026-07-31T13:02:20.000Z";
+    const sessionId = "66666666-6666-4666-8666-666666666666";
+    const stopIntentNonce = "22222222-2222-4222-8222-222222222222";
+    const sessionStartEvidence = {
+      ...activeTrafficRuntimeResult.data.session.groups[0].start_evidence!,
+      intent_nonce: sessionId,
+      ports: [0],
+      baseline_port_states: { 0: "stopped" as const },
+      desired_port_states: { 0: "running" as const },
+      prepared_at: startedAt,
+      completed_at: startedAt
+    };
+    const sessionStopEvidence = {
+      intent_nonce: stopIntentNonce,
+      operation: "stop" as const,
+      completion_mode: "direct" as const,
+      ports: [0],
+      baseline_port_states: { 0: "running" as const },
+      desired_port_states: { 0: "stopped" as const },
+      baseline_acquired_ports: [],
+      prepared_at: stoppedAt,
+      completed_at: stoppedAt,
+      acquisition_restored: true as const,
+      wal_cleared: true as const
+    };
+    const runningSession = {
+      ...activeTrafficRuntimeResult.data.session,
+      id: sessionId,
+      revision: 2,
+      started_at: startedAt,
+      updated_at: startedAt,
+      mutation_evidence: [sessionStartEvidence],
+      groups: [
+        {
+          ...activeTrafficRuntimeResult.data.session.groups[0],
+          group_id: null,
+          run_id: sessionId,
+          source: "ad_hoc" as const,
+          plan_revision: null,
+          ports: [0],
+          started_at: startedAt,
+          ended_at: null,
+          start_evidence: sessionStartEvidence,
+          port_states: { 0: "running" as const },
+          updated_at: startedAt
+        }
+      ]
+    };
+    const stoppedSession = {
+      ...runningSession,
+      revision: 3,
+      state: "stopped" as const,
+      updated_at: stoppedAt,
+      ended_at: stoppedAt,
+      mutation_evidence: [...runningSession.mutation_evidence, sessionStopEvidence],
+      groups: runningSession.groups.map((group) => ({
+        ...group,
+        ended_at: stoppedAt,
+        cleanup_evidence: {
+          completion: "operator_stop" as const,
+          completed_at: stoppedAt,
+          final_port_states: { 0: "stopped" as const },
+          intent_nonce: stopIntentNonce,
+          acquisition_restored: true as const,
+          wal_cleared: true as const
+        },
+        state: "stopped" as const,
+        port_states: { 0: "stopped" as const },
+        updated_at: stoppedAt
+      }))
+    };
+    const runningRuntime = {
+      ...trafficRuntimeResult,
+      data: {
+        ...trafficRuntimeResult.data,
+        session: runningSession
+      }
+    };
+    const stoppedRuntime = {
+      ...trafficRuntimeResult,
+      data: {
+        ...trafficRuntimeResult.data,
+        session: stoppedSession
+      }
+    };
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === "/api/system/overview") {
         return { ok: true, json: async () => overview };
@@ -265,7 +352,13 @@ describe("App / Run Reports", () => {
           ok: true,
           json: async () => ({
             ok: true,
-            data: { accepted: true, ports: [0], multiplier: "1", duration: -1 },
+            data: {
+              accepted: true,
+              ports: [0],
+              multiplier: "1",
+              duration: -1,
+              session: runningSession
+            },
             blocker: null,
             error: null
           })
@@ -276,7 +369,14 @@ describe("App / Run Reports", () => {
           ok: true,
           json: async () => ({
             ok: true,
-            data: { accepted: true, ports: [0], stopped: true },
+            data: {
+              accepted: true,
+              action: "stop",
+              result: "stopped",
+              ports: [0],
+              state_persisted: true,
+              session: stoppedSession
+            },
             blocker: null,
             error: null
           })
@@ -372,7 +472,19 @@ describe("App / Run Reports", () => {
       }
       throw new Error(`Unexpected fetch ${url}`);
     });
-    stubFetch(fetchMock, activeTrafficRuntimeResult);
+    stubFetch(fetchMock, [
+      trafficRuntimeResult,
+      trafficRuntimeResult,
+      {
+        ok: false,
+        data: null,
+        blocker: "traffic_runtime_temporarily_unavailable",
+        error: "runtime refresh failed after start"
+      },
+      runningRuntime,
+      stoppedRuntime,
+      stoppedRuntime
+    ]);
 
     render(<App />);
 
@@ -382,6 +494,10 @@ describe("App / Run Reports", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Stop selected port" }));
     await waitFor(() => expect(screen.getByText(/Port command accepted/)).toBeInTheDocument());
+    const stopCall = fetchMock.mock.calls.find(([path]) => path === "/api/trex/traffic/stop");
+    expect(JSON.parse(String(stopCall?.[1]?.body ?? "{}"))).toEqual(
+      expect.objectContaining({ expected_session_id: sessionId })
+    );
 
     await openCapture();
     fireEvent.click(screen.getByRole("tab", { name: "Recorders" }));
@@ -401,15 +517,30 @@ describe("App / Run Reports", () => {
     const saveCall = fetchMock.mock.calls.find(([path]) => path === "/api/trex/reports/save");
     const saveBody = JSON.parse(String(saveCall?.[1]?.body ?? "{}"));
     expect(saveBody.markdown).toContain("## Run Window");
+    expect(saveBody.traffic_session_id).toBe(sessionId);
+    expect(saveBody.traffic_session_revision).toBe(3);
     expect(saveBody.payload.traffic_session).toEqual(
+      expect.objectContaining({
+        id: sessionId,
+        revision: 3,
+        evidence_version: 1,
+        state: "stopped",
+        groups: [expect.objectContaining({
+          group_id: null,
+          ports: [0],
+          source: "ad_hoc",
+          start_evidence: expect.objectContaining({ operation: "start" }),
+          cleanup_evidence: expect.objectContaining({ completion: "operator_stop" })
+        })]
+      })
+    );
+    expect(saveBody.payload.traffic_run_summary).toEqual(
       expect.objectContaining({
         profile: "udp_1pkt_simple.py",
         ports: [0],
         multiplier: "1",
-        requested_duration: -1,
-        capture_completed_at: savedCaptureTimestamp,
-        start_result: expect.objectContaining({ ok: true }),
-        stop_result: expect.objectContaining({ ok: true })
+        requested_duration: "continuous",
+        capture_completed_at: savedCaptureTimestamp
       })
     );
     expect(saveBody.payload.capture_file_inventory).toEqual(
