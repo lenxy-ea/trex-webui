@@ -15,6 +15,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "screenshot": "node scripts/capture-workbench.mjs",
+    "screenshot:readme": "node scripts/capture-readme.mjs",
     "smoke:production": "node scripts/production-browser-smoke.mjs",
     "acceptance:production-write": "node scripts/production-browser-write-acceptance.mjs",
     "lint": "eslint \"src/**/*.{ts,tsx}\""

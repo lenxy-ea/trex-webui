@@ -27,6 +27,7 @@
     "deploy:upgrade": "deploy/upgrade.sh",
     "deploy:verify": "deploy/verify.sh",
     "screenshot:web": "scripts/npmw --prefix apps/web run screenshot --",
+    "screenshot:readme": "scripts/npmw --prefix apps/web run screenshot:readme --",
     "lint:web": "scripts/npmw --prefix apps/web run lint",
     "typecheck:web": "scripts/npmw --prefix apps/web run typecheck"
   }
