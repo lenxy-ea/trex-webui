@@ -1578,6 +1578,7 @@ def run_gate_layout_fixture(
     project_root: Path,
     web_root: Path,
     deployed_root: Path,
+    stub_root_authority: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -1593,6 +1594,9 @@ SERVICE_PROJECT_ROOT="/opt/trex-webui/current"
 VERSIONED_DEPLOYMENT=1
 SYNC_WEB_ROOT=0
 trex_assert_managed_path() { return 0; }
+if [[ "$5" == "true" ]]; then
+  trex_assert_root_controlled_authority_path() { return 0; }
+fi
 validate_gate_layout
 ''',
             "bash",
@@ -1600,6 +1604,7 @@ validate_gate_layout
             str(project_root),
             str(web_root),
             str(deployed_root),
+            str(stub_root_authority).lower(),
         ],
         check=False,
         capture_output=True,
@@ -1786,6 +1791,10 @@ def test_versioned_gate_allows_install_root_to_contain_selected_web_root(
         project_root=project_root,
         web_root=web_root,
         deployed_root=deployed_root,
+        # This test isolates the parent/child layout rule. The real authority
+        # check is covered separately and cannot succeed in a non-root CI
+        # runner's pytest temporary directory.
+        stub_root_authority=True,
     )
 
     assert result.returncode == 0, result.stderr
