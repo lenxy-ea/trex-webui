@@ -421,6 +421,7 @@ def test_environment_readiness_reports_path_gates(tmp_path: Path) -> None:
         profile_roots=[scripts_dir / "stl"],
         command_timeout_seconds=10,
         require_confirmation=True,
+        runtime_state_path=tmp_path / "runtime-state.json",
     )
 
     readiness = env.readiness()

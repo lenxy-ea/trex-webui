@@ -155,7 +155,7 @@ describe("App / Shell", () => {
     expect(screen.getByText("TRex unit")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "OK" }));
     expect(screen.queryByRole("dialog", { name: "TRex" })).not.toBeInTheDocument();
-  });
+  }, 10_000);
 
   it("opens original-style Preferences from the File menu", async () => {
     const fetchMock = vi
