@@ -85,10 +85,10 @@ assert_unit_line "$NFTABLES_DROPIN" \
 assert_unit_line "$NFTABLES_DROPIN" "ExecReload="
 assert_unit_line "$NFTABLES_DROPIN" \
   "ExecReload=/usr/bin/bash /usr/libexec/trex-webui/trex_native_boundary.sh service-reload /etc/sysconfig/nftables.conf"
-if rg -n -- '--trex-host (0\.0\.0\.0|::)' "$DAEMON_UNIT" >/dev/null; then
+if grep -Eq -- '--trex-host (0\.0\.0\.0|::)' "$DAEMON_UNIT"; then
   fail "daemon unit exposes RPC beyond loopback"
 fi
-if rg -n '^ConditionPathIsExecutable=' "$DAEMON_UNIT" >/dev/null; then
+if grep -Eq -- '^ConditionPathIsExecutable=' "$DAEMON_UNIT"; then
   fail "daemon unit uses unsupported ConditionPathIsExecutable"
 fi
 assert_unit_line "$API_UNIT" "After=network-online.target"
@@ -96,7 +96,11 @@ assert_unit_line "$API_UNIT" "Wants=network-online.target"
 assert_unit_line "$API_UNIT" \
   "Environment=TREX_WEBUI_RUNTIME_STATE_PATH=/var/lib/trex-webui/runtime-state.json"
 assert_unit_line "$API_UNIT" "# @@TREX_WEBUI_DAEMON_MODE_ENV@@"
-if rg -n '^(After|Wants)=.*trex-daemon-server' "$API_UNIT" >/dev/null; then
+assert_unit_line "$API_UNIT" \
+  'ExecStartPre=/opt/trex-webui/.venv/bin/python -c "import fastapi, httptools, uvicorn, uvicorn.supervisors.statreload, uvloop, watchfiles.run, websockets"'
+assert_unit_line "$API_UNIT" \
+  'ExecStart=/opt/trex-webui/.venv/bin/python -m uvicorn app.main:app --app-dir /opt/trex-webui/apps/api --host 127.0.0.1 --port 8080'
+if grep -Eq -- '^(After|Wants)=.*trex-daemon-server' "$API_UNIT"; then
   fail "base API unit pulls a local daemon into external deployments"
 fi
 assert_unit_line "$LOGROTATE_POLICY" "# Managed by TRex WebUI deploy/install.sh."
@@ -107,7 +111,40 @@ assert_unit_line "$LOGROTATE_POLICY" "    create 0640 root trex-webui"
 
 if command -v systemd-analyze >/dev/null 2>&1; then
   verify_output="$(
-    systemd-analyze verify "$DAEMON_UNIT" "$API_UNIT" 2>&1
+    set -Eeuo pipefail
+    exec 2>&1
+    verify_root=""
+    verify_daemon_unit=""
+    verify_api_unit=""
+    cleanup_verify_units() {
+      local status=$?
+      trap - EXIT
+      set +e
+      if [[ -n "$verify_api_unit" || -n "$verify_daemon_unit" ]]; then
+        rm -f -- "$verify_api_unit" "$verify_daemon_unit" >/dev/null 2>&1
+      fi
+      if [[ -n "$verify_root" ]]; then
+        rmdir -- "$verify_root" >/dev/null 2>&1
+      fi
+      exit "$status"
+    }
+    trap cleanup_verify_units EXIT
+
+    verify_root="$(mktemp -d -t trex-systemd-verify.XXXXXX)" &&
+    verify_daemon_unit="$verify_root/$(basename -- "$DAEMON_UNIT")" &&
+    verify_api_unit="$verify_root/$(basename -- "$API_UNIT")" &&
+    cp -- "$DAEMON_UNIT" "$verify_daemon_unit" &&
+    sed \
+      -e 's#^ExecStartPre=/opt/trex-webui/[.]venv/bin/python #ExecStartPre=/usr/bin/python3 #' \
+      -e 's#^ExecStart=/opt/trex-webui/[.]venv/bin/python #ExecStart=/usr/bin/python3 #' \
+      "$API_UNIT" >"$verify_api_unit" &&
+    grep -Fqx \
+      'ExecStartPre=/usr/bin/python3 -c "import fastapi, httptools, uvicorn, uvicorn.supervisors.statreload, uvloop, watchfiles.run, websockets"' \
+      "$verify_api_unit" &&
+    grep -Fqx \
+      'ExecStart=/usr/bin/python3 -m uvicorn app.main:app --app-dir /opt/trex-webui/apps/api --host 127.0.0.1 --port 8080' \
+      "$verify_api_unit" &&
+    systemd-analyze verify "$verify_daemon_unit" "$verify_api_unit"
   )" || {
     printf '%s\n' "$verify_output" >&2
     fail "systemd-analyze verify rejected the supervisor units"
