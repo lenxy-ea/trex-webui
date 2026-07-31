@@ -33,7 +33,9 @@ Recommended initial stack:
 - Frontend: React, TypeScript, Vite, TanStack Query, Zustand, ECharts or Recharts.
 - Backend: FastAPI, pydantic, WebSocket, SQLite, structured logging.
 - TRex integration: official Python STLClient first; JSON-RPC proxy where useful; Scapy for packet/profile tooling.
-- Runtime integration: backend-owned TRex service/daemon control, config generation, log capture, health checks, and guarded privileged operations.
+- Runtime integration: a root-owned host supervisor is the single daemon PID
+  authority; the unprivileged backend owns typed workload/config operations,
+  status, evidence, and guarded RPC through that boundary.
 - Development support: real TRex/hardware environment configuration and explicit blocker reporting when hardware is unavailable.
 
 ## Real Hardware Policy
@@ -46,13 +48,21 @@ Recommended initial stack:
 
 ## Runtime And Config Ownership
 
-The WebUI should own controlled TRex runtime workflows through the backend:
+Exactly one host supervisor owns the privileged daemon PID lifecycle. In the
+same-host deployment that authority is the root-owned systemd unit; external
+mode delegates it explicitly to the operator. The unprivileged WebUI backend
+does not invoke `systemctl`, sudo, or upstream wrapper lifecycle commands. It
+owns controlled workload and configuration workflows through daemon/STL RPC:
 
-- Service/daemon status, start, stop, restart, and optionally start-live.
-- TRex process and daemon logs, including startup failure diagnostics.
-- Safe restart after config changes.
-- Command preview and command-result capture for privileged operations.
-- Confirmation and audit records for stop/restart/reset/force/config overwrite actions.
+- Report daemon/service health and expose real daemon/TRex logs and startup
+  blockers without claiming PID ownership.
+- Start and stop the TRex workload, inspect reservation/runtime state, and
+  upload a validated config through guarded daemon RPC.
+- Perform safe workload stop/config/start sequences while leaving daemon
+  process restart and boot recovery to the host supervisor.
+- Capture command results and durable evidence for workload/config operations.
+- Require confirmation and audit records for stop/reset/force/config-overwrite
+  actions and for separately authorized deployment maintenance.
 
 The WebUI should generate and manage TRex config files:
 
@@ -60,7 +70,8 @@ The WebUI should generate and manage TRex config files:
 - Validate fields such as `port_limit`, `version`, `interfaces`, `port_info`, IP/default gateway, source/destination MAC, platform thread layout, ZMQ publisher options, and CPU/thread assignments.
 - Preview YAML before write, diff against the active config, and keep versions for rollback.
 - Detect NIC/interface inventory from the real TRex host where possible.
-- Restart/reload TRex only through a guarded workflow after config deployment.
+- Restart/reload the TRex workload only through a guarded RPC workflow after
+  config deployment; daemon service maintenance stays outside the API boundary.
 
 ## Navigation Model
 
@@ -72,12 +83,13 @@ The WebUI should generate and manage TRex config files:
 - Capture: monitor/record, filters, packet preview, PCAP export, optional Wireshark integration.
 - Tests: guided runs, RFC2544-style flows, loss/latency checks, soak/burst templates.
 - Reports: run history, stats snapshots, charts, exports.
-- System: TRex instances, daemon/service control, config generator/editor, active config diff, compatibility/capability view.
+- System: TRex instances, daemon/service status, guarded workload/config control,
+  config generator/editor, active config diff, and compatibility/capability view.
 - Logs: server log, UI/backend log, advanced JSON request/response trace.
 
 ## Milestones
 
-### Current assessment (2026-07-31)
+### Current assessment (2026-08-01)
 
 Milestone names describe product scope, not release readiness. A feature is only
 "verified" when the current source and frontend build identities appear in a
@@ -89,7 +101,7 @@ passing real-hardware Standard E2E archive.
 | M1 | Six-port control loop implemented | The persistent traffic plan exposes three logical port pairs with per-group profiles and runtime state. Every supported hardware row still needs source-bound real-traffic/capture evidence; public documentation does not treat a lab's current link state as a product guarantee. |
 | M2 | Partially verified on available hardware | Custom daemon YAML start, capture, service-mode restoration, and guarded traffic resume/update flows are implemented. Port configuration writes, full config rollback, and the supported hardware/version matrix still need certification. |
 | M3 | Substantial coverage; not certified as complete | Publish an explicit original-GUI capability matrix and attach real-hardware evidence for every supported row. Unsupported TRex/version rows must return capability blockers, not disappear from the UI. |
-| M4 | Partial | Reports and run evidence exist; guided benchmarks, profile history/diff, a versioned automation contract, and compatibility/capability discovery remain product work. |
+| M4 | Active; rc.2 foundations implemented | Guided Quick Validation v1, evidence-bound reports, an exact-tag attested release chain, and durable content-addressed deployment are implemented. Broader benchmarks, profile history/diff, a versioned authenticated automation contract, and compatibility/capability discovery remain product work. |
 
 The deployment target is a single operator on a trusted management network.
 Application-level multi-user authentication and RBAC remain out of scope. Until
@@ -118,13 +130,16 @@ A trusted-management-network release candidate requires all of the following:
 2. **Host boundary:** the API runs as the dedicated non-login `trex-webui`
    account, has no Linux capabilities, writes only declared state/output roots,
    and remains reachable only through the Nginx management-network policy.
-3. **Artifact integrity and authenticity:** release archives have a verified SHA-256 digest,
-   hostile tar metadata is rejected before extraction, the canonical payload is
-   recomputed both inside the tar and after private extraction, Git-less
-   Standard E2E evidence revalidates the installed packaged files, deployment
-   paths carry explicit ownership markers, and handled pre-commit failures
-   trigger rollback. A publisher signature and trusted verification policy are
-   still required; a checksum delivered beside its archive is not a signature.
+3. **Artifact integrity and authenticity:** the exact-tag GitHub workflow must
+   build the v3 archive from the tag commit, bind it to the Standard and six-port
+   reports, publish dual SBOM/evidence metadata, and create GitHub artifact
+   attestations. The root-only verified-upgrade bootstrap must constrain the
+   repository, signer workflow, tag ref, source/signer digest, and hosted-runner
+   provenance before any archive-carried code executes. It must also reject
+   hostile tar metadata, recompute the canonical payload inside the tar and
+   after private extraction, and validate every metadata digest. An archive and
+   checksum delivered together remain only corruption evidence; they do not
+   replace this signer policy.
 4. **Browser and API evidence:** CI runs backend tests, frontend test shards,
    typecheck, lint, build, production dependency audits, and a read-only
    Playwright smoke through the production Nginx path. The target-host gate also
@@ -145,21 +160,40 @@ A trusted-management-network release candidate requires all of the following:
    Git SHA/dirty state, source digest, frontend asset manifest digest, API
    identity/config digest, traffic-idle postcondition, and zero remaining
    capture recorders.
+6. **Durable activation and rollback:** the verified payload is copied into a
+   content-addressed release tree; root-only journal phases and selector changes
+   are fsynced; API, daemon, and Nginx wait for boot reconciliation; readiness
+   and deployment verification precede commit; and a complete `previous` serving
+   bundle remains available for an explicit, re-verified managed-local N-1
+   activation. External-daemon N-1 is rejected because the WebUI host cannot
+   fence that separate mutation authority. On SELinux-enabled versioned hosts,
+   the release frontend alone receives a persistent verified HTTP content type;
+   API source and runtime configuration remain outside it.
 
 Historical reports or reports without identity fields do not satisfy item 5.
 When hardware is unavailable, the release remains blocked and the exact RPC,
 daemon, port, permission, or config failure is recorded; fixtures cannot waive
 this gate.
 
-As of 2026-07-31, the RC implementation covers items 1, 2, and the browser-write
-portion of item 4, but the final current-source form of item 5 must still be
-generated after the last tracked edit. Item 3 has strong corruption/tamper
-detection but not publisher authentication. The archive upgrader is globally
-serialized and stops a matching API before live-source mutation, but the
-multi-resource transaction is not crash-atomic: it has no durable phase
-journal/reconciler, handled rollback is best-effort while the shell remains
-alive, and a committed install does not keep a complete N-1 known-good release.
-These are M4.0 release-engineering gaps, not waived production properties.
+As of 2026-08-01, the rc.2 source implements the code and automated-test portions
+of items 1–4 and 6, but that is not release evidence. The final current-source
+hardware reports in item 5 must still be generated after the last tracked edit,
+the exact-tag GitHub signer workflow must complete for the release commit, and
+the downloaded assets must pass the verified-upgrade path on the target host.
+Until those run-specific checks pass, this roadmap describes implemented
+mechanisms rather than a certified published release.
+
+The archive path is no longer an in-place source sync. It stages a verified
+payload under `releases/sha256-*`, persists activation phases under root-only
+`/var/lib/trex-webui-deploy`, atomically selects `current` and `previous`, and
+runs a boot reconciler before stable consumers. The first migration snapshots
+the serving legacy API, static tree, profiles, optional environment, and exact
+Python runtime as a complete rollback baseline. A committed install retains the
+complete immediate predecessor; an interrupted uncommitted transaction returns
+to its exact pre-transaction selectors. This is crash recovery for release
+selection, not recovery of live TRex traffic or reservations after an explicitly
+disruptive daemon restart. Direct-checkout install/upgrade remains a separate
+development or maintenance path without these archive transaction guarantees.
 
 The persistent supervisor replaced the transient acceptance daemon with an
 installer-managed, root-owned systemd unit whose JSON-RPC endpoint is
@@ -201,7 +235,8 @@ host evidence; no live lab link state in this roadmap constitutes certification.
 - Service mode on/off workflows for ports that need L2/L3, ARP, ICMP, IPv6 ND, or capture operations.
 - Advanced JSON request/response logger.
 - Generate, preview, validate, and write TRex config files through guarded backend flows.
-- Restart TRex after config deployment with confirmation and result logging.
+- Restart the TRex workload after config deployment through guarded daemon RPC,
+  with confirmation and result logging.
 
 ### M3: Full Original GUI Coverage
 
@@ -211,7 +246,8 @@ host evidence; no live lab link state in this roadmap constitutes certification.
 - Field Engine editor.
 - IPv6 neighbor discovery.
 - Hardware counters where exposed.
-- TRex daemon/service start/stop/restart/start-live where supported.
+- TRex daemon/service status and logs plus guarded TRex workload start/stop
+  through daemon RPC; host-supervisor maintenance remains a deployment concern.
 - Config diff, version history, rollback, and active config detection.
 
 ### M4: Beyond Original GUI
@@ -228,18 +264,22 @@ host evidence; no live lab link state in this roadmap constitutes certification.
 
 #### M4.0: Production baseline
 
-- Complete the production-candidate gate above on a clean checkout and on the
-  target AlmaLinux host.
+- Complete the production-candidate gate above on the final clean commit and on
+  the target AlmaLinux host; preserve the exact local/server report paths.
 - Publish the supported Python, Node, Nginx, systemd, TRex server, STL client,
-  NIC, and driver versions alongside the release evidence.
-- Define artifact signing, its trust root, and mandatory pre-extraction
-  verification; validate the signed Git-less artifact on a clean host.
-- Replace in-place source publication with a versioned release switch, add a
-  durable transaction journal plus startup/next-run reconciler, and inject
-  `SIGKILL`/reboot failures at every publication phase.
-- Retain a content-addressed N-1 bundle containing source, static assets,
-  runtime, unit/config, and evidence; add capacity preflight and bounded backup
-  retention instead of accumulating unbounded timestamp directories.
+  NIC, and driver versions alongside that release-specific evidence.
+- The rc.2 exact-tag workflow and verified-upgrade bootstrap implement the
+  signer trust root and mandatory pre-extraction verification. Complete one
+  hosted tag run and independently validate its downloaded assets before
+  treating this item as accepted.
+- The rc.2 archive path implements the versioned release switch, durable journal,
+  boot reconciler, selector fsync, and injected-failure regression suite. A
+  target-host reboot/interruption exercise remains release-specific acceptance
+  evidence rather than a permanent claim from unit tests.
+- The rc.2 release engine retains only content-addressed `current` and
+  `previous` bundles after terminal cleanup and performs capacity preflight.
+  Timestamped backups used by the separate direct-checkout/static publication
+  path still require operator retention management.
 
 Exit criterion: a new host can verify and install the signed/checksummed artifact,
 pass the production browser smoke and current-source Standard E2E on real
@@ -266,7 +306,7 @@ schemas, no duplicated state authority is needed to explain a command outcome,
 and the production browser audit completes with no uncaught console/request or
 critical accessibility errors.
 
-Current progress: the main shell and five large workspaces are lazy-loaded and
+Current progress: the main shell and large operational workspaces are lazy-loaded and
 capture history is bounded. Runtime target selection, capture leases, traffic
 plans, and traffic sessions now share a crash-safe schema-v2 authority. Managed
 sessions are bound to the exact target and daemon generation; start uses a
@@ -288,8 +328,9 @@ hardware row.
 
 #### M4.2: Guided benchmark runs
 
-- Implement quick validation, throughput/loss, latency, burst, and soak run
-  templates as backend-owned state machines.
+- Guided Quick Validation v1 is implemented as a backend-owned state machine
+  for one saved pair. Throughput/loss search, latency, burst, and soak templates
+  remain to be implemented.
 - Record preconditions, exact profile/config/tunables, port ownership, samples,
   cleanup actions, and postconditions in a reproducible run bundle.
 - Make cancellation and timeout cleanup first-class and retryable.
@@ -297,6 +338,16 @@ hardware row.
 Exit criterion: every template can be replayed from its bundle and proves
 traffic idle, temporary ownership released, service mode restored, and capture
 recorders removed after pass, fail, cancellation, or timeout.
+
+Current progress: Quick Validation requires explicit real-hardware authorization,
+the exact saved plan revision and nullable run CAS, a 1–60 second duration, link
+UP plus live IDLE/stopped/unowned preconditions, and a final sample at or after
+the canonical deadline. It retains per-port packet/loss, traffic-session/WAL,
+stop, acquisition-restoration, and final-idle evidence. Normal progression is
+poll-driven in v1; a missed deadline, API restart, hard-stop cleanup, stale
+authority, or incomplete cleanup fails conservatively instead of producing a
+pass. Replay/import of a completed run bundle and the remaining benchmark
+templates are still open work.
 
 #### M4.3: Compatibility and capability model
 

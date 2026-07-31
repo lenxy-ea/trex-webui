@@ -425,17 +425,23 @@ write_checksum() {
 make_fixture_archive() {
   local archive="$1"
   local fixture_kind="$2"
-  python3.11 - "$archive" "$fixture_kind" <<'PY'
+  python3.11 - \
+    "$archive" \
+    "$fixture_kind" \
+    "$PROJECT_ROOT/deploy/release_transaction.py" \
+    "$PROJECT_ROOT" <<'PY'
 from __future__ import annotations
 
 import io
 import hashlib
 import json
+from pathlib import Path
 import sys
 import tarfile
 
 
-archive_path, fixture_kind = sys.argv[1:]
+archive_path, fixture_kind, release_transaction_path, project_root_text = sys.argv[1:]
+project_root = Path(project_root_text)
 root = "trex-webui-test-release"
 if fixture_kind == "failing-install":
     install_script = b"#!/usr/bin/env bash\nexit 42\n"
@@ -463,17 +469,37 @@ required = {
     "apps/web/package.json": b'{"name":"fixture","version":"0.0.0"}\n',
     "apps/web/dist/index.html": b"<div id=\"root\"></div>\n",
     "deploy/archive_safety.py": b"# fixture\n",
+    "deploy/bootstrap_release_infrastructure.py": (
+        project_root / "deploy/bootstrap_release_infrastructure.py"
+    ).read_bytes(),
     "deploy/daemon_rpc_probe.py": b"#!/usr/bin/env python3\n# fixture\n",
     "deploy/install.sh": install_script,
     "deploy/logrotate/trex-daemon-server": b"# fixture\n",
     "deploy/path_safety.sh": b"# fixture\n",
+    # Archive upgrades execute this exact verified engine. A stub would test a
+    # different transaction boundary and fail before selector rollback runs.
+    "deploy/release_transaction.py": Path(release_transaction_path).read_bytes(),
     "deploy/systemd/trex-daemon-server.service": b"[Service]\nExecStart=/bin/true\n",
     "deploy/systemd/nftables-trex-webui.conf": b"[Service]\nExecStart=/bin/true\n",
+    "deploy/systemd/nginx-trex-webui-release-reconcile.conf": b"[Unit]\nRequires=trex-webui-release-reconcile.service\nAfter=trex-webui-release-reconcile.service\n",
     "deploy/systemd/trex-webui-api.service": b"[Service]\nExecStart=/bin/true\n",
+    "deploy/systemd/trex-webui-release-consumer-ack.service": b"[Service]\nExecStart=/bin/true\n",
+    "deploy/systemd/trex-webui-release-reconcile.service": b"[Service]\nExecStart=/bin/true\n",
+    "deploy/systemd/trex-webui-release-retry.service": b"[Service]\nExecStart=/bin/true\n",
     "deploy/trex_daemon_supervisor.py": b"#!/usr/bin/env python3\n# fixture\n",
     "deploy/trex_native_boundary.sh": b"#!/usr/bin/env bash\n# fixture\n",
+    "deploy/trex_overview_contract.py": (
+        project_root / "deploy/trex_overview_contract.py"
+    ).read_bytes(),
+    "deploy/trex_persisted_state_contract.py": (
+        project_root / "deploy/trex_persisted_state_contract.py"
+    ).read_bytes(),
     "deploy/upgrade.sh": b"#!/usr/bin/env bash\nexit 0\n",
+    "deploy/verified_upgrade.sh": b"#!/usr/bin/env bash\nexit 0\n",
     "deploy/verify.sh": b"#!/usr/bin/env bash\nexit 0\n",
+    "scripts/release_contract.py": b"#!/usr/bin/env python3\n# fixture\n",
+    "scripts/release_evidence.py": b"#!/usr/bin/env python3\n# fixture\n",
+    "scripts/release_metadata.py": b"#!/usr/bin/env python3\n# fixture\n",
 }
 
 
@@ -493,12 +519,20 @@ def file_entry(name: str, content: bytes, mode: int) -> dict[str, object]:
 
 file_modes = {
     name: 0o755 if name in {
+        "deploy/bootstrap_release_infrastructure.py",
         "deploy/daemon_rpc_probe.py",
         "deploy/install.sh",
+        "deploy/release_transaction.py",
         "deploy/trex_daemon_supervisor.py",
         "deploy/trex_native_boundary.sh",
+        "deploy/trex_overview_contract.py",
+        "deploy/trex_persisted_state_contract.py",
         "deploy/upgrade.sh",
+        "deploy/verified_upgrade.sh",
         "deploy/verify.sh",
+        "scripts/release_contract.py",
+        "scripts/release_evidence.py",
+        "scripts/release_metadata.py",
     } else 0o644
     for name in required
 }
@@ -525,8 +559,15 @@ payload_digest = sha256(
 source_algorithm = "sha256(canonical-json(git-sha,path,type,mode,size,content-sha256)-v1)"
 source_digest = "1" * 64
 git_sha = "2" * 40
+release_provenance = {
+    "schema": "trex-webui-release-provenance/v1",
+    "kind": "local-build",
+    "publishable": False,
+    "source_sha": git_sha,
+    "source_dirty": True,
+}
 manifest = {
-    "schema": "trex-webui-release/v2",
+    "schema": "trex-webui-release/v3",
     "name": root,
     "version": "test",
     "created_at": "2026-07-22T00:00:00Z",
@@ -545,6 +586,10 @@ manifest = {
             "status_sha256": "3" * 64,
         },
     },
+    "release_repository": None,
+    "release_ref": None,
+    "signer_workflow": None,
+    "release_provenance": release_provenance,
     "payload_identity": {
         "algorithm": payload_algorithm,
         "digest": payload_digest,
@@ -620,6 +665,27 @@ upgrade_dry_run() {
 
 PACKAGE_PROJECT="$TEST_ROOT/package-project"
 git clone --quiet --no-local "$PROJECT_ROOT" "$PACKAGE_PROJECT"
+# Exercise the release-chain implementation under test even before it has
+# become the cloned checkout's HEAD.  The fixture is intentionally packaged
+# with --allow-dirty below, so these exact overlays remain part of its source
+# identity rather than bypassing that identity.
+for release_path in \
+  deploy/archive_safety.py \
+  deploy/bootstrap_release_infrastructure.py \
+  deploy/package.sh \
+  deploy/release_transaction.py \
+  deploy/systemd/nginx-trex-webui-release-reconcile.conf \
+  deploy/systemd/trex-webui-release-consumer-ack.service \
+  deploy/systemd/trex-webui-release-reconcile.service \
+  deploy/systemd/trex-webui-release-retry.service \
+  deploy/trex_overview_contract.py \
+  deploy/trex_persisted_state_contract.py \
+  deploy/verified_upgrade.sh \
+  scripts/release_contract.py \
+  scripts/release_evidence.py \
+  scripts/release_metadata.py; do
+  cp -p -- "$PROJECT_ROOT/$release_path" "$PACKAGE_PROJECT/$release_path"
+done
 mkdir -p "$PACKAGE_PROJECT/apps/web/dist" "$PACKAGE_PROJECT/.venv/bin"
 printf '<div id="root"></div>\n' >"$PACKAGE_PROJECT/apps/web/dist/index.html"
 printf '#!/usr/bin/env bash\nexec %q "$@"\n' \
@@ -657,11 +723,16 @@ with tarfile.open(sys.argv[1], "r:gz") as archive:
     assert source is not None
     manifest = json.load(source)
 
-assert manifest["schema"] == "trex-webui-release/v2"
+assert manifest["schema"] == "trex-webui-release/v3"
 assert len(manifest["git_commit"]) == 40
 assert isinstance(manifest["git_dirty"], bool)
 assert "branch" not in manifest["source_identity"]["git"]
 assert len(manifest["source_digest"]) == 64
+assert manifest["release_repository"] is None
+assert manifest["release_ref"] is None
+assert manifest["signer_workflow"] is None
+assert manifest["release_provenance"]["kind"] == "local-build"
+assert manifest["release_provenance"]["publishable"] is False
 payload = manifest["payload_identity"]
 assert payload["algorithm"] == "sha256(canonical-json(release-file-manifest)-v1)"
 assert len(payload["digest"]) == 64
@@ -673,8 +744,18 @@ assert {entry["mode"] for entry in payload["files"]} <= {"0644", "0755"}
 files = {entry["path"]: entry for entry in payload["files"]}
 assert files["apps/api/app/main.py"]["mode"] == "0644"
 assert files["deploy/archive_safety.py"]["mode"] == "0644"
+assert files["deploy/bootstrap_release_infrastructure.py"]["mode"] == "0755"
 assert files["deploy/install.sh"]["mode"] == "0755"
+assert files["deploy/release_transaction.py"]["mode"] == "0755"
+assert files["deploy/systemd/nginx-trex-webui-release-reconcile.conf"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-consumer-ack.service"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-reconcile.service"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-retry.service"]["mode"] == "0644"
 assert files["deploy/trex_native_boundary.sh"]["mode"] == "0755"
+assert files["deploy/trex_overview_contract.py"]["mode"] == "0755"
+assert files["deploy/trex_persisted_state_contract.py"]["mode"] == "0755"
+assert files["deploy/verified_upgrade.sh"]["mode"] == "0755"
+assert files["scripts/release_metadata.py"]["mode"] == "0755"
 assert files["LICENSE"]["mode"] == "0644"
 assert files["NOTICE"]["mode"] == "0644"
 assert files["THIRD_PARTY_NOTICES.md"]["mode"] == "0644"
@@ -699,6 +780,72 @@ cmp -s \
   "$VALID_ARCHIVE" \
   "$REPRODUCIBLE_OUTPUT/trex-webui-release-safety-test.tar.gz" || \
   fail "same source and package name did not produce a byte-identical archive"
+
+# A publishable package is a distinct contract: it must come from a clean
+# exact-tag checkout and bind the repository plus signer workflow identity.
+git -C "$PACKAGE_PROJECT" config user.name "TRex WebUI release test"
+git -C "$PACKAGE_PROJECT" config user.email "release-test@invalid.example"
+git -C "$PACKAGE_PROJECT" add \
+  deploy/archive_safety.py \
+  deploy/bootstrap_release_infrastructure.py \
+  deploy/package.sh \
+  deploy/release_transaction.py \
+  deploy/systemd/nginx-trex-webui-release-reconcile.conf \
+  deploy/systemd/trex-webui-release-consumer-ack.service \
+  deploy/systemd/trex-webui-release-reconcile.service \
+  deploy/systemd/trex-webui-release-retry.service \
+  deploy/trex_overview_contract.py \
+  deploy/trex_persisted_state_contract.py \
+  deploy/verified_upgrade.sh \
+  scripts/release_contract.py \
+  scripts/release_evidence.py \
+  scripts/release_metadata.py
+git -C "$PACKAGE_PROJECT" commit --quiet -m "release provenance fixture"
+PACKAGE_RELEASE_SHA="$(git -C "$PACKAGE_PROJECT" rev-parse HEAD)"
+PACKAGE_VERSION="$(python3.11 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$PACKAGE_PROJECT/package.json")"
+PACKAGE_RELEASE_REF="refs/tags/v${PACKAGE_VERSION}"
+git -C "$PACKAGE_PROJECT" tag "v${PACKAGE_VERSION}"
+PACKAGE_SIGNER_WORKFLOW="lenxy-ea/trex-webui/.github/workflows/release.yml"
+PACKAGE_GITHUB_OUTPUT="$TEST_ROOT/package-github-output"
+env PATH=/usr/bin:/bin \
+  TREX_WEBUI_PACKAGE_PYTHON="$PROJECT_ROOT/.venv/bin/python" \
+  GITHUB_ACTIONS=true \
+  GITHUB_REPOSITORY=lenxy-ea/trex-webui \
+  GITHUB_REF="$PACKAGE_RELEASE_REF" \
+  GITHUB_SHA="$PACKAGE_RELEASE_SHA" \
+  GITHUB_WORKFLOW_REF="${PACKAGE_SIGNER_WORKFLOW}@${PACKAGE_RELEASE_REF}" \
+  GITHUB_WORKFLOW_SHA="$PACKAGE_RELEASE_SHA" \
+  "$PROJECT_ROOT/deploy/package.sh" \
+  --project-root "$PACKAGE_PROJECT" \
+  --skip-build \
+  --github-release-context \
+  --output-dir "$PACKAGE_GITHUB_OUTPUT" \
+  --name trex-webui-release-github-test >/dev/null
+PACKAGE_GITHUB_ARCHIVE="$PACKAGE_GITHUB_OUTPUT/trex-webui-release-github-test.tar.gz"
+PACKAGE_GITHUB_MANIFEST="$TEST_ROOT/package-github-manifest.json"
+tar -xOf "$PACKAGE_GITHUB_ARCHIVE" \
+  trex-webui-release-github-test/RELEASE_MANIFEST.json >"$PACKAGE_GITHUB_MANIFEST"
+"$PROJECT_ROOT/scripts/release_contract.py" validate-manifest \
+  "$PACKAGE_GITHUB_MANIFEST" \
+  --publishable \
+  --expected-repository lenxy-ea/trex-webui \
+  --expected-release-ref "$PACKAGE_RELEASE_REF" \
+  --expected-signer-workflow "$PACKAGE_SIGNER_WORKFLOW" \
+  --expected-source-sha "$PACKAGE_RELEASE_SHA" >/dev/null
+expect_failure "release tag does not exist" env PATH=/usr/bin:/bin \
+  TREX_WEBUI_PACKAGE_PYTHON="$PROJECT_ROOT/.venv/bin/python" \
+  GITHUB_ACTIONS=true \
+  GITHUB_REPOSITORY=lenxy-ea/trex-webui \
+  GITHUB_REF="refs/tags/v${PACKAGE_VERSION}-missing" \
+  GITHUB_SHA="$PACKAGE_RELEASE_SHA" \
+  GITHUB_WORKFLOW_REF="${PACKAGE_SIGNER_WORKFLOW}@refs/tags/v${PACKAGE_VERSION}-missing" \
+  GITHUB_WORKFLOW_SHA="$PACKAGE_RELEASE_SHA" \
+  "$PROJECT_ROOT/deploy/package.sh" \
+  --project-root "$PACKAGE_PROJECT" \
+  --skip-build \
+  --github-release-context \
+  --output-dir "$TEST_ROOT/package-missing-tag-output" \
+  --name trex-webui-release-missing-tag-test
 
 PRESERVE_OUTPUT="$TEST_ROOT/preserve-output"
 mkdir "$PRESERVE_OUTPUT"
@@ -1201,7 +1348,26 @@ mock_archive_api_systemctl() {
             "${MOCK_API_APP_ROOT:-$MOCK_API_WORKING_DIRECTORY}"
           ;;
         --property=MainPID)
-          printf '4242\n'
+          printf '%s\n' "${MOCK_API_MAIN_PID:-$$}"
+          ;;
+        --property=FragmentPath)
+          printf '%s\n' "$SYSTEMD_SERVICE_TARGET"
+          ;;
+        --property=NeedDaemonReload)
+          printf 'no\n'
+          ;;
+        --property=DropInPaths)
+          printf '\n'
+          ;;
+        --property=ActiveState)
+          if [[ "${MOCK_API_ACTIVE:-0}" -eq 1 ]]; then
+            printf 'active\n'
+          else
+            printf 'inactive\n'
+          fi
+          ;;
+        --property=Job)
+          printf '\n'
           ;;
         *)
           return 64
@@ -1233,12 +1399,16 @@ ARCHIVE_API_GUARD_ROOT="$TEST_ROOT/archive-api-guard"
 mkdir -p "$ARCHIVE_API_GUARD_ROOT/.venv/bin"
 ARCHIVE_API_GUARD_EXEC="$ARCHIVE_API_GUARD_ROOT/.venv/bin/python"
 printf 'old interpreter\n' >"$ARCHIVE_API_GUARD_EXEC"
+ARCHIVE_API_GUARD_UNIT="$ARCHIVE_API_GUARD_ROOT/trex-webui-api.service"
+printf '[Service]\nExecStart=/bin/true\n' >"$ARCHIVE_API_GUARD_UNIT"
+chmod 0644 "$ARCHIVE_API_GUARD_UNIT"
 
 archive_api_matching_active_guard_fixture() (
   # shellcheck source=deploy/upgrade.sh
   source "$PROJECT_ROOT/deploy/upgrade.sh"
   trap - EXIT
   INSTALL_ROOT="$ARCHIVE_API_GUARD_ROOT"
+  SYSTEMD_SERVICE_TARGET="$ARCHIVE_API_GUARD_UNIT"
   ARCHIVE="fixture"
   DRY_RUN=0
   RUN_RESTART=1
@@ -1267,6 +1437,7 @@ archive_api_skip_restart_active_fixture() (
   source "$PROJECT_ROOT/deploy/upgrade.sh"
   trap - EXIT
   INSTALL_ROOT="$ARCHIVE_API_GUARD_ROOT"
+  SYSTEMD_SERVICE_TARGET="$ARCHIVE_API_GUARD_UNIT"
   ARCHIVE="fixture"
   DRY_RUN=0
   RUN_RESTART=0
@@ -1290,6 +1461,7 @@ archive_api_unrelated_service_fixture() (
   source "$PROJECT_ROOT/deploy/upgrade.sh"
   trap - EXIT
   INSTALL_ROOT="$ARCHIVE_API_GUARD_ROOT"
+  SYSTEMD_SERVICE_TARGET="$ARCHIVE_API_GUARD_UNIT"
   ARCHIVE="fixture"
   DRY_RUN=0
   RUN_RESTART=1
@@ -1318,6 +1490,7 @@ archive_api_mismatched_app_dir_fixture() (
   source "$PROJECT_ROOT/deploy/upgrade.sh"
   trap - EXIT
   INSTALL_ROOT="$ARCHIVE_API_GUARD_ROOT"
+  SYSTEMD_SERVICE_TARGET="$ARCHIVE_API_GUARD_UNIT"
   ARCHIVE="fixture"
   DRY_RUN=0
   RUN_RESTART=1
@@ -1845,9 +2018,11 @@ if [[ "$(id -u)" -eq 0 ]]; then
     --skip-python-deps --skip-enable --external-daemon --sync-method portable
   [[ "$(<"$VENV_ROLLBACK_INSTALL/.venv/release-sentinel")" == "old-release" ]] || \
     fail "outer archive rollback did not restore the prior virtualenv"
-  grep -Fqx "show trex-webui-api.service --property=WorkingDirectory --value" "$FAKE_SYSTEMCTL_LOG" || \
-    fail "archive upgrade did not compare the loaded service WorkingDirectory"
-  if grep -Eq '^(stop|restart) trex-webui-api.service$' "$FAKE_SYSTEMCTL_LOG"; then
+  # Non-production archive roots are now rejected before any host/service
+  # inspection; older wrappers reached the read-only WorkingDirectory probe.
+  # Both contracts must remain zero-mutation for the unrelated production API.
+  if [[ -e "$FAKE_SYSTEMCTL_LOG" ]] && \
+    grep -Eq '^(stop|restart) trex-webui-api.service$' "$FAKE_SYSTEMCTL_LOG"; then
     fail "custom-root archive rollback touched the unrelated production API"
   fi
 else

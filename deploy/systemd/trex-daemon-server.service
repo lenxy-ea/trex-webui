@@ -2,8 +2,9 @@
 [Unit]
 Description=TRex privileged daemon server
 Documentation=file:///opt/trex-webui/docs/NGINX_DEPLOYMENT.md
-After=network-online.target firewalld.service nftables.service
+After=network-online.target firewalld.service nftables.service trex-webui-release-reconcile.service
 Wants=network-online.target
+Requires=trex-webui-release-reconcile.service
 PartOf=nftables.service
 Before=trex-webui-api.service
 AssertFileIsExecutable=/opt/trex-core/scripts/trex_daemon_server

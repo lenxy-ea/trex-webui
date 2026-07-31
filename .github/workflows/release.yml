@@ -1,0 +1,313 @@
+name: Exact-tag attested release
+
+on:
+  workflow_dispatch:
+    inputs:
+      standard_report_asset:
+        description: Existing draft-release Standard E2E JSON asset basename
+        required: true
+        type: string
+      six_port_report_asset:
+        description: Existing draft-release six-port E2E JSON asset basename
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: exact-tag-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality-gates:
+    name: Reusable no-hardware CI gates
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    name: Package, attest, and publish immutable prerelease
+    needs: quality-gates
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      STANDARD_REPORT_ASSET: ${{ inputs.standard_report_asset }}
+      SIX_PORT_REPORT_ASSET: ${{ inputs.six_port_report_asset }}
+      RELEASE_SIGNER_WORKFLOW: ${{ github.repository }}/.github/workflows/release.yml
+    steps:
+      - name: Checkout the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Validate exact tag checkout
+        id: identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("package.json", encoding="utf-8"))["version"])')"
+          expected_tag="v${version}"
+          expected_ref="refs/tags/${expected_tag}"
+          [[ "$GITHUB_REF" == "$expected_ref" ]] || {
+            printf 'error: dispatch this workflow from exact ref %s, got %s\n' "$expected_ref" "$GITHUB_REF" >&2
+            exit 1
+          }
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            printf 'error: GitHub source SHA is not a full commit ID\n' >&2
+            exit 1
+          }
+          head_sha="$(git rev-parse HEAD)"
+          tag_sha="$(git rev-parse --verify "${GITHUB_REF}^{commit}")"
+          [[ "$head_sha" == "$GITHUB_SHA" && "$tag_sha" == "$GITHUB_SHA" ]] || {
+            printf 'error: checkout HEAD, exact tag, and GitHub source SHA must be identical\n' >&2
+            exit 1
+          }
+          [[ -z "$(git status --porcelain)" ]] || {
+            printf 'error: release checkout is dirty before dependency installation\n' >&2
+            exit 1
+          }
+          [[ "$STANDARD_REPORT_ASSET" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.json$ ]] || {
+            printf 'error: Standard report input must be a safe JSON asset basename\n' >&2
+            exit 1
+          }
+          [[ "$SIX_PORT_REPORT_ASSET" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.json$ ]] || {
+            printf 'error: six-port report input must be a safe JSON asset basename\n' >&2
+            exit 1
+          }
+          [[ "$STANDARD_REPORT_ASSET" != "$SIX_PORT_REPORT_ASSET" ]] || {
+            printf 'error: qualification reports must be two distinct assets\n' >&2
+            exit 1
+          }
+
+          {
+            printf 'version=%s\n' "$version"
+            printf 'tag=%s\n' "$expected_tag"
+            printf 'release_ref=%s\n' "$expected_ref"
+            printf 'release_name=trex-webui-%s\n' "$version"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Persist exact release ID and download operator evidence
+        id: release_gate
+        env:
+          RELEASE_ADMIN_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/github_release_gate.py prepare \
+            --repository "$GITHUB_REPOSITORY" \
+            --tag "${{ steps.identity.outputs.tag }}" \
+            --source-sha "$GITHUB_SHA" \
+            --standard-report-asset "$STANDARD_REPORT_ASSET" \
+            --six-port-report-asset "$SIX_PORT_REPORT_ASSET" \
+            --identity dist/release-identity.json \
+            --starter-dir dist/qualification \
+            --artifact-dir dist/release \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        if: steps.release_gate.outputs.published != 'true'
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        if: steps.release_gate.outputs.published != 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install locked packaging dependencies
+        if: steps.release_gate.outputs.published != 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: \
+            -r apps/api/requirements-dev.lock
+          npm --prefix apps/web ci
+
+      - name: Build exact-tag release chain
+        id: artifacts
+        if: steps.release_gate.outputs.published != 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          release_name="${{ steps.identity.outputs.release_name }}"
+          version="${{ steps.identity.outputs.version }}"
+          release_ref="${{ steps.identity.outputs.release_ref }}"
+          output_dir="$GITHUB_WORKSPACE/dist/release"
+          install -d -m 0755 "$output_dir"
+          standard_report="$output_dir/$STANDARD_REPORT_ASSET"
+          six_port_report="$output_dir/$SIX_PORT_REPORT_ASSET"
+          [[ ! -e "$standard_report" && ! -L "$standard_report" ]] || {
+            printf 'error: refusing to replace Standard report in release output\n' >&2
+            exit 1
+          }
+          [[ ! -e "$six_port_report" && ! -L "$six_port_report" ]] || {
+            printf 'error: refusing to replace six-port report in release output\n' >&2
+            exit 1
+          }
+          install -m 0644 \
+            "dist/qualification/$STANDARD_REPORT_ASSET" "$standard_report"
+          install -m 0644 \
+            "dist/qualification/$SIX_PORT_REPORT_ASSET" "$six_port_report"
+
+          deploy/package.sh \
+            --github-release-context \
+            --output-dir "$output_dir" \
+            --name "$release_name"
+          archive="$output_dir/$release_name.tar.gz"
+          checksum="$archive.sha256"
+
+          .venv/bin/python - "$archive" "$release_name" "$output_dir" <<'PY'
+          import os
+          import sys
+          import tarfile
+          import tempfile
+          from pathlib import Path
+
+          archive_path = Path(sys.argv[1])
+          root = sys.argv[2]
+          output_dir = Path(sys.argv[3])
+          with tarfile.open(archive_path, mode="r:gz") as archive:
+              for name in ("SBOM.web.cdx.json", "SBOM.python.cdx.json"):
+                  member = archive.getmember(f"{root}/{name}")
+                  if not member.isfile():
+                      raise SystemExit(f"release SBOM is not a regular file: {name}")
+                  source = archive.extractfile(member)
+                  if source is None:
+                      raise SystemExit(f"release SBOM cannot be read: {name}")
+                  content = source.read()
+                  fd, temporary = tempfile.mkstemp(prefix=f".{name}.", dir=output_dir)
+                  try:
+                      with os.fdopen(fd, "wb") as target:
+                          target.write(content)
+                          target.flush()
+                          os.fsync(target.fileno())
+                      os.chmod(temporary, 0o644)
+                      os.replace(temporary, output_dir / name)
+                  finally:
+                      if os.path.exists(temporary):
+                          os.unlink(temporary)
+          PY
+
+          evidence="$output_dir/$release_name.evidence.json"
+          .venv/bin/python scripts/release_evidence.py create \
+            --archive "$archive" \
+            --checksum "$checksum" \
+            --standard-report "$standard_report" \
+            --six-port-report "$six_port_report" \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-release-ref "$release_ref" \
+            --expected-signer-workflow "$RELEASE_SIGNER_WORKFLOW" \
+            --output "$evidence" >/dev/null
+
+          bootstrap="$output_dir/$release_name.verified-upgrade.sh"
+          archive_safety="$output_dir/$release_name.archive-safety.py"
+          release_contract="$output_dir/$release_name.release-contract.py"
+          release_metadata="$output_dir/$release_name.release-metadata.py"
+          install -m 0755 deploy/verified_upgrade.sh "$bootstrap"
+          install -m 0755 deploy/archive_safety.py "$archive_safety"
+          install -m 0755 scripts/release_contract.py "$release_contract"
+          install -m 0755 scripts/release_metadata.py "$release_metadata"
+
+          metadata="$output_dir/$release_name.release.json"
+          .venv/bin/python scripts/release_metadata.py create \
+            --version "$version" \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-release-ref "$release_ref" \
+            --expected-signer-workflow "$RELEASE_SIGNER_WORKFLOW" \
+            --expected-source-sha "$GITHUB_SHA" \
+            --archive "$archive" \
+            --checksum "$checksum" \
+            --evidence "$evidence" \
+            --sbom-web "$output_dir/SBOM.web.cdx.json" \
+            --sbom-python "$output_dir/SBOM.python.cdx.json" \
+            --standard-report "$standard_report" \
+            --six-port-report "$six_port_report" \
+            --verified-upgrade "$bootstrap" \
+            --archive-safety "$archive_safety" \
+            --release-contract "$release_contract" \
+            --release-metadata "$release_metadata" \
+            --output "$metadata" >/dev/null
+          .venv/bin/python scripts/release_metadata.py verify \
+            --metadata "$metadata" \
+            --artifact-dir "$output_dir" \
+            --expected-repository "$GITHUB_REPOSITORY" \
+            --expected-release-ref "$release_ref" \
+            --expected-signer-workflow "$RELEASE_SIGNER_WORKFLOW" \
+            --expected-source-sha "$GITHUB_SHA" >/dev/null
+
+          # Emit only paths produced and validated above.  These outputs are the
+          # complete subject set for the hosted-runner attestations below.
+          {
+            printf 'archive=%s\n' "$archive"
+            printf 'checksum=%s\n' "$checksum"
+            printf 'evidence=%s\n' "$evidence"
+            printf 'sbom_web=%s\n' "$output_dir/SBOM.web.cdx.json"
+            printf 'sbom_python=%s\n' "$output_dir/SBOM.python.cdx.json"
+            printf 'standard_report=%s\n' "$standard_report"
+            printf 'six_port_report=%s\n' "$six_port_report"
+            printf 'bootstrap=%s\n' "$bootstrap"
+            printf 'archive_safety=%s\n' "$archive_safety"
+            printf 'release_contract=%s\n' "$release_contract"
+            printf 'release_metadata=%s\n' "$release_metadata"
+            printf 'metadata=%s\n' "$metadata"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Attest archive, evidence, reports, SBOMs, and bootstrap chain
+        if: steps.release_gate.outputs.published != 'true'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            ${{ steps.artifacts.outputs.archive }}
+            ${{ steps.artifacts.outputs.checksum }}
+            ${{ steps.artifacts.outputs.evidence }}
+            ${{ steps.artifacts.outputs.sbom_web }}
+            ${{ steps.artifacts.outputs.sbom_python }}
+            ${{ steps.artifacts.outputs.standard_report }}
+            ${{ steps.artifacts.outputs.six_port_report }}
+            ${{ steps.artifacts.outputs.bootstrap }}
+            ${{ steps.artifacts.outputs.archive_safety }}
+            ${{ steps.artifacts.outputs.release_contract }}
+            ${{ steps.artifacts.outputs.release_metadata }}
+            ${{ steps.artifacts.outputs.metadata }}
+
+      - name: Upload only missing exact-ID assets
+        if: steps.release_gate.outputs.published != 'true'
+        env:
+          RELEASE_ADMIN_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/github_release_gate.py upload \
+            --identity dist/release-identity.json \
+            --artifact-dir dist/release
+
+      - name: Download and verify all 12 exact-ID assets
+        if: steps.release_gate.outputs.published != 'true'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/github_release_gate.py verify \
+            --identity dist/release-identity.json \
+            --artifact-dir dist/release
+
+      - name: Publish or final-validate the immutable prerelease
+        env:
+          RELEASE_ADMIN_TOKEN: ${{ secrets.RELEASE_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/github_release_gate.py publish \
+            --identity dist/release-identity.json \
+            --artifact-dir dist/release

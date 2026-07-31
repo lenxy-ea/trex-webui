@@ -8,6 +8,59 @@ published releases.
 
 ## [Unreleased]
 
+## [0.1.0-rc.2] - 2026-08-01
+
+### Added
+
+- Backend-owned traffic evidence v1 with immutable start identity, mutation
+  history, commanded cleanup evidence, and revision-bound report archives.
+- Real-hardware qualification gates for all three I350 port pairs and for
+  systemd API crash/restart adoption of an active traffic session.
+- Guided Quick Validation v1 for bounded saved-plan runs, per-port packet and
+  loss evidence, exact cleanup, and crash-safe recovery state.
+- Exact-tag release provenance, dual SBOM/evidence validation, GitHub artifact
+  attestations, and a fail-closed verified-upgrade bootstrap.
+- Transactional versioned releases with durable activation journals, a stable
+  current/previous selector, boot-time reconciliation, and guarded N-1
+  reactivation for the installer-managed local daemon. External-daemon N-1 is
+  rejected because its independent mutation authority cannot be fenced locally.
+
+### Security
+
+- Bound report saves now hold the runtime mutation fence and require the exact
+  current evidence-v1 traffic session ID and positive revision; reserved
+  evidence fields can no longer be supplied by the browser.
+- Traffic started by a guided or acceptance run carries a persisted hard-stop
+  lease that the runtime supervisor can enforce after browser or API failure.
+- Publishable artifacts are restricted to a clean exact tag, source SHA, and
+  pinned signer workflow identity before release assets can be trusted.
+- SELinux-enabled versioned installs persist and verify an exact HTTP content
+  policy for release frontend trees without labeling API source or `.env` as
+  Nginx-readable content.
+
+### Changed
+
+- Multi-port topology, traffic plan, reports, and profile selection now derive
+  their active-run state from one backend authority instead of transient local
+  UI state.
+- Run Reports, Dashboard chart proportions, close guards, and dense desktop
+  workflows were refined for clearer operational scanning and safer actions.
+- The package version is pinned to `0.1.0-rc.2` across both npm workspaces.
+
+### Known limitations
+
+- The project remains a release candidate for one trusted operator on a
+  management network; application-level authentication and RBAC are not yet
+  implemented.
+- The reference qualification target is TRex v3.08 on AlmaLinux 9.8 x86_64
+  with six Intel I350 ports; each passing report certifies only its exact
+  source, build, configuration, and observed hardware identity.
+- Exact-tag attestations, hardware qualification, and target-host verified
+  upgrade remain release-specific gates; direct-checkout installs do not gain
+  the archive transaction guarantees.
+
+## [0.1.0-rc.1] - 2026-07-31
+
 ### Added
 
 - Apache-2.0 project licensing, third-party notices, and provenance
@@ -48,5 +101,5 @@ published releases.
 - Real-hardware certification currently covers TRex v3.08 on the reference
   AlmaLinux 9.8 x86_64 lab; broader compatibility is best effort.
 
-The initial public source release is planned as `v0.1.0-rc.1`. Pre-public
-development history was not released as versioned changelog entries.
+`v0.1.0-rc.1` was the initial public source release. Pre-public development
+history was not released as separate versioned changelog entries.

@@ -733,13 +733,25 @@ from pathlib import Path
 import sys
 
 
-for raw_path in sys.argv[1:]:
-    source = Path(raw_path).read_text(encoding="utf-8")
+for raw_path_value in sys.argv[1:]:
+    raw_path = Path(raw_path_value)
+    source = raw_path.read_text(encoding="utf-8")
     main_body = source[source.index("main() {") :]
+    deployment_lock = main_body.index("trex_acquire_deployment_lock")
     preflight = main_body.index("preflight_managed_api_environment")
-    mutation = main_body.index("trex_acquire_deployment_lock")
-    if preflight >= mutation:
-        raise SystemExit(f"managed environment preflight is not before deployment mutation: {raw_path}")
+    if deployment_lock >= preflight:
+        raise SystemExit(
+            f"managed environment preflight is not serialized by the deployment lock: {raw_path}"
+        )
+    mutation_markers = {
+        "install.sh": ("install_packages",),
+        "upgrade.sh": ("run_previous_release_rollback", "stage_archive"),
+    }[raw_path.name]
+    for marker in mutation_markers:
+        if preflight >= main_body.index(marker):
+            raise SystemExit(
+                f"managed environment preflight is not before {marker}: {raw_path}"
+            )
 PY
 
 printf 'PASS: managed environment file and API MainPID authority\n'

@@ -21,6 +21,11 @@ ALLOW_DIRTY=0
 SOURCE_EPOCH=""
 PYTHON_BIN=""
 BASELINE_SOURCE_IDENTITY=""
+GITHUB_RELEASE_CONTEXT=0
+RELEASE_REPOSITORY=""
+RELEASE_REF=""
+SIGNER_WORKFLOW_REF=""
+SIGNER_WORKFLOW_SHA=""
 
 cleanup() {
   local status=$?
@@ -60,6 +65,8 @@ Options:
   --name NAME           Archive directory/file stem. Default: trex-webui-<version>-<git>-<timestamp>
   --skip-build          Reuse existing apps/web/dist instead of running npm run build:web
   --allow-dirty         Package HEAD despite local changes. Never use for a published release
+  --github-release-context
+                        Require and bind exact GitHub tag/repository/signer-workflow context
   -h, --help            Show this help
 USAGE
 }
@@ -107,6 +114,10 @@ parse_args() {
         ALLOW_DIRTY=1
         shift
         ;;
+      --github-release-context)
+        GITHUB_RELEASE_CONTEXT=1
+        shift
+        ;;
       -h|--help)
         usage
         exit 0
@@ -124,6 +135,35 @@ version() {
 
 git_commit() {
   git -C "$PROJECT_ROOT" rev-parse --short=12 HEAD 2>/dev/null || die "release packaging requires a Git checkout with a valid HEAD"
+}
+
+capture_github_release_context() {
+  [[ "$GITHUB_RELEASE_CONTEXT" -eq 1 ]] || return 0
+  [[ "${GITHUB_ACTIONS:-}" == "true" ]] || \
+    die "--github-release-context requires GITHUB_ACTIONS=true"
+  RELEASE_REPOSITORY="${GITHUB_REPOSITORY:-}"
+  RELEASE_REF="${GITHUB_REF:-}"
+  SIGNER_WORKFLOW_REF="${GITHUB_WORKFLOW_REF:-}"
+  SIGNER_WORKFLOW_SHA="${GITHUB_WORKFLOW_SHA:-}"
+  local github_sha current_sha tag_commit
+  github_sha="${GITHUB_SHA:-}"
+  [[ -n "$RELEASE_REPOSITORY" ]] || die "GitHub release repository context is missing"
+  [[ -n "$RELEASE_REF" ]] || die "GitHub release ref context is missing"
+  [[ -n "$SIGNER_WORKFLOW_REF" ]] || die "GitHub signer workflow ref context is missing"
+  [[ -n "$SIGNER_WORKFLOW_SHA" ]] || die "GitHub signer workflow SHA context is missing"
+  [[ -n "$github_sha" ]] || die "GitHub source SHA context is missing"
+  [[ "$RELEASE_REF" == refs/tags/* ]] || \
+    die "GitHub release ref must be an exact refs/tags/* ref"
+  current_sha="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null)" || \
+    die "unable to resolve release checkout HEAD"
+  tag_commit="$(git -C "$PROJECT_ROOT" rev-parse --verify "${RELEASE_REF}^{commit}" 2>/dev/null)" || \
+    die "GitHub release tag does not exist in the release checkout"
+  [[ "$github_sha" == "$current_sha" ]] || \
+    die "GitHub source SHA does not exactly match the release checkout HEAD"
+  [[ "$tag_commit" == "$current_sha" ]] || \
+    die "GitHub release tag does not exactly resolve to the release checkout HEAD"
+  [[ "$SIGNER_WORKFLOW_SHA" == "$github_sha" ]] || \
+    die "GitHub signer workflow SHA does not exactly match the release source SHA"
 }
 
 capture_source_identity() {
@@ -166,8 +206,20 @@ check_layout() {
   [[ -f "$PROJECT_ROOT/deploy/verify.sh" ]] || die "missing deploy/verify.sh"
   [[ -f "$PROJECT_ROOT/deploy/path_safety.sh" ]] || die "missing deploy/path_safety.sh"
   [[ -f "$PROJECT_ROOT/deploy/archive_safety.py" ]] || die "missing deploy/archive_safety.py"
+  [[ -x "$PROJECT_ROOT/deploy/bootstrap_release_infrastructure.py" ]] || die "missing executable deploy/bootstrap_release_infrastructure.py"
+  [[ -x "$PROJECT_ROOT/deploy/release_transaction.py" ]] || die "missing executable deploy/release_transaction.py"
+  [[ -x "$PROJECT_ROOT/deploy/trex_overview_contract.py" ]] || die "missing executable deploy/trex_overview_contract.py"
+  [[ -x "$PROJECT_ROOT/deploy/trex_persisted_state_contract.py" ]] || die "missing executable deploy/trex_persisted_state_contract.py"
+  [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack.service" ]] || die "missing release consumer acknowledgement systemd unit"
+  [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service" ]] || die "missing release reconciler systemd unit"
+  [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry.service" ]] || die "missing release retry systemd unit"
+  [[ -f "$PROJECT_ROOT/deploy/systemd/nginx-trex-webui-release-reconcile.conf" ]] || die "missing release reconciler Nginx dependency drop-in"
+  [[ -x "$PROJECT_ROOT/deploy/verified_upgrade.sh" ]] || die "missing executable deploy/verified_upgrade.sh"
   [[ -f "$PROJECT_ROOT/scripts/trex_standard_e2e.py" ]] || die "missing scripts/trex_standard_e2e.py"
   [[ -f "$PROJECT_ROOT/scripts/trex_real_acceptance.py" ]] || die "missing scripts/trex_real_acceptance.py"
+  [[ -x "$PROJECT_ROOT/scripts/release_contract.py" ]] || die "missing executable scripts/release_contract.py"
+  [[ -x "$PROJECT_ROOT/scripts/release_evidence.py" ]] || die "missing executable scripts/release_evidence.py"
+  [[ -x "$PROJECT_ROOT/scripts/release_metadata.py" ]] || die "missing executable scripts/release_metadata.py"
   [[ -x "$PROJECT_ROOT/scripts/npmw" ]] || die "missing executable scripts/npmw"
   [[ -x "$PROJECT_ROOT/scripts/generate_sbom.sh" ]] || die "missing executable scripts/generate_sbom.sh"
   [[ -f "$PROJECT_ROOT/deploy/nginx/trex-webui.conf" ]] || die "missing deploy/nginx/trex-webui.conf"
@@ -269,12 +321,23 @@ write_manifest() {
   local created_at="$2"
   local package_version="$3"
   local digest
+  local provenance_args=()
+  if [[ "$GITHUB_RELEASE_CONTEXT" -eq 1 ]]; then
+    provenance_args=(
+      --release-repository "$RELEASE_REPOSITORY"
+      --release-ref "$RELEASE_REF"
+      --signer-workflow-ref "$SIGNER_WORKFLOW_REF"
+      --signer-workflow-sha "$SIGNER_WORKFLOW_SHA"
+      --require-publishable
+    )
+  fi
   digest="$(
     "$PYTHON_BIN" "$PROJECT_ROOT/deploy/archive_safety.py" write-manifest "$target" \
       --source-root "$PROJECT_ROOT" \
       --name "$PACKAGE_NAME" \
       --version "$package_version" \
-      --created-at "$created_at"
+      --created-at "$created_at" \
+      "${provenance_args[@]}"
   )" || die "failed to create release payload identity"
   log "Recorded release payload SHA-256 $digest"
 }
@@ -327,6 +390,10 @@ main() {
     BASELINE_SOURCE_IDENTITY="$(capture_source_identity)" ||
       die "unable to capture release source identity"
   fi
+  if [[ "$GITHUB_RELEASE_CONTEXT" -eq 1 && "$ALLOW_DIRTY" -eq 1 ]]; then
+    die "--github-release-context cannot be combined with --allow-dirty"
+  fi
+  capture_github_release_context
   SOURCE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$PROJECT_ROOT" show -s --format=%ct HEAD)}"
   [[ "$SOURCE_EPOCH" =~ ^[0-9]+$ ]] || die "SOURCE_DATE_EPOCH must be an integer"
   OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_ROOT/dist/releases}"

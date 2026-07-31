@@ -13,7 +13,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 
 MAX_ARCHIVE_ENTRIES = 50_000
@@ -21,7 +21,7 @@ MAX_ARCHIVE_FILE_BYTES = 1_000_000_000
 MAX_ARCHIVE_TOTAL_BYTES = 2_000_000_000
 MAX_RELEASE_MANIFEST_BYTES = 32 * 1024 * 1024
 RELEASE_MANIFEST_NAME = "RELEASE_MANIFEST.json"
-RELEASE_MANIFEST_SCHEMA = "trex-webui-release/v2"
+RELEASE_MANIFEST_SCHEMA = "trex-webui-release/v3"
 PAYLOAD_IDENTITY_ALGORITHM = "sha256(canonical-json(release-file-manifest)-v1)"
 SOURCE_IDENTITY_ALGORITHM = "sha256(canonical-json(git-sha,path,type,mode,size,content-sha256)-v1)"
 SAFE_TOP_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
@@ -42,17 +42,29 @@ REQUIRED_FILES = {
     "apps/web/package.json": False,
     "apps/web/dist/index.html": False,
     "deploy/archive_safety.py": False,
+    "deploy/bootstrap_release_infrastructure.py": True,
     "deploy/daemon_rpc_probe.py": True,
     "deploy/install.sh": True,
     "deploy/logrotate/trex-daemon-server": False,
     "deploy/path_safety.sh": False,
+    "deploy/release_transaction.py": True,
     "deploy/systemd/trex-daemon-server.service": False,
     "deploy/systemd/nftables-trex-webui.conf": False,
+    "deploy/systemd/nginx-trex-webui-release-reconcile.conf": False,
     "deploy/systemd/trex-webui-api.service": False,
+    "deploy/systemd/trex-webui-release-consumer-ack.service": False,
+    "deploy/systemd/trex-webui-release-reconcile.service": False,
+    "deploy/systemd/trex-webui-release-retry.service": False,
     "deploy/trex_daemon_supervisor.py": True,
     "deploy/trex_native_boundary.sh": True,
+    "deploy/trex_overview_contract.py": True,
+    "deploy/trex_persisted_state_contract.py": True,
     "deploy/upgrade.sh": True,
+    "deploy/verified_upgrade.sh": True,
     "deploy/verify.sh": True,
+    "scripts/release_contract.py": True,
+    "scripts/release_evidence.py": True,
+    "scripts/release_metadata.py": True,
 }
 PAYLOAD_ENTRY_KEYS = {"mode", "path", "sha256", "size", "type"}
 PAYLOAD_IDENTITY_KEYS = {
@@ -67,6 +79,42 @@ PAYLOAD_IDENTITY_KEYS = {
 
 class ArchiveSafetyError(ValueError):
     pass
+
+
+def load_release_contract_module() -> Any:
+    module_path = Path(__file__).resolve().parents[1] / "scripts" / "release_contract.py"
+    try:
+        metadata = module_path.lstat()
+    except OSError as exc:
+        raise ArchiveSafetyError(
+            f"release provenance validator is missing: {module_path}: {exc}"
+        ) from exc
+    if not stat.S_ISREG(metadata.st_mode) or module_path.is_symlink():
+        raise ArchiveSafetyError(
+            f"release provenance validator is unsafe: {module_path}"
+        )
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "trex_webui_release_contract",
+            module_path,
+        )
+        if spec is None or spec.loader is None:
+            raise ArchiveSafetyError(
+                f"cannot load release provenance validator: {module_path}"
+            )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except ArchiveSafetyError:
+        raise
+    except Exception as exc:
+        raise ArchiveSafetyError(
+            f"cannot load release provenance validator: {exc}"
+        ) from exc
+    if module.RELEASE_MANIFEST_SCHEMA != RELEASE_MANIFEST_SCHEMA:
+        raise ArchiveSafetyError(
+            "release provenance validator and archive validator schemas disagree"
+        )
+    return module
 
 
 def canonical_json_bytes(value: object) -> bytes:
@@ -208,6 +256,11 @@ def validated_payload_identity(manifest: object) -> tuple[dict[str, object], lis
     if manifest.get("schema") != RELEASE_MANIFEST_SCHEMA:
         raise ArchiveSafetyError("release manifest schema is missing or unsupported")
     validate_source_identity(manifest)
+    release_contract = load_release_contract_module()
+    try:
+        release_contract.validate_manifest_release_contract(manifest)
+    except release_contract.ReleaseContractError as exc:
+        raise ArchiveSafetyError(str(exc)) from exc
 
     identity = manifest.get("payload_identity")
     if not isinstance(identity, dict) or set(identity) != PAYLOAD_IDENTITY_KEYS:
@@ -513,6 +566,11 @@ def write_release_manifest(
     name: str,
     version: str,
     created_at: str,
+    release_repository: str | None = None,
+    release_ref: str | None = None,
+    signer_workflow_ref: str | None = None,
+    signer_workflow_sha: str | None = None,
+    require_publishable: bool = False,
 ) -> str:
     manifest_path = root / RELEASE_MANIFEST_NAME
     if manifest_path.exists() or manifest_path.is_symlink():
@@ -523,6 +581,20 @@ def write_release_manifest(
     git = source_identity["git"]
     if not isinstance(git, dict):
         raise ArchiveSafetyError("package-time source identity has no Git metadata")
+    release_contract = load_release_contract_module()
+    try:
+        release_provenance = release_contract.build_release_provenance(
+            version=version,
+            source_sha=git["sha"],
+            source_dirty=git["dirty"],
+            repository=release_repository,
+            release_ref=release_ref,
+            signer_workflow_ref=signer_workflow_ref,
+            signer_workflow_sha=signer_workflow_sha,
+            require_publishable=require_publishable,
+        )
+    except release_contract.ReleaseContractError as exc:
+        raise ArchiveSafetyError(str(exc)) from exc
     manifest = {
         "schema": RELEASE_MANIFEST_SCHEMA,
         "name": name,
@@ -531,6 +603,10 @@ def write_release_manifest(
         "git_dirty": git["dirty"],
         "source_digest": source_identity["digest"],
         "source_identity": source_identity,
+        "release_repository": release_provenance.get("repository"),
+        "release_ref": release_provenance.get("release_ref"),
+        "signer_workflow": release_provenance.get("signer_workflow"),
+        "release_provenance": release_provenance,
         "created_at": created_at,
         "payload_identity": {
             "algorithm": PAYLOAD_IDENTITY_ALGORITHM,
@@ -590,6 +666,11 @@ def build_parser(command: str) -> argparse.ArgumentParser:
         parser.add_argument("--name", required=True)
         parser.add_argument("--version", required=True)
         parser.add_argument("--created-at", required=True)
+        parser.add_argument("--release-repository")
+        parser.add_argument("--release-ref")
+        parser.add_argument("--signer-workflow-ref")
+        parser.add_argument("--signer-workflow-sha")
+        parser.add_argument("--require-publishable", action="store_true")
         return parser
     if command == "verify-tree":
         parser = argparse.ArgumentParser(description="Verify an extracted TRex WebUI release payload")
@@ -624,6 +705,11 @@ def main() -> int:
                 name=args.name,
                 version=args.version,
                 created_at=args.created_at,
+                release_repository=args.release_repository,
+                release_ref=args.release_ref,
+                signer_workflow_ref=args.signer_workflow_ref,
+                signer_workflow_sha=args.signer_workflow_sha,
+                require_publishable=args.require_publishable,
             )
             print(digest)
             return 0

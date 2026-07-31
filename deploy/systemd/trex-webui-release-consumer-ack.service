@@ -1,0 +1,43 @@
+# Managed by TRex WebUI deploy/install.sh.
+[Unit]
+Description=Acknowledge restored TRex WebUI release consumers
+Documentation=file:///opt/trex-webui/current/docs/PROJECT_ROADMAP.md
+Requires=trex-webui-release-reconcile.service
+After=trex-webui-release-reconcile.service trex-webui-api.service nginx.service
+# Pending baseline consumers are durable state, not a bounded boot attempt.
+# Keep retrying until every previously-active consumer is independently ready.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/release_transaction.py ack-consumers
+Restart=on-failure
+RestartSec=1
+ReadWritePaths=/opt/trex-webui /var/lib/trex-webui-deploy
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM

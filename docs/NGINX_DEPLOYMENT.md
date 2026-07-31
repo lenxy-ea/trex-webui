@@ -11,7 +11,21 @@ explicitly with `--external-daemon`.
 
 - Nginx listens on port 80 but permits only loopback clients until an operator
   explicitly allowlists a management subnet.
-- Static files are served from `/var/www/trex-webui/dist`.
+- Verified archive payloads are stored in root-controlled, content-addressed
+  trees under `/opt/trex-webui/releases/sha256-<payload-digest>`. The digest
+  binds the packaged manifest; validated candidate-owned `.venv` and optional
+  `.env` additions become part of the serving bundle without changing that
+  payload identity. Root-owned relative symlinks `/opt/trex-webui/current` and
+  `/opt/trex-webui/previous` select the serving release and the complete
+  retained N-1 serving bundle.
+- In that versioned layout, Nginx serves
+  `/opt/trex-webui/current/apps/web/dist`; the API WorkingDirectory, application
+  path, Python runtime, and project profile catalog also resolve through
+  `/opt/trex-webui/current`. One selector switch therefore moves source, static
+  assets, runtime, and the release-owned catalog together.
+- A direct checkout install remains a development/initial-provisioning path and
+  serves its rendered `--web-root` (default `/var/www/trex-webui/dist`). It does
+  not by itself claim the archive release transaction guarantees.
 - Textual static assets of at least 1 KiB are compressed dynamically for clients
   that advertise gzip support. If a release later supplies a matching `.gz`
   sibling, `gzip_static` serves that precompressed file instead.
@@ -34,6 +48,13 @@ explicitly with `--external-daemon`.
   authority.
 - WebUI-owned state lives under `/var/lib/trex-webui`; captures, reports, and
   config-version audit data remain under `/var/log/trex`.
+- Release-selection state lives separately under root-only
+  `/var/lib/trex-webui-deploy`. Its durable journal is reconciled before the API,
+  managed daemon, or Nginx may start.
+- On an SELinux-enabled versioned host, only each physical
+  `releases/sha256-*/apps/web/dist` subtree receives the persistent
+  `httpd_sys_content_t` policy required by Nginx. The API tree and optional
+  `.env` deliberately remain outside that HTTP-readable type.
 
 ## Installer-Managed Host Provisioning
 
@@ -82,42 +103,45 @@ transaction is retired. Thus even a managed-snapshot restore failure cannot
 silently remove the boundary on a later daemon restart, nftables reload, or reboot.
 External mode leaves all of these local daemon artifacts untouched.
 
-Before restart, the installer makes `apps/api/app`, the operator-facing `.venv`,
-the staged candidate, every versioned `.venv.runtime-*`, and the project
-`profiles` catalog root-owned, readable/executable, and non-writable by the
-service. An optional project `.env` must be a regular non-symlink and is reduced
-to `root:trex-webui` `0640`; the preferred systemd input remains the root-owned
-`/etc/trex-webui/trex-webui.env`. In managed-local mode, `runuser` executes both
-`import app.main` and `default_client_class(get_environment())` as `trex-webui`
-under the exact paths that will be written into the units. This imports the real
-TRex SDK without connecting to hardware. External-daemon mode imports
-`app.main` only: its operator-owned SDK and transport authority is deliberately
-not replaced with the managed-local systemd contract. With
-`--install-python-deps`, the applicable smoke runs against both the complete
-sibling candidate and its independent versioned service runtime before either
-is published, so a source, dependency, SDK, or ancestor traversal error leaves
-the running API runtime untouched.
+Before restart, the installer makes `apps/api/app`, the candidate-owned `.venv`,
+any installer-created runtime tree, and the project `profiles` catalog
+root-owned, readable/executable, and non-writable by the service. An optional
+project `.env` must be a regular non-symlink and is reduced to
+`root:trex-webui` `0640`; the preferred systemd input remains the root-owned
+`/etc/trex-webui/trex-webui.env`. Archive upgrade copies that optional file into
+the prepared candidate through the release engine rather than making
+`current/.env` point outside the selected bundle. In managed-local mode,
+`runuser` executes both `import app.main` and
+`default_client_class(get_environment())` as `trex-webui` under the exact paths
+that will be written into the units. This imports the real TRex SDK without
+connecting to hardware. External-daemon mode imports `app.main` only: its
+operator-owned SDK and transport authority is deliberately not replaced with
+the managed-local systemd contract. With `--install-python-deps`, the smoke runs
+against the complete candidate and its candidate-owned runtime before service
+readiness can commit the selector.
 
-Keep `/opt/trex-webui`, its virtual environment, and `/opt/trex-core` owned by
-root and readable/executable by the service account. Do not add `trex-webui` to
-`wheel`, `sudo`, `docker`, or a device-access group. The API does not need Linux
-capabilities or direct access to TRex NICs.
+Keep `/opt/trex-webui`, every selected release and candidate-owned runtime, and
+`/opt/trex-core` owned by root and readable/executable by the service account.
+Do not add `trex-webui` to `wheel`, `sudo`, `docker`, or a device-access group.
+The API does not need Linux capabilities or direct access to TRex NICs.
 
 The systemd template sets these deployment defaults before reading the optional
 root-owned `/etc/trex-webui/trex-webui.env` file:
 
 ```text
 TREX_WEBUI_TREX_CONFIG_PATH=/var/lib/trex-webui/trex_cfg.yaml
-TREX_WEBUI_PROFILE_ROOTS=/opt/trex-core/scripts/stl:/opt/trex-webui/profiles:/var/lib/trex-webui/profiles
+TREX_WEBUI_PROFILE_ROOTS=/opt/trex-core/scripts/stl:/opt/trex-webui/current/profiles:/var/lib/trex-webui/profiles
 TREX_WEBUI_RUNTIME_STATE_PATH=/var/lib/trex-webui/runtime-state.json
 TREX_WEBUI_DAEMON_GENERATION_PATH=/run/trex-webui/daemon-generation
 ```
 
-The first two profile roots are read-only catalog inputs; new and duplicated
-profiles go to the final service-owned root. A custom writable config, log, or
-profile path also needs a matching `ReadWritePaths=` entry in a systemd drop-in.
-Do not point an atomic-write config workflow back at `/etc/trex_cfg.yaml`: it
-would require making `/etc` writable to the API.
+These are the values rendered for a versioned archive deployment. A direct
+checkout install renders its exact project root in place of `current`. The first
+two profile roots are read-only catalog inputs; new and duplicated profiles go
+to the final service-owned root. A custom writable config, log, or profile path
+also needs a matching `ReadWritePaths=` entry in a systemd drop-in. Do not point
+an atomic-write config workflow back at `/etc/trex_cfg.yaml`: it would require
+making `/etc` writable to the API.
 
 ## Install
 
@@ -213,10 +237,13 @@ as an install convenience. First prove through the real TRex control plane that
 all traffic is idle and the capture inventory is empty, then archive or remove
 the obsolete state in an explicit maintenance step.
 
-The installer atomically publishes and enables both systemd units, starts the
-root-owned daemon before the API, waits for its loopback JSON-RPC readiness, and
-then starts the unprivileged API. It never grants the API root, sudo, Linux
-capabilities, or permission to invoke `systemctl`.
+The installer atomically publishes and enables the release reconciler plus the
+API and, in managed-local mode, daemon units. API and daemon units require and
+start after the reconciler; an Nginx drop-in applies the same failure-propagating
+ordering. The installer starts the root-owned daemon before the API, waits for
+its loopback JSON-RPC readiness, and then starts the unprivileged API. It never
+grants the API root, sudo, Linux capabilities, or permission to invoke
+`systemctl`.
 
 For a WebUI that connects to a daemon supervised separately on this host or
 another TRex host, set `TREX_WEBUI_TREX_HOST` appropriately and use the explicit
@@ -282,6 +309,19 @@ For SELinux enforcing hosts and firewalld-managed hosts:
 ```bash
 deploy/install.sh --install-nginx --selinux --firewalld
 ```
+
+The explicit `--selinux` flag applies the direct-checkout web-root context. A
+versioned archive install is stricter: whenever SELinux is enabled, it
+automatically requires `semanage`, `matchpathcon`, `restorecon`, and
+`setsebool`, then installs an exact persistent `httpd_sys_content_t` rule for
+`/opt/trex-webui/releases/sha256-[0-9a-f]{64}/apps/web/dist(/.*)?`, and relabels
+the physical current/previous frontend trees before restart. Install
+`policycoreutils-python-utils` on AlmaLinux if `semanage` is missing. The
+installer fails rather than serve a selector with default `/opt` or temporary
+staging labels; it does not label the release API tree or `.env` as web content.
+The exact path rule and persistent HTTP network-connect boolean are host policy,
+not selector state, and are intentionally retained after a handled release
+rollback.
 
 `--firewalld` opens HTTP only. The managed-local native TRex boundary is
 independent and is installed whether firewalld is active, stopped, or absent.
@@ -351,11 +391,13 @@ contains:
   SHA-256; the payload digest is computed from that sorted manifest. The release
   manifest excludes only itself to avoid a recursive digest.
 
-The recommended target-host path is the `deploy/upgrade.sh --archive` command
-below because it rejects hostile tar metadata before extraction. If an operator
-must install from a manually extracted package, use a trusted copy of
-`archive_safety.py` obtained separately from the unverified archive, then verify
-again after extraction:
+For a published release, the recommended target-host path is the root-only
+verified-upgrade bootstrap in [RELEASE.md](RELEASE.md). It validates the exact
+tag, signer workflow, GitHub artifact attestations, metadata inventory, hardware
+report bindings, SBOMs, archive, and checksum before executing the archive
+upgrader. If an operator must inspect a manually extracted package, use a trusted
+copy of `archive_safety.py` obtained separately from the unverified archive, then
+verify again after extraction:
 
 ```bash
 sha256sum -c trex-webui-*.tar.gz.sha256
@@ -371,15 +413,16 @@ delivered together detect corruption but do not prove publisher authenticity.
 Never execute a validator extracted from the same unverified tar as the
 pre-extraction safety check.
 
-Upgrade an existing `/opt/trex-webui` install directly from a release tarball:
+The lower-assurance archive entrypoint remains available when the archive digest
+arrives through an independently trusted channel:
 
 ```bash
 deploy/upgrade.sh --archive trex-webui-*.tar.gz --install-python-deps --verify
 ```
 
 Keep the generated `trex-webui-*.tar.gz.sha256` beside the archive. Archive
-upgrade verifies that digest before any tar listing, extraction, source-tree
-write, or packaged script execution. For a digest delivered through a separate
+upgrade verifies that digest before any tar listing, extraction, release-store
+or journal write, or packaged script execution. For a digest delivered through a separate
 trusted channel, pass it explicitly with `--sha256 <64-hex-digest>`. Validation
 also rejects absolute or non-canonical paths, `..`, multiple package roots,
 duplicate entries, symlinks, hard links, devices, FIFOs, setuid/setgid files,
@@ -387,15 +430,17 @@ group/world-writable entries, oversized entries, and packages missing the
 required runtime/install files. It then recomputes the embedded file manifest
 while reading the tar, extracts into a private staging directory, recomputes the
 same identity from the extracted tree without Git, and rejects missing, extra,
-content-changed, or mode-changed files before it backs up or writes the install
-root. The package-time source digest is provenance metadata; the separately
-delivered archive SHA-256 remains the trust anchor and is not a cryptographic
-signature.
+content-changed, or mode-changed files before it writes the release store or
+transaction journal. The package-time source digest is provenance metadata; the
+separately delivered archive SHA-256 is an integrity anchor, not a cryptographic
+publisher signature.
 
 After installation, the real-hardware Standard E2E can run without `.git`:
 
 ```bash
-.venv/bin/python scripts/trex_standard_e2e.py --base-url http://127.0.0.1
+/opt/trex-webui/current/.venv/bin/python \
+  /opt/trex-webui/current/scripts/trex_standard_e2e.py \
+  --base-url http://127.0.0.1
 ```
 
 In release mode, evidence generation validates the manifest structure and
@@ -413,44 +458,131 @@ portable runtime archive intentionally omits frontend source, Git metadata, and
 the full checkout/tooling surface; packaged backend tests do not make it
 equivalent to the checkout gate.
 
-The archive upgrade path backs up the current install tree under
-`/var/backups/trex-webui/source`, syncs package contents into `/opt/trex-webui`
-while preserving `.venv`, trusted `.venv.runtime-*`, `.env`, `.logs`, and local
-node dependency caches, then runs the normal installer with `--skip-build`
-against the packaged `apps/web/dist`. Versioned runtimes are validated before
-sync and deliberately omitted from the source backup, so restoring source cannot
-overwrite an interpreter that a live or restored unit still uses. The sync
-method defaults to `auto`: it uses `rsync` when available and falls back to a
-portable copy/delete sync when `rsync` is absent.
+For the canonical `/opt/trex-webui` archive path, the upgrader does not overwrite
+a serving checkout. It privately verifies and extracts the archive, validates
+its v3 payload manifest, copies it into
+`/opt/trex-webui/releases/sha256-<payload-digest>`, fsyncs the candidate, and
+persists each selection phase in
+`/var/lib/trex-webui-deploy/transaction.json`. Capacity is checked before the
+copy with a 128 MiB safety reserve by default. The release store and selectors
+must share a filesystem so each `current` or `previous` publication is one
+same-directory atomic symlink replacement.
 
 The outer upgrader and child installer hold one root-only non-blocking `flock`
 transaction at `/run/lock/trex-webui/deploy.lock`; a second deploy fails before
 mutation, while the child validates and inherits the same locked file descriptor.
-In managed local mode, the outer upgrade preflight applies the same fail-closed
-daemon runtime/reservation guard before source synchronization. Use
-`--allow-daemon-runtime-restart` only for an approved disruptive window, or
-`--external-daemon` when the daemon is supervised separately, either locally or
-remotely; both policies are forwarded unchanged to the packaged installer.
-Before source mutation, the upgrader stops the API only when the loaded unit's
-WorkingDirectory, project-owned interpreter, complete Uvicorn argv, and
-`--app-dir` all match the install root. An active matching service combined with
-`--skip-restart` fails before mutation; an unrelated service for another root is
-left untouched. Plan an API maintenance window while the release source is
-published.
-If source synchronization or the packaged installer returns a normal failure,
-the upgrade trap attempts an in-place source restore around preserved runtimes
-from that run's backup. It restarts only an API that was active before the outer
-transaction, waits for direct readiness, and verifies the loaded interpreter
-plus MainPID; a previously inactive API remains stopped.
-Static publication stages a sibling release directory and switches it into place
-with a rollback directory; a later configuration, service, readiness, or verify
-failure restores the previous static tree.
+The descriptor intentionally remains inherited by the verified foreground
+deploy chain. If a wrapper is killed while a child may still be mutating the
+host, reconciliation stays fail-closed on the lock until that last child exits,
+then the already-running retry loop recovers automatically. The verified
+upgrade/install entrypoints require every deployment command to remain in the
+foreground and wait for its descendants; background/daemon escape is forbidden.
+Their one
+`systemctl start --no-block` request queues a service in PID 1, so the service
+process cannot inherit the client descriptor, and long-running services are
+started and stopped only through systemd. If a command violates this contract,
+the inherited descriptor deliberately keeps retry busy rather than allowing a
+rollback to race a possible host mutator. Containment of arbitrary third-party
+descendants is not claimed; optional package/build tools such as dnf, npm, and
+pip remain external foreground-command contract boundaries.
+The separately installed release engine also serializes journal and selector
+operations with a root-only lock under `/var/lib/trex-webui-deploy`. In managed
+local mode, the outer upgrade preflight applies the same fail-closed daemon
+runtime/reservation guard before candidate activation. Use
+`--allow-daemon-runtime-restart` only for an approved disruptive window. For an
+archive, that consent authorizes at most one cold convergence of the old daemon
+generation before release prepare, and only after the ordinary strict
+`safe-restart` probe fails. The wrapper then clears the flag: it is never stored
+in the release journal or forwarded to candidate install/rollback. If the daemon
+is already safe, inactive, or does not need a candidate restart, the unused
+consent is simply discarded. Use `--external-daemon` when the daemon is
+supervised separately, either locally or remotely; that mode, unlike the
+one-shot runtime override, is passed to the candidate installer.
 
-This archive source sync is serialized and rollback-backed, but it mutates the
-source tree in place. It is not a whole-tree atomic rename and there is no
-persistent transaction journal. Power loss, `SIGKILL`, or host failure during
-sync requires an operator recovery inspection; successful shell error handling
-must not be described as crash-atomic or power-loss-safe deployment.
+On the first archive migration from an in-place installation, the upgrader first
+captures the serving API source, served static tree, project profiles, optional
+`.env`, and exact loaded Python runtime as a verified content-addressed baseline.
+It commits that complete baseline as `current` before preparing the new
+candidate. A pre-commit crash can therefore return the stable consumers to a
+runnable legacy baseline instead of removing `current` and leaving the new unit
+paths unresolved.
+
+After the candidate is prepared, the upgrader stops only an API whose loaded
+WorkingDirectory, interpreter, Uvicorn argv, and `--app-dir` match the known
+installation authority. It atomically selects the candidate as `current`, keeps
+the former `current` as `previous`, installs the stable API/Nginx consumers,
+starts services, requires direct readiness and `deploy/verify.sh`, and only then
+marks the journal `committed`. A normal pre-commit failure invokes the same
+reconciler immediately. `SIGKILL`, power loss, or reboot leaves the durable
+journal for `trex-webui-release-reconcile.service`, which runs before API,
+managed daemon, and Nginx and restores the exact pre-transaction selectors. A
+durably committed phase is never implicitly rolled back; reconciliation verifies
+it and completes bounded retention cleanup.
+
+Archive activation and rollback are explicit maintenance windows, not a
+zero-downtime promise. Nginx and the API are fenced while their shared release
+generation changes, so clients may receive connection failures during that
+interval. Once the edge accepts a request again, static `/` and proxied API
+responses come from one wholly old or wholly new generation; the release tests
+continuously verify that invariant in both activation and rollback directions.
+
+These guarantees apply to release selection, not to reconstruction of live TRex
+traffic. A daemon maintenance override may terminate a workload or reservation,
+and neither selector rollback nor boot reconciliation can recreate that
+hardware state.
+
+### Explicit N-1 rollback
+
+After a committed versioned upgrade, inspect the exact retained selectors:
+
+```bash
+sudo /usr/libexec/trex-webui/release_transaction.py status
+readlink /opt/trex-webui/current
+readlink /opt/trex-webui/previous
+```
+
+Do not edit either symlink manually. In a maintenance window with traffic idle,
+reactivate the complete retained predecessor through the guarded wrapper:
+
+```bash
+sudo /opt/trex-webui/current/deploy/upgrade.sh --rollback-previous \
+  --verify-base-url http://127.0.0.1
+```
+
+`--rollback-previous` cannot be combined with an archive, `--external-daemon`,
+dependency/package installation, host-policy changes, or deferred restart. The
+managed-local rollback preflight requires a reachable idle/unreserved daemon,
+stopped and unowned ports, no traffic mutation recovery, no capture recorder,
+and no active/recovering Quick Validation. `--verify-trex` adds a post-switch
+overview check; it is not what establishes the mandatory pre-switch quiescence.
+
+The wrapper holds the global deployment lock, requires the existing API and
+Nginx to consume `current`, arms the boot reconciler, validates the retained
+runtime and frontend, and prepares a new durable transaction. After the final
+live preflight, it stops the API so no new WebUI mutation can race selector
+activation. It then reloads the persistent runtime state with the exact current
+release code and rechecks daemon `safe-restart` before swapping `current` and
+`previous`. It restarts both consumers and commits only after the API
+MainPID/runtime identity, direct health response, Nginx configuration, and exact
+served `index.html` bytes match the selected predecessor. A handled failure or
+later boot reconciliation before commit restores the newer release and restarts
+the consumers against it. External-daemon deployments must use a separately
+reviewed redeployment procedure because this host cannot fence their supervisor.
+
+This operation rolls back the release-owned API source, Python runtime, static
+assets, and profile catalog as one selector. It deliberately preserves
+`/var/lib/trex-webui`, `/var/log/trex`, the active TRex configuration, Nginx
+access/security snippets, and live hardware state. Review application state and
+schema compatibility before rollback; N-1 selection is not a database or TRex
+workload restore.
+
+The imported first-migration baseline is deliberately a minimal serving bundle,
+not a copy of the old deployment tooling. The first rollback into that baseline
+must therefore be launched from the still-current rc.2 tree as shown above. If
+an operator then needs to reactivate the newer release, its verified wrapper is
+now under `/opt/trex-webui/previous/deploy/upgrade.sh`; use that path for the
+next `--rollback-previous` transaction. Normal rc.2-and-later predecessors keep
+their own wrapper under the selected tree.
 
 For a dry run from the extracted package:
 
@@ -479,32 +611,32 @@ scripts/npmw run deploy:verify
 
 ## Script Behavior
 
-`deploy/install.sh` is idempotent for the standard `/opt/trex-webui` layout. It
-strictly creates or validates the service identity, provisions writable state
-and log boundaries, secures runtime read paths, uses the project-local Node.js
-24 runtime, runs `scripts/npmw run build:web`, and backs up the
-current static directory under `/var/www/trex-webui/backups`, stages
-`apps/web/dist` beside `/var/www/trex-webui/dist`, and atomically exchanges an
-existing live directory with that sibling by using
-`renameat2(RENAME_EXCHANGE)`. The exchanged old tree is then moved to the
-transaction rollback name without ever removing the live pathname; first
-install uses one same-filesystem rename. The installer then installs the Nginx and systemd
-configuration files, including the managed root daemon unit and its logrotate
-policy plus the root-owned libexec launcher, probe, and native boundary,
-validates Nginx, starts
-the local daemon first, verifies its loopback RPC, and restarts
-`trex-webui-api.service` plus `nginx`. `--external-daemon`
+`deploy/install.sh` is idempotent for host provisioning. In direct-checkout
+mode it strictly creates or validates the service identity, provisions writable
+state and log boundaries, secures runtime read paths, uses the project-local
+Node.js 24 runtime, runs `scripts/npmw run build:web`, and atomically exchanges
+the rendered `--web-root` with a staged static directory while retaining a
+rollback copy through the installer transaction. In archive mode,
+`deploy/upgrade.sh` invokes the same installer with a verified physical
+`releases/sha256-*` candidate and `--versioned-release`; static publication is
+then already owned by the `current` selector, so the installer neither copies
+it into `/var/www` nor creates a second static authority.
+
+The installer publishes the root-owned release reconciler and its boot-order
+unit/drop-in, then installs Nginx and API configuration plus, in managed-local
+mode, the daemon unit, logrotate policy, libexec launcher, probe, and native
+boundary. It validates Nginx, starts the local daemon first, verifies loopback
+RPC, and restarts `trex-webui-api.service` plus `nginx`. `--external-daemon`
 omits every local-daemon file, service, and verification operation. By default
-the project root is resolved from the script location, so an
-extracted release package can run the same command. When `--project-root` or
-`--web-root` are provided, the installed systemd and Nginx files are rendered
-with those paths. If `--skip-build` is provided, the script uses the existing
-`apps/web/dist` and does not require the project-local Node.js runtime. If
-`--install-python-deps` is provided, the script creates a sibling Python 3.11
+the project root is resolved from the script location. When `--project-root` or
+`--web-root` are provided in direct mode, systemd and Nginx are rendered with
+those paths; archive callers render them against the stable `current` selector.
+If `--skip-build` is provided, the script uses the existing `apps/web/dist` and
+does not require the project-local Node.js runtime. If
+`--install-python-deps` is provided, it creates a sibling Python 3.11
 virtualenv, installs `apps/api/requirements.lock` with hashes enforced and
-binary wheels only, runs `pip check`, rewrites virtualenv script paths for the
-final location, secures it, and performs the service-user app plus TRex SDK
-import smoke while the live `.venv` is unchanged.
+binary wheels only, runs `pip check`, secures the candidate-owned runtimes, and
+performs the service-user app plus TRex SDK import smoke before restart.
 Test and audit dependencies are not installed on the runtime host. The Nginx and systemd files are rendered to
 same-directory temporary files and atomically replaced while rollback copies
 remain available. A later `nginx -t`, systemd reload, service restart, or verify
@@ -549,33 +681,35 @@ that includes verified `.gz` files. Both API locations explicitly disable gzip,
 preserving the existing control-response and SSE transport behavior. Asset cache
 semantics remain the existing seven-day expiry.
 
-Timestamped static and archive source backups do not yet have an automatic
-count/age/size retention policy or free-space preflight. Monitor both backup
-roots and prune only reviewed, inactive entries under the documented managed
-prefixes; a full filesystem can defeat both forward copy and best-effort
-rollback. M4.0 replaces this with bounded identity-linked N-1 bundles.
+Direct-checkout static backups still use timestamped directories and do not have
+an automatic count/age/size retention policy; monitor and prune only reviewed,
+inactive entries under the documented managed prefix. Production archive
+selection is different: capacity is checked before candidate copy and terminal
+reconciliation keeps only the validated `current` and `previous` release trees.
+An unknown entry in the release store is not deleted automatically; it blocks
+cleanup for operator inspection.
 
 With `--install-python-deps`, the installer builds `.venv.release-<id>` and an
-independent `.venv.runtime-<id>`. The service unit is rendered with an immutable
-`ExecStart` path inside the versioned runtime; `.venv` remains the operator and
-local-tool entrypoint. Immediately before API start, an existing `.venv` is
-exchanged with the candidate using Linux `renameat2(RENAME_EXCHANGE)`, retaining
-the complete old tree until the transaction commits. The API is then started and
-must pass a bounded direct readiness probe at
-`http://127.0.0.1:8080/api/health`. The installed unit file, systemd's loaded
-`ExecStart`, and the running `MainPID` argv[0] must all point to the candidate
-runtime before Nginx is restarted. A later failure restores the old `.venv`,
-unit/config files, active/enabled service-manager state, and prior API runtime;
-the restored API must also become ready. A failed first install removes its new
-runtime and stops the newly introduced API unit.
+independent `.venv.runtime-<id>`, then exchanges the candidate `.venv` only after
+the old API has stopped. In direct mode, the unit pins the validated versioned
+runtime. In archive mode, the stable unit intentionally executes
+`/opt/trex-webui/current/.venv/bin/python`, so the Python environment moves with
+the same release selector as API source and static assets. The API must pass a
+bounded direct readiness probe at `http://127.0.0.1:8080/api/health`; the
+installed unit, loaded unit, running `MainPID`, selected release, and candidate
+manifest must agree before Nginx restart and deployment verification succeed.
+A normal installer failure restores the files and service state written by that
+run. A killed archive transaction is recovered by selector reconciliation, not
+by guessing which virtualenv is newest.
 
-Restart/readiness/identity checks and optional deployment verification are the
-commit point. Cleanup of rollback directories and superseded runtimes happens
-after commit; cleanup failure is reported as a warning and cannot make the outer
-archive upgrader restore old source underneath a running new unit. The current
-runtime is protected and the complete prune set is validated before deletion,
-but the installer does not retain a previous known-good runtime after success.
-Because dependency publication and process restart are one transaction,
+For an archive release, restart, readiness, identity checks, and mandatory
+`deploy/verify.sh` are the preconditions for the outer selector commit. The
+complete former release, including its runtime, remains at `previous`; cleanup
+retains only that N-1 plus `current`. A cleanup failure after a durable commit is
+reported without converting the committed candidate into an implicit rollback.
+For a direct checkout install, the older installer-scoped runtime cleanup rules
+still apply and do not create a content-addressed N-1 release. Because dependency
+publication and process restart are one transaction,
 `--install-python-deps` cannot be combined with `--skip-restart`.
 Without dependency publication, `--skip-restart` is a deferred-activation
 maintenance operation: it may install static/config files but does not prove the
@@ -605,14 +739,13 @@ broad shared directory.
 `deploy/upgrade.sh` is the explicit upgrade entrypoint. Without `--archive`, it
 wraps `deploy/install.sh` for the current checkout or extracted package, but it
 cannot roll back source changes made before invocation and is therefore a
-development/maintenance path. With
-`--archive`, it verifies the digest and safe release layout, backs up the current
-install tree, applies the matching-service maintenance barrier, synchronizes the
-archive into `--install-root`, and then delegates to
-`deploy/install.sh --skip-build`. Use `--sync-method auto|rsync|portable` to
-select the archive sync implementation. `auto` prefers `rsync` but no longer
-requires it. Use `--dry-run` to print both the source sync and install commands
-before changing a host.
+development/maintenance path. With `--archive`, it verifies the digest and safe
+release layout, applies the matching-service maintenance barrier, prepares and
+activates a content-addressed candidate, and delegates to that candidate's
+installer with `--skip-build --versioned-release`. The production archive path
+requires a candidate-owned Python runtime, restart/readiness, and deployment
+verification before commit. Use `--dry-run` to print the release preparation,
+selection, and install commands before changing a host.
 
 Useful options:
 
@@ -631,7 +764,7 @@ deploy/upgrade.sh --archive trex-webui-*.tar.gz --verify --verify-trex
 deploy/upgrade.sh --archive trex-webui-*.tar.gz --external-daemon --verify
 deploy/upgrade.sh --archive trex-webui-*.tar.gz --allow-daemon-runtime-restart --verify
 deploy/upgrade.sh --archive trex-webui-*.tar.gz --sha256 <64-hex-digest> --dry-run
-deploy/upgrade.sh --archive trex-webui-*.tar.gz --sync-method portable --dry-run
+/opt/trex-webui/current/deploy/upgrade.sh --rollback-previous --verify-base-url http://127.0.0.1
 ```
 
 ## Verification
@@ -652,8 +785,17 @@ server:
   keep the operator config and boundary in one transaction, the daemon
   generation is a root-owned canonical UUID, and the daemon log has the
   required ownership/mode. External mode skips every local-daemon assertion.
-- `/var/www/trex-webui/dist/index.html` references assets that exist locally and
-  are reachable through Nginx.
+- In a versioned deployment,
+  `/opt/trex-webui/current/apps/web/dist/index.html` references assets that exist
+  inside the selected release and are reachable through Nginx. A direct checkout
+  install verifies its explicitly rendered `--web-root` instead.
+- The versioned `current`/`previous` selectors, release trees, root-only journal,
+  installed transient oneshot reconciler, and Nginx dependency ordering match
+  the selected candidate contract. The reconciler deliberately does not remain
+  active after exit, so every later consumer start can invoke it again.
+- When SELinux is enabled, every regular file/directory in the physical current
+  and previous frontend trees has both persisted and applied
+  `httpd_sys_content_t`; the corresponding API tree and optional `.env` do not.
 - `GET /` returns the React mount point.
 - `GET /api/health` returns `{"status":"ok"}`.
 - `GET /api/system/environment` exposes the current backend environment contract.
@@ -850,10 +992,15 @@ Path ownership for the standard deployment is:
 
 | Path | API access | Owner/mode expectation |
 | --- | --- | --- |
-| `/opt/trex-webui` | read/execute | `root:root`, not group/world writable |
-| `/opt/trex-webui/.env` (optional) | read | `root:trex-webui`, `0640`, regular non-symlink |
-| `/opt/trex-webui/.venv.runtime-*` | read/execute | `root:root`, trusted runtime/release markers, not group/world writable |
+| `/opt/trex-webui` | selector/release authority | `root:root`, not group/world writable |
+| `/opt/trex-webui/releases/sha256-*` | read/execute | verified root-owned release tree; directory name equals its payload digest; only `apps/web/dist` receives the versioned `httpd_sys_content_t` policy |
+| `/opt/trex-webui/current` | read/execute | root-owned relative symlink to `releases/sha256-*`; stable API/Nginx consumer |
+| `/opt/trex-webui/previous` | inactive N-1 | absent on first release or a root-owned relative symlink to a distinct complete release |
+| `/opt/trex-webui/current/.env` (optional) | read | release-attached `root:trex-webui` `0640` regular file; prefer `/etc/trex-webui/trex-webui.env` |
+| `/opt/trex-webui/current/.venv` and `.venv.runtime-*` | read/execute | candidate-owned trusted runtime/release markers, not group/world writable |
 | `/opt/trex-core` | read/execute | `root:root`, not group/world writable |
+| `/var/lib/trex-webui-deploy` | no API access | `root:root` `0700`; release journal/lock are regular `0600` single-link files |
+| `/usr/libexec/trex-webui/release_transaction.py` | no API access | `root:root` `0755`, regular non-symlink boot reconciler |
 | `/var/lib/trex-webui` | read/write | `trex-webui:trex-webui`, `0750` |
 | `/var/lib/trex-webui/trex_cfg.yaml` | read/write/replace | `trex-webui:trex-webui`, `0640` |
 | `/var/lib/trex-webui/runtime-state.json` | read/write/replace | `trex-webui:trex-webui`, `0640` after first publication |
@@ -938,10 +1085,10 @@ authenticated health probes for that deployment.
 
 1. Create the `trex-webui` system group and non-login user, and fail on a
    conflicting pre-existing regular account instead of silently reusing it.
-2. Keep the project root, API source, virtual environment, and project profile
-   catalog root-owned and non-writable by `trex-webui`; prove their readability
-   and every required `/opt/trex-core` traversal with the non-root SDK import
-   smoke test.
+2. Keep the selected release, API source, candidate-owned virtual environments,
+   and project profile catalog root-owned and non-writable by `trex-webui`;
+   prove their readability and every required `/opt/trex-core` traversal with
+   the non-root SDK import smoke test.
 3. Create `/var/lib/trex-webui` and its writable profile root as
    `trex-webui:trex-webui` `0750`; seed `trex_cfg.yaml` from the legacy
    `/etc/trex_cfg.yaml` only when the state copy does not already exist.
@@ -966,22 +1113,29 @@ authenticated health probes for that deployment.
    RPC state is unknown. Only `--allow-daemon-runtime-restart` records explicit
    maintenance consent to interrupt that state.
 8. Publish managed Nginx/systemd/logrotate files through same-directory atomic
-   replaces, retain rollback copies through validation/restart/verify, and
-   restore both files and the reloaded service-manager state on failure.
-9. Serialize installer and archive-upgrader mutations with the root-only global
-   deployment lock. Build a versioned immutable service runtime, require direct
-   API readiness plus on-disk/loaded/process runtime identity before commit, and
-   treat post-commit garbage-collection failures as warnings rather than a reason
-   to restore old source under the new process.
-10. On upgrade, preserve `/var/lib/trex-webui`, `/var/log/trex`, the environment
-   file, and Nginx access/security includes; never recursively chown the source
-   tree to the service account.
+   replaces, retain installer rollback copies through validation/restart/verify,
+   and restore both files and reloaded service-manager state after handled
+   failures.
+9. Install a root-owned release engine, oneshot boot reconciler, and Nginx
+   dependency drop-in. Require the reconciler before the API, managed daemon,
+   and Nginx so no stable consumer starts against an unreviewed interrupted
+   selector state.
+10. Serialize installer and archive-upgrader mutations with the root-only global
+    deployment lock. For archive upgrades, fsync a manifest-verified
+    content-addressed candidate and every journal phase, atomically update
+    `current`/`previous`, require direct API readiness plus
+    on-disk/loaded/process/runtime/static identity before commit, and retain the
+    complete N-1 release.
+11. On upgrade, preserve `/var/lib/trex-webui`, `/var/log/trex`, the preferred
+    root-owned environment file, and Nginx access/security includes; never
+    recursively chown a selected release tree to the service account.
 
 Template-level validation commands are:
 
 ```bash
 systemd-analyze verify deploy/systemd/trex-daemon-server.service
 systemd-analyze verify deploy/systemd/trex-webui-api.service
+systemd-analyze verify deploy/systemd/trex-webui-release-reconcile.service
 systemd-analyze security --offline=yes \
   deploy/systemd/trex-webui-api.service
 sudo nginx -t

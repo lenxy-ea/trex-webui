@@ -1,7 +1,7 @@
 # TRex WebUI
 
 [![CI](https://github.com/lenxy-ea/trex-webui/actions/workflows/ci.yml/badge.svg)](https://github.com/lenxy-ea/trex-webui/actions/workflows/ci.yml)
-[![Release candidate](https://img.shields.io/badge/status-v0.1.0--rc.1-f59e0b.svg)](CHANGELOG.md)
+[![Release candidate](https://img.shields.io/badge/status-v0.1.0--rc.2-f59e0b.svg)](CHANGELOG.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-0f766e.svg)](LICENSE)
 
 **A desktop-grade control plane for real Cisco TRex STL labs.**
@@ -25,7 +25,8 @@ browser workspace.
 | --- | --- |
 | **Operate real traffic**<br>Discover and control ports, keep a persistent three-pair traffic plan, and start, update, pause, resume, or stop supported sessions. | **See the whole run**<br>Inspect global, port, stream, latency, utilization, loss, and health data through live backend events. |
 | **Build profiles and packets**<br>Browse profiles, edit streams, import/export PCAP, use structured protocol editors, or drop into raw packet and Field Engine controls. | **Capture and decode**<br>Monitor or record selected ports, apply BPF and capture budgets, inspect decoded packets, and download PCAP evidence. |
-| **Preserve evidence**<br>Review gates, diagnostics, trends, archive comparisons, and raw data; export Markdown, PDF, CSV, or JSON reports. | **Own the runtime safely**<br>Preview TRex YAML, manage config versions, inspect audit/log output, and use a persistent supervisor with guarded mutations. |
+| **Validate a saved pair**<br>Use Guided Quick Validation for an explicitly authorized 1–60 second run with link, idle, packet, loss, and cleanup proof. | **Preserve evidence**<br>Review gates, diagnostics, trends, archive comparisons, and raw data; export Markdown, PDF, CSV, or JSON reports. |
+| **Own the runtime safely**<br>Preview TRex YAML, manage config versions, inspect audit/log output, and use a persistent supervisor with guarded mutations. | **Release what you tested**<br>Bind exact-source hardware reports to an attested archive, then install through a fail-closed verified-upgrade entrypoint. |
 
 Hardware, RPC, permission, configuration, and link failures remain visible
 blockers. The product path does not replace an unavailable TRex environment
@@ -71,9 +72,8 @@ already in the Playwright cache, install it with
 
 ## Current scope
 
-The latest tagged baseline is **v0.1.0-rc.1**, which is also the current package
-version; `main` may contain unreleased changes beyond that tag. Milestone names
-describe product scope, not blanket release certification.
+The current package version is **v0.1.0-rc.2**. Milestone names describe
+product scope, not blanket release certification.
 
 | Area | Current boundary |
 | --- | --- |
@@ -231,6 +231,14 @@ It covers dry runs, exact allowlists, TLS and external authentication,
 systemd/nftables boundaries, packaging, verification, upgrades, and rollback
 limitations.
 
+The checkout installer above is appropriate for initial provisioning and
+development. Published production upgrades should follow the
+[exact-tag release runbook](docs/RELEASE.md): its verified bootstrap installs a
+content-addressed release, makes API and Nginx consume the stable
+`/opt/trex-webui/current` selector, retains the complete immediate predecessor
+serving bundle at `previous`, and reconciles any uncommitted selector transaction
+before services start.
+
 ## Security boundary
 
 > [!WARNING]
@@ -281,6 +289,17 @@ scripts/npmw run verify:major -- --base-url http://127.0.0.1 \
   --config-file /path/to/validated/trex_cfg.yaml
 ```
 
+On a cabled six-port qualification host whose saved plan maps
+`0↔1`, `2↔3`, and `4↔5`, additionally run:
+
+```bash
+scripts/npmw run e2e:six-port -- --base-url http://127.0.0.1
+```
+
+That gate requires per-port TX/RX movement on all six links and saves a report
+bound by the backend's exact traffic-session revision; it is not a simulated or
+portable no-hardware test.
+
 The optional browser write acceptance performs real control-plane writes and
 must be requested separately:
 
@@ -296,6 +315,24 @@ observed hardware, and clean postconditions into a
 fresh local/server report pair. A hardware, link, RPC, permission, or
 configuration failure remains a blocker; an illustrative fixture cannot waive
 this gate.
+
+### Guided Quick Validation
+
+Open **Tests → Quick Validation** for a short, operator-guided check of one
+saved traffic-plan group. The workspace requires explicit real-hardware
+authorization and a 1–60 second duration. Before traffic starts, the backend
+requires the selected ports to be physically **UP**, report **IDLE**, be
+stopped and unowned, and still match the exact saved plan revision. The result
+retains the configuration, profile digest, canonical traffic IDs, per-port
+packet/loss samples, stop evidence, WAL cleanup, acquisition restoration, and
+final idle proof.
+
+Keep the workspace open until the normal deadline: v1 advances normal sampling
+and stop work through status polling. Closing the window does not silently
+cancel traffic; the persisted backend hard-stop lease remains authoritative.
+An API restart, missed normal deadline, watchdog stop, stale session, missing
+traffic, packet deficit, or incomplete cleanup produces a conservative failure
+rather than a passing result.
 
 ## Repository map
 

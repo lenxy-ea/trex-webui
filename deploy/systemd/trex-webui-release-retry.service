@@ -1,0 +1,46 @@
+# Managed by TRex WebUI deploy/install.sh.
+[Unit]
+Description=Retry interrupted TRex WebUI release reconciliation after deployment
+Documentation=file:///opt/trex-webui/current/docs/PROJECT_ROADMAP.md
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+StateDirectory=trex-webui-deploy
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile
+ExecStartPost=/usr/bin/systemctl start --no-block trex-webui-release-consumer-ack.service
+Restart=on-failure
+RestartSec=1
+ReadWritePaths=/opt/trex-webui /var/lib/trex-webui-deploy /run/lock
+ReadWritePaths=-/etc/nginx/conf.d -/etc/systemd/system -/etc/systemd/system/nftables.service.d -/etc/logrotate.d -/etc/trex-webui -/usr/libexec/trex-webui
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+# Host rollback may restore the exact root:service owner of trex-webui.env.
+SystemCallFilter=@chown
+SystemCallErrorNumber=EPERM

@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   pull_request:
   push:
     branches: [main, master]
@@ -24,11 +25,17 @@ jobs:
           .venv/bin/python -m pip install --require-hashes --only-binary=:all: \
             -r apps/api/requirements-dev.lock
 
+      - name: Install deployment integration dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes nginx
+
       - name: Backend tests
         run: .venv/bin/python -m pytest apps/api/tests
 
       - name: Deployment transaction safety tests
         run: |
+          sudo env "PATH=$PATH" .venv/bin/python -m pytest -q deploy/tests/release_transaction_test.py
           sudo env "PATH=$PATH" deploy/tests/daemon_service_test.sh
           sudo env "PATH=$PATH" deploy/tests/managed_environment_test.sh
           sudo env "PATH=$PATH" deploy/tests/release_safety_test.sh
@@ -184,7 +191,14 @@ jobs:
           scripts/tests/python_lock_freshness_test.sh
 
       - name: Test supply-chain generators
-        run: .venv/bin/python -m pytest scripts/tests/sbom_generator_test.py
+        run: |
+          .venv/bin/python -m pytest \
+            scripts/tests/sbom_generator_test.py \
+            scripts/tests/release_contract_test.py \
+            scripts/tests/release_evidence_test.py \
+            scripts/tests/github_release_gate_test.py \
+            scripts/tests/release_metadata_test.py \
+            scripts/tests/release_workflow_test.py
 
       - name: Validate public source policy
         run: scripts/tests/public_source_test.sh

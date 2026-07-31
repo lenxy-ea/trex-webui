@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/path_safety.sh"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 ARCHIVE=""
+ROLLBACK_PREVIOUS=0
 ARCHIVE_SHA256=""
 ARCHIVE_EXPECTED_SHA256=""
 ARCHIVE_STAGED_PATH=""
@@ -31,6 +32,9 @@ RUN_SELINUX=0
 RUN_FIREWALLD=0
 MANAGE_LOCAL_DAEMON=1
 ALLOW_DAEMON_RUNTIME_RESTART=0
+ARCHIVE_DAEMON_OVERRIDE_CONSUMED=0
+ARCHIVE_DAEMON_MUTATION_EXPECTED=0
+ARCHIVE_DAEMON_WAS_ACTIVE_FOR_PREFLIGHT=0
 SYNC_METHOD="auto"
 STAGING_ROOT=""
 SOURCE_BACKUP_DIR=""
@@ -40,6 +44,8 @@ ARCHIVE_API_STATE_CAPTURED=0
 ARCHIVE_API_SERVICE_MATCHED=0
 ARCHIVE_API_WAS_ACTIVE=0
 ARCHIVE_API_OLD_EXEC_PATH=""
+ARCHIVE_API_OLD_PROJECT_ROOT=""
+ARCHIVE_API_OLD_MAIN_PID=""
 ARCHIVE_API_MUTATION_GUARD_APPLIED=0
 ARCHIVE_API_READINESS_URL="http://127.0.0.1:8080/api/health"
 ARCHIVE_API_READINESS_ATTEMPTS=40
@@ -48,6 +54,8 @@ VENV_RUNTIME_MARKER_NAME=".trex-webui-venv-runtime"
 VENV_RUNTIME_MARKER_VALUE="trex-webui-venv-runtime-v1"
 VENV_RELEASE_MARKER_NAME=".trex-webui-venv-release"
 DAEMON_SYSTEMD_SERVICE_TARGET="/etc/systemd/system/trex-daemon-server.service"
+DAEMON_LOGROTATE_TARGET="${DAEMON_LOGROTATE_TARGET:-/etc/logrotate.d/trex-daemon-server}"
+SYSTEMD_SERVICE_TARGET="/etc/systemd/system/trex-webui-api.service"
 DAEMON_LIBEXEC_ROOT="${DAEMON_LIBEXEC_ROOT:-/usr/libexec/trex-webui}"
 DAEMON_SUPERVISOR_TARGET="${DAEMON_SUPERVISOR_TARGET:-$DAEMON_LIBEXEC_ROOT/trex_daemon_supervisor.py}"
 DAEMON_RPC_PROBE_TARGET="${DAEMON_RPC_PROBE_TARGET:-$DAEMON_LIBEXEC_ROOT/daemon_rpc_probe.py}"
@@ -58,6 +66,40 @@ NFTABLES_SYSTEMD_DROPIN_TARGET="${NFTABLES_SYSTEMD_DROPIN_TARGET:-$NFTABLES_SYST
 TREX_DAEMON_SCRIPTS_DIR="${TREX_DAEMON_SCRIPTS_DIR:-/opt/trex-core/scripts}"
 TREX_DAEMON_BIN="${TREX_DAEMON_BIN:-$TREX_DAEMON_SCRIPTS_DIR/trex_daemon_server}"
 SERVICE_ENV_FILE="$TREX_MANAGED_API_ENV_FILE_DEFAULT"
+SERVICE_RUNTIME_STATE_PATH="/var/lib/trex-webui/runtime-state.json"
+RELEASE_STATE_ROOT="${RELEASE_STATE_ROOT:-}"
+RELEASE_RECONCILER_TARGET="${RELEASE_RECONCILER_TARGET:-$DAEMON_LIBEXEC_ROOT/release_transaction.py}"
+RELEASE_BOOTSTRAP_TARGET="${RELEASE_BOOTSTRAP_TARGET:-$DAEMON_LIBEXEC_ROOT/bootstrap_release_infrastructure.py}"
+TREX_OVERVIEW_VALIDATOR_TARGET="${TREX_OVERVIEW_VALIDATOR_TARGET:-$DAEMON_LIBEXEC_ROOT/trex_overview_contract.py}"
+TREX_PERSISTED_STATE_VALIDATOR_TARGET="${TREX_PERSISTED_STATE_VALIDATOR_TARGET:-$DAEMON_LIBEXEC_ROOT/trex_persisted_state_contract.py}"
+RELEASE_RECONCILER_UNIT_TARGET="${RELEASE_RECONCILER_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-reconcile.service}"
+RELEASE_RECONCILER_RETRY_UNIT_TARGET="${RELEASE_RECONCILER_RETRY_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-retry.service}"
+RELEASE_RECONCILER_ACK_UNIT_TARGET="${RELEASE_RECONCILER_ACK_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-consumer-ack.service}"
+RELEASE_RECONCILER_NGINX_DROPIN_ROOT="${RELEASE_RECONCILER_NGINX_DROPIN_ROOT:-/etc/systemd/system/nginx.service.d}"
+RELEASE_RECONCILER_NGINX_DROPIN_TARGET="${RELEASE_RECONCILER_NGINX_DROPIN_TARGET:-$RELEASE_RECONCILER_NGINX_DROPIN_ROOT/trex-webui-release-reconcile.conf}"
+RELEASE_RECONCILER_API_DROPIN_ROOT="${RELEASE_RECONCILER_API_DROPIN_ROOT:-/etc/systemd/system/trex-webui-api.service.d}"
+RELEASE_RECONCILER_API_DROPIN_TARGET="${RELEASE_RECONCILER_API_DROPIN_TARGET:-$RELEASE_RECONCILER_API_DROPIN_ROOT/trex-webui-release-reconcile.conf}"
+RELEASE_RECONCILER_DAEMON_DROPIN_ROOT="${RELEASE_RECONCILER_DAEMON_DROPIN_ROOT:-/etc/systemd/system/trex-daemon-server.service.d}"
+RELEASE_RECONCILER_DAEMON_DROPIN_TARGET="${RELEASE_RECONCILER_DAEMON_DROPIN_TARGET:-$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT/trex-webui-release-reconcile.conf}"
+RELEASE_ROLLBACK_DAEMON_PROBE_TARGET="${RELEASE_ROLLBACK_DAEMON_PROBE_TARGET:-$DAEMON_LIBEXEC_ROOT/release_daemon_rpc_probe.py}"
+RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET="${RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET:-$DAEMON_LIBEXEC_ROOT/release_native_boundary.sh}"
+RELEASE_INFRASTRUCTURE_COMMON_MANIFEST="${RELEASE_INFRASTRUCTURE_COMMON_MANIFEST:-}"
+RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST="${RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST:-}"
+VERSIONED_WEB_SELINUX_PATTERN='/opt/trex-webui/releases/sha256-[0-9a-f]{64}/apps/web/dist(/.*)?'
+NGINX_CONF_TARGET="${NGINX_CONF_TARGET:-/etc/nginx/conf.d/trex-webui.conf}"
+RELEASE_TRANSACTION_ENGINE=""
+RELEASE_TRANSACTION_ID=""
+RELEASE_CANDIDATE_DIGEST=""
+RELEASE_PROJECT_ROOT=""
+RELEASE_CURRENT_BEFORE=""
+RELEASE_TRANSACTION_PREPARED=0
+RELEASE_TRANSACTION_ACTIVATED=0
+RELEASE_TRANSACTION_COMMITTED=0
+ROLLBACK_NGINX_WAS_ACTIVE=0
+ROLLBACK_NGINX_MUTATION_GUARD_APPLIED=0
+BASELINE_API_UNIT_SIGNATURE=""
+BASELINE_SERVICE_ENV_SIGNATURE=""
+BASELINE_RELEASE_ENV_SIGNATURE=""
 
 cleanup_staging() {
   if [[ -n "${STAGING_ROOT:-}" && -e "$STAGING_ROOT" ]]; then
@@ -120,7 +162,11 @@ upgrade_exit() {
   trap - EXIT
   set +e
   if [[ "$status" -ne 0 ]]; then
-    rollback_install_root || status=1
+    if [[ "$RELEASE_TRANSACTION_PREPARED" -eq 1 ]]; then
+      rollback_versioned_release || status=1
+    else
+      rollback_install_root || status=1
+    fi
     cleanup_staging || status=1
     exit "$status"
   fi
@@ -141,6 +187,7 @@ Upgrade a TRex WebUI LAN deployment from the current checkout or a release archi
 
 Options:
   --archive PATH             Upgrade source tar.gz created by deploy/package.sh
+  --rollback-previous        Reactivate the retained N-1 release, verify API/Nginx, then commit
   --sha256 HEX               Expected archive SHA-256; otherwise <archive>.sha256 is required
   --install-root PATH        Installed project path. Default: current checkout, or /opt/trex-webui with --archive
   --web-root PATH            Nginx static dist path. Default: /var/www/trex-webui/dist
@@ -185,8 +232,575 @@ run() {
   "$@"
 }
 
+release_engine() {
+  python3.11 "$RELEASE_TRANSACTION_ENGINE" \
+    --install-root "$INSTALL_ROOT" \
+    --state-root "$RELEASE_STATE_ROOT" \
+    "$@"
+}
+
+release_json_field() {
+  local field="$1"
+  python3.11 -c 'import json,sys; value=json.load(sys.stdin).get(sys.argv[1]); assert isinstance(value,str) and value; print(value)' "$field"
+}
+
+release_json_optional_field() {
+  local field="$1"
+  python3.11 -c '
+import json
+import sys
+
+value = json.load(sys.stdin).get(sys.argv[1])
+assert value is None or (isinstance(value, str) and value)
+print("" if value is None else value)
+' "$field"
+}
+
+prepare_versioned_release() {
+  [[ -n "$ARCHIVE" ]] || return 0
+  RELEASE_TRANSACTION_ENGINE="$ARCHIVE_SOURCE_ROOT/deploy/release_transaction.py"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    RELEASE_CANDIDATE_DIGEST="$(printf '%064d' 0)"
+    RELEASE_PROJECT_ROOT="$INSTALL_ROOT/releases/sha256-$RELEASE_CANDIDATE_DIGEST"
+    RELEASE_CURRENT_BEFORE=""
+    if [[ -L "$INSTALL_ROOT/current" && \
+      "$(readlink -- "$INSTALL_ROOT/current")" =~ ^releases/sha256-([0-9a-f]{64})$ ]]; then
+      RELEASE_CURRENT_BEFORE="${BASH_REMATCH[1]}"
+    fi
+    printf '+ prepare content-addressed release from %q under %q, persist its journal under %q, and record post-readiness consumer-enable intent\n' \
+      "$ARCHIVE_SOURCE_ROOT" "$INSTALL_ROOT/releases" "$RELEASE_STATE_ROOT"
+    return
+  fi
+  [[ -f "$RELEASE_TRANSACTION_ENGINE" && ! -L "$RELEASE_TRANSACTION_ENGINE" && \
+    -x "$RELEASE_TRANSACTION_ENGINE" ]] || die "release transaction engine is missing or unsafe"
+  install -d -o root -g root -m 0755 "$INSTALL_ROOT"
+  # From this point on the engine may have persisted an incomplete journal.
+  # Reconcile it even if prepare dies before it can print transaction metadata.
+  RELEASE_TRANSACTION_PREPARED=1
+  RELEASE_TRANSACTION_COMMITTED=0
+  local host_profile="common"
+  [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]] && host_profile="managed-local"
+  local prepared prepare_args=(
+    prepare --source "$ARCHIVE_SOURCE_ROOT" --host-profile "$host_profile"
+    --transaction-kind archive
+    --rollback-consumer trex-webui-api.service
+    --rollback-consumer nginx.service
+  )
+  if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 && \
+    "$ARCHIVE_DAEMON_MUTATION_EXPECTED" -eq 1 ]]; then
+    prepare_args+=(--rollback-consumer trex-daemon-server.service)
+    # Preserve canonical plan ordering required by the durable journal.
+    prepare_args=(
+      prepare --source "$ARCHIVE_SOURCE_ROOT" --host-profile "$host_profile"
+      --transaction-kind archive
+      --rollback-consumer trex-daemon-server.service
+      --rollback-consumer trex-webui-api.service
+      --rollback-consumer nginx.service
+    )
+  fi
+  if [[ "$RUN_ENABLE" -eq 1 && \
+    "$INSTALL_ROOT" == "/opt/trex-webui" && \
+    "$RELEASE_STATE_ROOT" == "/var/lib/trex-webui-deploy" ]]; then
+    if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
+      prepare_args+=(--enable-consumer trex-daemon-server.service)
+      if [[ "$RUN_RESTART" -eq 1 ]]; then
+        prepare_args+=(--start-consumer trex-daemon-server.service)
+      fi
+    fi
+    prepare_args+=(
+      --enable-consumer trex-webui-api.service
+      --enable-consumer nginx.service
+    )
+    if [[ "$RUN_RESTART" -eq 1 ]]; then
+      prepare_args+=(
+        --start-consumer trex-webui-api.service
+        --start-consumer nginx.service
+      )
+    fi
+  fi
+  prepared="$(release_engine "${prepare_args[@]}")" || \
+    die "unable to prepare content-addressed release"
+  RELEASE_TRANSACTION_ID="$(release_json_field transaction_id <<<"$prepared")" || \
+    die "prepared release omitted its transaction id"
+  RELEASE_CANDIDATE_DIGEST="$(release_json_field candidate <<<"$prepared")" || \
+    die "prepared release omitted its payload digest"
+  RELEASE_CURRENT_BEFORE="$(release_json_optional_field current_before <<<"$prepared")" || \
+    die "prepared release omitted its prior current authority"
+  RELEASE_PROJECT_ROOT="$INSTALL_ROOT/releases/sha256-$RELEASE_CANDIDATE_DIGEST"
+  [[ -d "$RELEASE_PROJECT_ROOT" && ! -L "$RELEASE_PROJECT_ROOT" ]] || \
+    die "prepared content-addressed release is missing"
+}
+
+arm_versioned_release_consumers() {
+  local mode="${1:-archive}"
+  [[ "$RELEASE_TRANSACTION_PREPARED" -eq 1 ]] || return 0
+  local args=(arm-consumers --transaction-id "$RELEASE_TRANSACTION_ID")
+  if [[ "$mode" != "legacy-baseline" ]]; then
+    if [[ "$mode" == "archive" && "$MANAGE_LOCAL_DAEMON" -eq 1 && \
+      "$ARCHIVE_DAEMON_MUTATION_EXPECTED" -eq 1 ]]; then
+      args+=(--consumer trex-daemon-server.service)
+    fi
+    args+=(--consumer trex-webui-api.service --consumer nginx.service)
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ durably arm exact consumer rollback scope immediately before the first service mutation\n'
+    return 0
+  fi
+  release_engine "${args[@]}" >/dev/null || \
+    die "unable to durably arm release consumer rollback authority"
+}
+
+attach_candidate_dotenv() {
+  [[ -n "$ARCHIVE" ]] || return 0
+  local source=""
+  if [[ -L "$INSTALL_ROOT/current" && -f "$INSTALL_ROOT/current/.env" ]]; then
+    source="$(realpath -- "$INSTALL_ROOT/current/.env")" || \
+      die "unable to resolve the selected runtime configuration"
+  elif [[ ! -L "$INSTALL_ROOT/current" && -f "$INSTALL_ROOT/.env" ]]; then
+    source="$INSTALL_ROOT/.env"
+  fi
+  [[ -n "$source" ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ attach trusted optional runtime configuration %q to the prepared candidate\n' \
+      "$source"
+    return 0
+  fi
+  release_engine attach-dotenv \
+    --transaction-id "$RELEASE_TRANSACTION_ID" \
+    --source "$source" >/dev/null || \
+    die "unable to preserve the optional project .env in the candidate release"
+}
+
+upgrade_selinux_mode() {
+  if have_cmd getenforce; then
+    getenforce
+    return
+  fi
+  if [[ -r /sys/fs/selinux/enforce ]]; then
+    if [[ "$(< /sys/fs/selinux/enforce)" == "1" ]]; then
+      printf 'Enforcing\n'
+    else
+      printf 'Permissive\n'
+    fi
+    return
+  fi
+  printf 'Disabled\n'
+}
+
+prelabel_versioned_release_for_selinux() {
+  local mode
+  mode="$(upgrade_selinux_mode)" || die "unable to inspect SELinux mode"
+  [[ "$mode" =~ ^(Disabled|Permissive|Enforcing)$ ]] || \
+    die "unexpected SELinux mode: $mode"
+  if [[ "$RUN_SELINUX" -eq 0 && "$mode" == "Disabled" ]]; then
+    return 0
+  fi
+  have_cmd semanage || \
+    die "versioned release activation requires semanage when SELinux is enabled"
+  have_cmd matchpathcon || \
+    die "versioned release activation requires matchpathcon when SELinux is enabled"
+  have_cmd restorecon || \
+    die "versioned release activation requires restorecon when SELinux is enabled"
+  have_cmd setsebool || \
+    die "versioned release activation requires setsebool when SELinux is enabled"
+  [[ -n "$RELEASE_PROJECT_ROOT" ]] || \
+    die "versioned SELinux prelabel requires a prepared candidate release"
+
+  log "Persisting and applying the exact versioned frontend SELinux policy before selector activation"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    run semanage fcontext -a -t httpd_sys_content_t "$VERSIONED_WEB_SELINUX_PATTERN"
+    printf '+ if the exact local fcontext already exists, modify it to httpd_sys_content_t\n'
+  elif ! semanage fcontext -a -t httpd_sys_content_t \
+    "$VERSIONED_WEB_SELINUX_PATTERN" 2>/dev/null; then
+    semanage fcontext -m -t httpd_sys_content_t \
+      "$VERSIONED_WEB_SELINUX_PATTERN" || \
+      die "unable to persist the versioned frontend SELinux file-context rule"
+  fi
+
+  local release_paths=("$RELEASE_PROJECT_ROOT")
+  local selector selector_target selector_path known_path duplicate
+  local release_path expected_context
+  for selector in current previous; do
+    if [[ ! -L "$INSTALL_ROOT/$selector" ]]; then
+      if [[ "$selector" == "current" && "$DRY_RUN" -eq 0 && \
+        -n "$RELEASE_CURRENT_BEFORE" ]]; then
+        die "prepared current release selector disappeared before SELinux prelabel"
+      fi
+      continue
+    fi
+    selector_target="$(readlink -- "$INSTALL_ROOT/$selector")" || \
+      die "unable to inspect $selector before SELinux prelabel"
+    [[ "$selector_target" =~ ^releases/sha256-[0-9a-f]{64}$ ]] || \
+      die "$selector selector is unsafe before SELinux prelabel"
+    if [[ "$selector" == "current" && "$DRY_RUN" -eq 0 ]]; then
+      [[ -n "$RELEASE_CURRENT_BEFORE" && \
+        "$selector_target" == "releases/sha256-$RELEASE_CURRENT_BEFORE" ]] || \
+        die "current selector does not match the prepared release transaction"
+    fi
+    selector_path="$INSTALL_ROOT/$selector_target"
+    [[ -d "$selector_path" && ! -L "$selector_path" && \
+      "$(realpath -- "$selector_path")" == "$selector_path" ]] || \
+      die "$selector release target is unsafe before SELinux prelabel"
+    duplicate=0
+    for known_path in "${release_paths[@]}"; do
+      if [[ "$known_path" == "$selector_path" ]]; then
+        duplicate=1
+        break
+      fi
+    done
+    if [[ "$duplicate" -eq 0 ]]; then
+      release_paths+=("$selector_path")
+    fi
+  done
+  for release_path in "${release_paths[@]}"; do
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      run restorecon -RF "$release_path/apps/web/dist"
+      continue
+    fi
+    [[ -d "$release_path/apps/web/dist" && \
+      ! -L "$release_path/apps/web/dist" ]] || \
+      die "versioned frontend tree is missing or unsafe before activation: $release_path"
+    expected_context="$(matchpathcon "$release_path/apps/web/dist")" || \
+      die "unable to resolve the persisted frontend SELinux context"
+    [[ "$expected_context" == *":httpd_sys_content_t:"* ]] || \
+      die "persisted SELinux policy does not select the versioned frontend tree"
+    run restorecon -RF "$release_path/apps/web/dist"
+  done
+  run sync --file-system "$INSTALL_ROOT"
+  run setsebool -P httpd_can_network_connect 1
+  # SELinux local fcontext and persistent boolean stores may live on a
+  # different filesystem from both /opt and /etc.  Do not arm or switch the
+  # selector until all policy stores and restored xattrs are durable.
+  run sync
+}
+
+prepare_legacy_baseline() {
+  [[ -n "$ARCHIVE" && "$INSTALL_ROOT" == "/opt/trex-webui" ]] || return 0
+  [[ ! -e "$INSTALL_ROOT/current" && ! -L "$INSTALL_ROOT/current" ]] || return 0
+  local legacy_api="$INSTALL_ROOT/apps/api"
+  if [[ ! -d "$legacy_api" ]]; then
+    log "No legacy installation requires a first-migration rollback baseline"
+    return 0
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ snapshot the serving legacy API, static tree, profiles, and exact Python runtime as the initial content-addressed current release\n'
+    return 0
+  fi
+
+  local runtime_root static_root snapshot prepared
+  if [[ "$ARCHIVE_API_SERVICE_MATCHED" -eq 1 ]]; then
+    [[ "$ARCHIVE_API_OLD_PROJECT_ROOT" == "$INSTALL_ROOT" ]] || \
+      die "legacy API authority is not rooted at the in-place installation"
+    runtime_root="${ARCHIVE_API_OLD_EXEC_PATH%/bin/python}"
+  else
+    runtime_root="$INSTALL_ROOT/.venv"
+  fi
+  [[ -d "$runtime_root" && ! -L "$runtime_root" ]] || \
+    die "legacy installation has no complete Python runtime for crash-safe migration"
+  [[ -d "$WEB_ROOT" && ! -L "$WEB_ROOT" && -f "$WEB_ROOT/index.html" ]] || \
+    die "legacy installation has no complete canonical served frontend for crash-safe migration"
+  static_root="$WEB_ROOT"
+
+  RELEASE_TRANSACTION_ENGINE="$ARCHIVE_SOURCE_ROOT/deploy/release_transaction.py"
+  snapshot="$STAGING_ROOT/legacy-serving-baseline"
+  restart_legacy_api_and_prove_disk_authority
+  assert_legacy_nginx_serving_authority "$static_root"
+  log "Capturing the serving legacy installation as the first rollback release"
+  release_engine snapshot-legacy \
+    --destination "$snapshot" \
+    --static-root "$static_root" \
+    --runtime-root "$runtime_root" >/dev/null || \
+    die "unable to capture a complete legacy rollback baseline"
+  restart_legacy_api_and_prove_disk_authority
+  assert_legacy_api_disk_matches_loaded_process
+  assert_legacy_nginx_serving_authority "$static_root"
+  release_engine verify-legacy-snapshot \
+    --snapshot "$snapshot" \
+    --static-root "$static_root" \
+    --runtime-root "$runtime_root" >/dev/null || \
+    die "legacy API/static/profiles/runtime/config changed after cold-start rollback proof"
+
+  RELEASE_TRANSACTION_PREPARED=1
+  RELEASE_TRANSACTION_COMMITTED=0
+  local legacy_host_profile="common"
+  [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]] && legacy_host_profile="managed-local"
+  prepared="$(release_engine prepare --source "$snapshot" \
+    --host-profile "$legacy_host_profile" \
+    --transaction-kind legacy-baseline)" || \
+    die "unable to prepare the legacy rollback baseline"
+  RELEASE_TRANSACTION_ID="$(release_json_field transaction_id <<<"$prepared")" || \
+    die "legacy baseline omitted its transaction id"
+  arm_versioned_release_consumers legacy-baseline
+  activate_versioned_release
+  commit_versioned_release
+  log "Committed the legacy installation as the initial current release"
+  # The baseline is now a terminal serving release. The candidate transaction
+  # starts with its own journal and failure state.
+  RELEASE_TRANSACTION_PREPARED=0
+  RELEASE_TRANSACTION_ACTIVATED=0
+  RELEASE_TRANSACTION_COMMITTED=0
+  RELEASE_TRANSACTION_ID=""
+}
+
+activate_versioned_release() {
+  [[ "$RELEASE_TRANSACTION_PREPARED" -eq 1 ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ atomically select the prepared candidate at %q/current and retain N-1 at previous\n' \
+      "$INSTALL_ROOT"
+    return
+  fi
+  release_engine activate --transaction-id "$RELEASE_TRANSACTION_ID" >/dev/null || \
+    die "unable to activate prepared content-addressed release"
+  RELEASE_TRANSACTION_ACTIVATED=1
+}
+
+commit_versioned_release() {
+  [[ "$RELEASE_TRANSACTION_PREPARED" -eq 1 ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ commit the release selector only after installer readiness and deploy/verify.sh pass\n'
+    return
+  fi
+  local commit_output status_output phase transaction_id
+  if ! commit_output="$(release_engine commit --transaction-id "$RELEASE_TRANSACTION_ID")"; then
+    # The durable commit precedes retention pruning. A cleanup error must not
+    # turn an already committed serving release into an implicit rollback.
+    status_output="$(release_engine status 2>/dev/null)" || \
+      die "unable to commit or inspect the content-addressed release"
+    read -r phase transaction_id < <(
+      python3.11 -c '
+import json,sys
+status=json.load(sys.stdin)
+transaction=status.get("transaction") or {}
+print(transaction.get("phase", ""), transaction.get("transaction_id", ""))
+' <<<"$status_output"
+    )
+    if [[ "$transaction_id" != "$RELEASE_TRANSACTION_ID" ]]; then
+      die "unable to commit verified content-addressed release"
+    fi
+    if [[ "$phase" == "finalizing_consumer_enable" ]]; then
+      # Selector commit intent is already durable and must never be converted
+      # back into an implicit rollback. Boot reconciliation will idempotently
+      # finish consumer enablement and queue this boot's starts.
+      RELEASE_TRANSACTION_COMMITTED=1
+      die "release commit intent is durable, but consumer enable publication requires reconciliation"
+    fi
+    [[ "$phase" == "committed" ]] || \
+      die "unable to commit verified content-addressed release"
+    printf 'warning: release selector committed, but retention cleanup requires reconciliation\n' >&2
+  fi
+  RELEASE_TRANSACTION_COMMITTED=1
+}
+
+rollback_versioned_release() {
+  [[ "$RELEASE_TRANSACTION_PREPARED" -eq 1 ]] || return 0
+  [[ "$RELEASE_TRANSACTION_COMMITTED" -eq 0 ]] || return 0
+  log "Reconciling the interrupted content-addressed release"
+  local reconciled phase attempt
+  reconciled="$(release_engine reconcile)" || return
+  phase="$(release_json_field phase <<<"$reconciled")" || return
+  if [[ "$phase" == "starting_baseline_consumers" ]]; then
+    for ((attempt = 1; attempt <= ARCHIVE_API_READINESS_ATTEMPTS; attempt += 1)); do
+      if reconciled="$(release_engine ack-consumers 2>/dev/null)"; then
+        phase="$(release_json_field phase <<<"$reconciled")" || return
+        [[ "$phase" == "rolled_back" ]] && break
+      fi
+      ((attempt < ARCHIVE_API_READINESS_ATTEMPTS)) && \
+        sleep "$ARCHIVE_API_READINESS_INTERVAL_SECONDS"
+    done
+    [[ "$phase" == "rolled_back" ]] || {
+      printf 'error: restored release consumers did not become ready for durable acknowledgement\n' >&2
+      return 1
+    }
+  fi
+  [[ "$phase" == "rolled_back" ]] || return 1
+  RELEASE_TRANSACTION_ACTIVATED=0
+  # After arm succeeds, the outer journal's immediately-before-mutation
+  # active-state snapshot is the sole service restoration authority.
+  ARCHIVE_API_MUTATION_GUARD_APPLIED=0
+  ROLLBACK_NGINX_MUTATION_GUARD_APPLIED=0
+}
+
+bootstrap_release_reconciler() {
+  [[ -n "$ARCHIVE" ]] || return 0
+  if [[ "$INSTALL_ROOT" != "/opt/trex-webui" ]]; then
+    log "Skipping host reconciler publication for non-production fixture root $INSTALL_ROOT"
+    return 0
+  fi
+  local source_bootstrap="$ARCHIVE_SOURCE_ROOT/deploy/bootstrap_release_infrastructure.py"
+  local source_engine="$ARCHIVE_SOURCE_ROOT/deploy/release_transaction.py"
+  local source_overview_validator="$ARCHIVE_SOURCE_ROOT/deploy/trex_overview_contract.py"
+  local source_state_validator="$ARCHIVE_SOURCE_ROOT/deploy/trex_persisted_state_contract.py"
+  local source_daemon_probe="$ARCHIVE_SOURCE_ROOT/deploy/daemon_rpc_probe.py"
+  local source_native_boundary="$ARCHIVE_SOURCE_ROOT/deploy/trex_native_boundary.sh"
+  local source_unit="$ARCHIVE_SOURCE_ROOT/deploy/systemd/trex-webui-release-reconcile.service"
+  local source_retry_unit="$ARCHIVE_SOURCE_ROOT/deploy/systemd/trex-webui-release-retry.service"
+  local source_ack_unit="$ARCHIVE_SOURCE_ROOT/deploy/systemd/trex-webui-release-consumer-ack.service"
+  local source_dropin="$ARCHIVE_SOURCE_ROOT/deploy/systemd/nginx-trex-webui-release-reconcile.conf"
+  local source
+  for source in \
+    "$source_bootstrap" "$source_engine" "$source_overview_validator" \
+    "$source_state_validator" "$source_daemon_probe" "$source_native_boundary" \
+    "$source_unit" "$source_retry_unit" "$source_ack_unit" "$source_dropin"; do
+    [[ -f "$source" && ! -L "$source" ]] || \
+      die "archive fixed release infrastructure is missing or unsafe: $source"
+  done
+  [[ -x "$source_bootstrap" && -x "$source_engine" && \
+    -x "$source_daemon_probe" && -x "$source_native_boundary" ]] || \
+    die "archive fixed release infrastructure executables have unsafe modes"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ publish or exact-verify the fixed common release infrastructure generation and its durable manifest\n'
+    if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
+      printf '+ publish or exact-verify the fixed managed-local rollback helpers/drop-in and durable manifest\n'
+    fi
+    printf '+ daemon-reload, durably enable the reconciler, and queue its lock-aware retry loop\n'
+    return 0
+  fi
+  local engine_parent unit_parent
+  engine_parent="$(dirname -- "$RELEASE_RECONCILER_TARGET")"
+  unit_parent="$(dirname -- "$RELEASE_RECONCILER_UNIT_TARGET")"
+  install -d -o root -g root -m 0755 \
+    "$engine_parent" \
+    "$unit_parent" \
+    "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" \
+    "$RELEASE_RECONCILER_API_DROPIN_ROOT"
+  install -d -o root -g root -m 0700 "$RELEASE_STATE_ROOT"
+  local common_artifacts=(
+    --artifact "$source_bootstrap::$RELEASE_BOOTSTRAP_TARGET::0755"
+    --artifact "$source_engine::$RELEASE_RECONCILER_TARGET::0755"
+    --artifact "$source_overview_validator::$TREX_OVERVIEW_VALIDATOR_TARGET::0755"
+    --artifact "$source_state_validator::$TREX_PERSISTED_STATE_VALIDATOR_TARGET::0755"
+    --artifact "$source_unit::$RELEASE_RECONCILER_UNIT_TARGET::0644"
+    --artifact "$source_retry_unit::$RELEASE_RECONCILER_RETRY_UNIT_TARGET::0644"
+    --artifact "$source_ack_unit::$RELEASE_RECONCILER_ACK_UNIT_TARGET::0644"
+    --consumer-dropin "$source_dropin::$RELEASE_RECONCILER_API_DROPIN_TARGET::0644"
+    --consumer-dropin "$source_dropin::$RELEASE_RECONCILER_NGINX_DROPIN_TARGET::0644"
+  )
+  /usr/bin/python3 "$source_bootstrap" \
+    --manifest "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" \
+    "${common_artifacts[@]}" || \
+    die "unable to publish the fixed common release infrastructure"
+  if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
+    install -d -o root -g root -m 0755 "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT"
+    local managed_artifacts=(
+      --artifact "$source_daemon_probe::$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET::0755"
+      --artifact "$source_native_boundary::$RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET::0755"
+      --consumer-dropin "$source_dropin::$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET::0644"
+    )
+    /usr/bin/python3 "$source_bootstrap" \
+      --manifest "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" \
+      "${managed_artifacts[@]}" || \
+      die "unable to publish the fixed managed-local release infrastructure"
+  fi
+  # Persist the newly-created /var/lib state-root directory entry, immutable
+  # manifests, and artifacts before /etc enablement or any selector/service
+  # mutation can become durable on a different filesystem.
+  sync --file-system "$RELEASE_STATE_ROOT" || \
+    die "unable to persist the fixed release infrastructure state"
+  arm_installed_release_reconciler
+}
+
 have_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+assert_loaded_unit_disk_authority() {
+  local unit="$1"
+  local canonical_fragment="$2"
+  local label="$3"
+  local load_state fragment_path need_reload dropins owner mode expected_dropin=""
+
+  load_state="$(systemctl show "$unit" --property=LoadState --value)" || \
+    die "unable to inspect $label LoadState"
+  [[ "$load_state" == "loaded" ]] || return 0
+  fragment_path="$(systemctl show "$unit" --property=FragmentPath --value)" || \
+    die "unable to inspect $label FragmentPath"
+  need_reload="$(systemctl show "$unit" --property=NeedDaemonReload --value)" || \
+    die "unable to inspect $label NeedDaemonReload"
+  dropins="$(systemctl show "$unit" --property=DropInPaths --value)" || \
+    die "unable to inspect $label DropInPaths"
+  [[ "$fragment_path" == "$canonical_fragment" ]] || \
+    die "$label is loaded from non-canonical fragment ${fragment_path:-unknown}"
+  [[ "$need_reload" == "no" ]] || \
+    die "$label disk authority differs from the loaded systemd manager state; run daemon-reload and prove the service healthy before upgrading"
+  case "$unit" in
+    trex-webui-api.service)
+      expected_dropin="$RELEASE_RECONCILER_API_DROPIN_TARGET"
+      ;;
+    trex-daemon-server.service)
+      expected_dropin="$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET"
+      ;;
+  esac
+  if [[ -n "$dropins" ]]; then
+    [[ -n "$expected_dropin" && "$dropins" == "$expected_dropin" && \
+      -f "$expected_dropin" && ! -L "$expected_dropin" && \
+      "$(stat -c '%u:%g %a %h' "$expected_dropin")" == "0:0 644 1" ]] || \
+      die "$label has unmanaged drop-in authority that the release journal cannot restore"
+  fi
+  [[ -f "$canonical_fragment" && ! -L "$canonical_fragment" ]] || \
+    die "$label canonical fragment is missing or unsafe"
+  read -r owner mode < <(stat -Lc '%u %a' -- "$canonical_fragment") || \
+    die "unable to inspect $label canonical fragment"
+  [[ "$owner" == "0" && $((8#$mode & 0022)) -eq 0 ]] || \
+    die "$label canonical fragment is not root-controlled"
+}
+
+assert_loaded_unit_not_stale() {
+  local unit="$1"
+  local label="$2"
+  local load_state need_reload
+  load_state="$(systemctl show "$unit" --property=LoadState --value)" || \
+    die "unable to inspect $label LoadState"
+  [[ "$load_state" == "loaded" ]] || return 0
+  need_reload="$(systemctl show "$unit" --property=NeedDaemonReload --value)" || \
+    die "unable to inspect $label NeedDaemonReload"
+  [[ "$need_reload" == "no" ]] || \
+    die "$label disk authority differs from the loaded systemd manager state; run daemon-reload and prove it healthy before upgrading"
+}
+
+assert_legacy_nginx_serving_authority() {
+  local static_root="$1"
+  local nginx_dump response roots=()
+  [[ "$static_root" == "$WEB_ROOT" ]] || \
+    die "legacy Nginx snapshot root is not the canonical web root"
+  [[ -f "$NGINX_CONF_TARGET" && ! -L "$NGINX_CONF_TARGET" ]] || \
+    die "legacy managed Nginx configuration is missing or unsafe"
+  trex_assert_root_controlled_authority_path "$NGINX_CONF_TARGET" \
+    "legacy managed Nginx configuration" || \
+    die "legacy managed Nginx configuration is not root-controlled"
+  mapfile -t roots < <(
+    sed 's/[[:space:]]*#.*$//' "$NGINX_CONF_TARGET" | \
+      awk '$1 == "root" { value=$2; sub(/;$/, "", value); print value }'
+  )
+  [[ "${#roots[@]}" -eq 1 && "${roots[0]}" == "$static_root" ]] || \
+    die "legacy managed Nginx configuration must select exactly the canonical static root"
+  nginx -t || die "legacy Nginx disk configuration is invalid before migration"
+  nginx_dump="$(nginx -T 2>&1)" || \
+    die "unable to inspect the complete legacy Nginx disk authority"
+  [[ "$(grep -Fc "configuration file $NGINX_CONF_TARGET:" <<<"$nginx_dump")" -eq 1 ]] || \
+    die "legacy managed Nginx configuration is not uniquely loaded from its canonical path"
+  systemctl is-active --quiet nginx.service || \
+    systemctl is-active --quiet nginx || \
+    die "legacy Nginx is not active; there is no serving frontend authority to snapshot"
+  # Converge the live master onto the already validated disk configuration so
+  # the host-artifact journal and the bytes observed through HTTP describe one
+  # authority, not stale in-memory and on-disk generations.
+  systemctl reload nginx || \
+    die "unable to converge legacy Nginx onto its validated disk configuration"
+  systemctl is-active --quiet nginx.service || \
+    systemctl is-active --quiet nginx || \
+    die "legacy Nginx became inactive while converging disk authority"
+  response="$(mktemp -t trex-webui-legacy-index.XXXXXX)" || \
+    die "unable to stage legacy frontend authority proof"
+  if ! curl -fsS --noproxy '*' --connect-timeout 2 --max-time 8 \
+    --output "$response" "http://127.0.0.1/"; then
+    rm -f -- "$response"
+    die "legacy Nginx frontend authority request failed"
+  fi
+  if ! cmp -s "$response" "$static_root/index.html"; then
+    rm -f -- "$response"
+    die "legacy Nginx did not serve the exact frontend selected for rollback snapshot"
+  fi
+  rm -f -- "$response"
 }
 
 timestamp() {
@@ -194,6 +808,7 @@ timestamp() {
 }
 
 archive_api_loaded_exec_path() {
+  local project_root="${1:-$INSTALL_ROOT}"
   local value exec_path argv expected_argv runtime_suffix
   value="$(systemctl show trex-webui-api.service --property=ExecStart --value)" || return
   [[ -n "$value" && "$value" != *$'\n'* ]] || return 1
@@ -204,10 +819,10 @@ archive_api_loaded_exec_path() {
     <<<"$value")"
   [[ "$exec_path" == /* && -n "$argv" ]] || return 1
   case "$exec_path" in
-    "$INSTALL_ROOT/.venv/bin/python")
+    "$project_root/.venv/bin/python")
       ;;
-    "$INSTALL_ROOT"/.venv.runtime-*/bin/python)
-      runtime_suffix="${exec_path#"$INSTALL_ROOT/.venv.runtime-"}"
+    "$project_root"/.venv.runtime-*/bin/python)
+      runtime_suffix="${exec_path#"$project_root/.venv.runtime-"}"
       runtime_suffix="${runtime_suffix%/bin/python}"
       [[ -n "$runtime_suffix" && "$runtime_suffix" != */* ]] || return 1
       ;;
@@ -216,7 +831,7 @@ archive_api_loaded_exec_path() {
       ;;
   esac
 
-  expected_argv="$exec_path -m uvicorn app.main:app --app-dir $INSTALL_ROOT/apps/api --host 127.0.0.1 --port 8080"
+  expected_argv="$exec_path -m uvicorn app.main:app --app-dir $project_root/apps/api --host 127.0.0.1 --port 8080"
   [[ "$argv" == "$expected_argv" ]] || return 1
   printf '%s\n' "$exec_path"
 }
@@ -233,6 +848,8 @@ capture_archive_api_service_state() {
   ARCHIVE_API_SERVICE_MATCHED=0
   ARCHIVE_API_WAS_ACTIVE=0
   ARCHIVE_API_OLD_EXEC_PATH=""
+  ARCHIVE_API_OLD_PROJECT_ROOT=""
+  ARCHIVE_API_OLD_MAIN_PID=""
 
   local load_state working_directory
   load_state="$(systemctl show trex-webui-api.service --property=LoadState --value)" || \
@@ -241,15 +858,27 @@ capture_archive_api_service_state() {
     log "No loaded trex-webui-api.service targets archive install root $INSTALL_ROOT"
     return 0
   fi
+  assert_loaded_unit_disk_authority \
+    trex-webui-api.service "$SYSTEMD_SERVICE_TARGET" \
+    "trex-webui-api.service"
 
   working_directory="$(systemctl show trex-webui-api.service --property=WorkingDirectory --value)" || \
     die "unable to inspect trex-webui-api.service WorkingDirectory before archive source mutation"
-  if [[ "$working_directory" != "$INSTALL_ROOT" ]]; then
+  if [[ "$working_directory" == "$INSTALL_ROOT" ]]; then
+    ARCHIVE_API_OLD_PROJECT_ROOT="$INSTALL_ROOT"
+  elif [[ "$working_directory" == "$INSTALL_ROOT/current" && \
+    -L "$INSTALL_ROOT/current" && \
+    "$(readlink -- "$INSTALL_ROOT/current")" =~ ^releases/sha256-[0-9a-f]{64}$ ]]; then
+    ARCHIVE_API_OLD_PROJECT_ROOT="$INSTALL_ROOT/current"
+  else
+    if [[ -n "$ARCHIVE" && "$INSTALL_ROOT" == "/opt/trex-webui" ]]; then
+      die "canonical trex-webui-api.service is loaded from foreign WorkingDirectory $working_directory"
+    fi
     log "Loaded trex-webui-api.service belongs to $working_directory, not archive install root $INSTALL_ROOT; leaving it untouched"
     return 0
   fi
 
-  ARCHIVE_API_OLD_EXEC_PATH="$(archive_api_loaded_exec_path)" || \
+  ARCHIVE_API_OLD_EXEC_PATH="$(archive_api_loaded_exec_path "$ARCHIVE_API_OLD_PROJECT_ROOT")" || \
     die "trex-webui-api.service has the archive install root WorkingDirectory but no exact matching ExecStart/--app-dir contract"
   [[ -n "$ARCHIVE_API_OLD_EXEC_PATH" ]] || \
     die "trex-webui-api.service has no parseable interpreter for archive source mutation"
@@ -257,9 +886,123 @@ capture_archive_api_service_state() {
 
   if systemctl is-active --quiet trex-webui-api.service; then
     ARCHIVE_API_WAS_ACTIVE=1
+    if [[ "$ARCHIVE_API_OLD_PROJECT_ROOT" == "$INSTALL_ROOT" ]]; then
+      ARCHIVE_API_OLD_MAIN_PID="$(systemctl show trex-webui-api.service --property=MainPID --value)" || \
+        die "unable to capture trex-webui-api.service MainPID"
+      [[ "$ARCHIVE_API_OLD_MAIN_PID" =~ ^[1-9][0-9]*$ && \
+        -r "/proc/$ARCHIVE_API_OLD_MAIN_PID/stat" ]] || \
+        die "active legacy trex-webui-api.service has no stable MainPID"
+    fi
     [[ "$RUN_RESTART" -eq 1 ]] || \
       die "--skip-restart cannot mutate $INSTALL_ROOT while its matching trex-webui-api.service is active"
   fi
+}
+
+legacy_api_tree_not_newer_than_process() {
+  local main_pid="$1"
+  local api_tree="$2"
+  local dotenv_path="${3:-}"
+  python3.11 - "$main_pid" "$api_tree" "$dotenv_path" <<'PY'
+from __future__ import annotations
+
+import os
+import stat
+import sys
+from pathlib import Path
+
+
+pid_text, api_text, dotenv_text = sys.argv[1:]
+if not pid_text.isdecimal() or int(pid_text) <= 0:
+    raise SystemExit("legacy API MainPID is invalid")
+pid = int(pid_text)
+stat_payload = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+tail = stat_payload.rsplit(")", 1)
+if len(tail) != 2:
+    raise SystemExit("legacy API process start metadata is invalid")
+fields = tail[1].split()
+if len(fields) <= 19:
+    raise SystemExit("legacy API process start metadata is incomplete")
+start_ticks = int(fields[19])
+clock_ticks = os.sysconf("SC_CLK_TCK")
+boot_seconds = None
+for line in Path("/proc/stat").read_text(encoding="ascii").splitlines():
+    if line.startswith("btime "):
+        boot_seconds = int(line.split()[1])
+        break
+if boot_seconds is None:
+    raise SystemExit("kernel boot timestamp is unavailable")
+# One second covers coarse source timestamp filesystems without permitting an
+# operator edit made after a settled service start.
+cutoff_ns = int((boot_seconds + start_ticks / clock_ticks + 1.0) * 1_000_000_000)
+
+paths: list[Path] = []
+api_root = Path(api_text)
+if not api_root.is_dir() or api_root.is_symlink():
+    raise SystemExit(f"legacy API source root is unsafe: {api_root}")
+for directory, names, filenames in os.walk(api_root, topdown=True, followlinks=False):
+    directory_path = Path(directory)
+    for name in [*names, *filenames]:
+        path = directory_path / name
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise SystemExit(f"legacy API source contains a symbolic link: {path}")
+        if stat.S_ISREG(metadata.st_mode):
+            paths.append(path)
+dotenv = Path(dotenv_text) if dotenv_text else None
+if dotenv is not None and (dotenv.exists() or dotenv.is_symlink()):
+    metadata = dotenv.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or dotenv.is_symlink():
+        raise SystemExit(f"legacy runtime configuration is unsafe: {dotenv}")
+    paths.append(dotenv)
+for path in paths:
+    if path.stat().st_mtime_ns > cutoff_ns:
+        raise SystemExit(
+            "legacy serving source changed after the API process started: "
+            f"{path}; restart the API, verify readiness, then retry the archive upgrade"
+        )
+PY
+}
+
+assert_legacy_api_disk_matches_loaded_process() {
+  [[ "$ARCHIVE_API_WAS_ACTIVE" -eq 1 ]] || return 0
+  local current_pid process_exec
+  current_pid="$(systemctl show trex-webui-api.service --property=MainPID --value)" || \
+    die "unable to revalidate the legacy API MainPID"
+  [[ "$current_pid" == "$ARCHIVE_API_OLD_MAIN_PID" ]] || \
+    die "legacy API restarted while its rollback baseline was being captured"
+  process_exec="$(archive_api_main_pid_exec_path)" || \
+    die "unable to revalidate the legacy API process executable"
+  [[ "$process_exec" == "$ARCHIVE_API_OLD_EXEC_PATH" ]] || \
+    die "legacy API process identity changed before rollback baseline capture"
+  legacy_api_tree_not_newer_than_process \
+    "$current_pid" \
+    "$INSTALL_ROOT/apps/api" \
+    "$INSTALL_ROOT/.env" || \
+    die "legacy on-disk API/configuration does not match the loaded serving process"
+}
+
+restart_legacy_api_and_prove_disk_authority() {
+  [[ "$ARCHIVE_API_SERVICE_MATCHED" -eq 1 && \
+    "$ARCHIVE_API_OLD_PROJECT_ROOT" == "$INSTALL_ROOT" && \
+    "$ARCHIVE_API_WAS_ACTIVE" -eq 1 ]] || \
+    die "first migration requires an active canonical legacy API to prove a restartable rollback baseline"
+  assert_loaded_unit_disk_authority \
+    trex-webui-api.service "$SYSTEMD_SERVICE_TARGET" \
+    "trex-webui-api.service"
+  log "Restarting the legacy API to prove its on-disk rollback authority"
+  systemctl restart trex-webui-api.service || \
+    die "legacy API cannot cold-start from the on-disk rollback authority"
+  wait_for_restored_archive_api_readiness || \
+    die "legacy API failed readiness after cold-start authority convergence"
+  capture_archive_api_service_state
+  [[ "$ARCHIVE_API_SERVICE_MATCHED" -eq 1 && \
+    "$ARCHIVE_API_OLD_PROJECT_ROOT" == "$INSTALL_ROOT" && \
+    "$ARCHIVE_API_WAS_ACTIVE" -eq 1 ]] || \
+    die "legacy API identity changed during cold-start authority convergence"
+  verify_restored_archive_api_identity \
+    "$ARCHIVE_API_OLD_EXEC_PATH" "$INSTALL_ROOT" || \
+    die "legacy API process does not match its loaded disk authority"
+  assert_legacy_api_disk_matches_loaded_process
 }
 
 stop_archive_api_service_for_source_mutation() {
@@ -268,13 +1011,14 @@ stop_archive_api_service_for_source_mutation() {
     die "archive API service state was not captured before source mutation"
 
   local load_state working_directory current_exec
+  local expected_project_root="${ARCHIVE_API_OLD_PROJECT_ROOT:-$INSTALL_ROOT}"
   load_state="$(systemctl show trex-webui-api.service --property=LoadState --value)" || \
     die "unable to revalidate trex-webui-api.service before archive source mutation"
   working_directory="$(systemctl show trex-webui-api.service --property=WorkingDirectory --value)" || \
     die "unable to revalidate trex-webui-api.service WorkingDirectory before archive source mutation"
-  current_exec="$(archive_api_loaded_exec_path)" || \
+  current_exec="$(archive_api_loaded_exec_path "$expected_project_root")" || \
     die "trex-webui-api.service ExecStart/--app-dir changed before archive source mutation"
-  [[ "$load_state" == "loaded" && "$working_directory" == "$INSTALL_ROOT" && \
+  [[ "$load_state" == "loaded" && "$working_directory" == "$expected_project_root" && \
     "$current_exec" == "$ARCHIVE_API_OLD_EXEC_PATH" ]] || \
     die "trex-webui-api.service identity changed before archive source mutation"
 
@@ -282,9 +1026,40 @@ stop_archive_api_service_for_source_mutation() {
   log "Stopping the matching API before archive source mutation"
   systemctl stop trex-webui-api.service || \
     die "unable to stop trex-webui-api.service before archive source mutation"
-  if systemctl is-active --quiet trex-webui-api.service; then
-    die "trex-webui-api.service remained active; refusing archive source mutation"
+  assert_systemd_unit_quiescent \
+    trex-webui-api.service "trex-webui-api.service" || \
+    die "trex-webui-api.service retained active work; refusing archive source mutation"
+}
+
+assert_systemd_unit_quiescent() {
+  local unit="$1"
+  local label="$2"
+  local active_state job
+  active_state="$(systemctl show "$unit" --property=ActiveState --value)" || \
+    return 1
+  job="$(systemctl show "$unit" --property=Job --value)" || return 1
+  [[ "$active_state" == "inactive" && -z "$job" ]]
+}
+
+stop_archive_nginx_for_selector_mutation() {
+  ROLLBACK_NGINX_MUTATION_GUARD_APPLIED=1
+  log "Stopping Nginx before changing the atomic release selector"
+  systemctl stop nginx.service || \
+    die "unable to stop nginx.service before release selector mutation"
+  assert_systemd_unit_quiescent nginx.service "nginx.service" || \
+    die "nginx.service retained active work; refusing release selector mutation"
+}
+
+stop_versioned_release_consumers_for_selector_mutation() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ after durable consumer arm, stop API and Nginx and prove both inactive with no queued jobs before selector mutation\n'
+    return 0
   fi
+  # The durable journal captured the exact active subset immediately before
+  # this boundary.  From here onward it is the sole authority for restoring
+  # service state after any crash or shell failure.
+  stop_archive_nginx_for_selector_mutation
+  stop_archive_api_service_for_source_mutation
 }
 
 wait_for_restored_archive_api_readiness() {
@@ -337,6 +1112,7 @@ archive_api_main_pid_exec_path() {
 
 verify_restored_archive_api_identity() {
   local expected_exec="$1"
+  local expected_project_root="${2:-${ARCHIVE_API_OLD_PROJECT_ROOT:-$INSTALL_ROOT}}"
   local load_state working_directory loaded_exec process_exec
 
   systemctl is-active --quiet trex-webui-api.service || {
@@ -345,12 +1121,13 @@ verify_restored_archive_api_identity() {
   }
   load_state="$(systemctl show trex-webui-api.service --property=LoadState --value)" || return
   working_directory="$(systemctl show trex-webui-api.service --property=WorkingDirectory --value)" || return
-  loaded_exec="$(archive_api_loaded_exec_path)" || {
+  loaded_exec="$(archive_api_loaded_exec_path "$expected_project_root")" || {
     printf 'error: restored API loaded ExecStart/--app-dir contract is invalid\n' >&2
     return 1
   }
-  [[ "$load_state" == "loaded" && "$working_directory" == "$INSTALL_ROOT" ]] || {
-    printf 'error: restored API loaded unit no longer targets install root %s\n' "$INSTALL_ROOT" >&2
+  [[ "$load_state" == "loaded" && "$working_directory" == "$expected_project_root" ]] || {
+    printf 'error: restored API loaded unit no longer targets prior project root %s\n' \
+      "$expected_project_root" >&2
     return 1
   }
   [[ "$loaded_exec" == "$expected_exec" ]] || {
@@ -389,22 +1166,49 @@ restore_archive_api_service_state() {
     printf 'error: prior API interpreter is unavailable for archive rollback\n' >&2
     return 1
   }
+  local restored_project_root="${ARCHIVE_API_OLD_PROJECT_ROOT:-$INSTALL_ROOT}"
+  local restored_exec="$ARCHIVE_API_OLD_EXEC_PATH"
   log "Reloading the restored unit and restarting the API after archive rollback"
   systemctl daemon-reload || return
+  if [[ "$restored_project_root" == "$INSTALL_ROOT" && \
+    -L "$INSTALL_ROOT/current" && \
+    "$(systemctl show trex-webui-api.service --property=WorkingDirectory --value)" == "$INSTALL_ROOT/current" ]]; then
+    # The candidate installer may have completed before the outer selector
+    # commit failed. Its release-invariant unit is safe with the imported
+    # legacy baseline selected at current, even though the old in-place unit
+    # backup has already been retired.
+    restored_project_root="$INSTALL_ROOT/current"
+    restored_exec="$(archive_api_loaded_exec_path "$restored_project_root")" || {
+      printf 'error: stable rollback unit does not match the imported legacy baseline\n' >&2
+      return 1
+    }
+  fi
   systemctl restart trex-webui-api.service || return
   wait_for_restored_archive_api_readiness || return
-  verify_restored_archive_api_identity "$ARCHIVE_API_OLD_EXEC_PATH"
+  verify_restored_archive_api_identity "$restored_exec" "$restored_project_root"
 }
 
 parse_args() {
+  local seen_archive=0 seen_sha256=0 seen_rollback_previous=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --archive)
+        [[ "$seen_archive" -eq 0 ]] || die "--archive may be specified only once"
+        seen_archive=1
         ARCHIVE="${2:-}"
         [[ -n "$ARCHIVE" ]] || die "--archive requires a value"
         shift 2
         ;;
+      --rollback-previous)
+        [[ "$seen_rollback_previous" -eq 0 ]] || \
+          die "--rollback-previous may be specified only once"
+        seen_rollback_previous=1
+        ROLLBACK_PREVIOUS=1
+        shift
+        ;;
       --sha256)
+        [[ "$seen_sha256" -eq 0 ]] || die "--sha256 may be specified only once"
+        seen_sha256=1
         ARCHIVE_SHA256="${2:-}"
         [[ "$ARCHIVE_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || die "--sha256 must be exactly 64 hexadecimal characters"
         ARCHIVE_SHA256="${ARCHIVE_SHA256,,}"
@@ -507,10 +1311,24 @@ parse_args() {
   if [[ "$RUN_VERIFY" -eq 1 && "$RUN_RESTART" -eq 0 ]]; then
     die "--verify cannot be combined with --skip-restart because verification must inspect the newly activated API runtime"
   fi
+  if [[ "$ROLLBACK_PREVIOUS" -eq 1 ]]; then
+    [[ -z "$ARCHIVE" && -z "$ARCHIVE_SHA256" ]] || \
+      die "--rollback-previous cannot be combined with --archive or --sha256"
+    [[ "$RUN_RESTART" -eq 1 ]] || \
+      die "--rollback-previous requires service restart and readiness verification"
+    [[ "$INSTALL_NGINX" -eq 0 && "$INSTALL_PYTHON_DEPS" -eq 0 && \
+      "$RUN_SELINUX" -eq 0 && "$RUN_FIREWALLD" -eq 0 ]] || \
+      die "--rollback-previous cannot install packages, dependencies, or host policy"
+    [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]] || \
+      die "--rollback-previous requires the installer-managed local daemon"
+  fi
 }
 
 normalize_paths() {
-  if [[ -n "$ARCHIVE" ]]; then
+  if [[ "$ROLLBACK_PREVIOUS" -eq 1 ]]; then
+    INSTALL_ROOT="${INSTALL_ROOT:-/opt/trex-webui}"
+    RELEASE_STATE_ROOT="${RELEASE_STATE_ROOT:-/var/lib/trex-webui-deploy}"
+  elif [[ -n "$ARCHIVE" ]]; then
     [[ -f "$ARCHIVE" ]] || die "archive not found: $ARCHIVE"
     ARCHIVE="$(trex_canonical_path "$ARCHIVE" "release archive")" || die "unsafe release archive path"
     INSTALL_ROOT="${INSTALL_ROOT:-/opt/trex-webui}"
@@ -524,14 +1342,43 @@ normalize_paths() {
 
   PROJECT_ROOT="$(trex_canonical_path "$PROJECT_ROOT" "upgrade project root")" || die "unsafe project root"
   INSTALL_ROOT="$(trex_canonical_path "$INSTALL_ROOT" "install root")" || die "unsafe install root"
+  if [[ -n "$ARCHIVE" && -z "$RELEASE_STATE_ROOT" ]]; then
+    if [[ "$INSTALL_ROOT" == "/opt/trex-webui" ]]; then
+      RELEASE_STATE_ROOT="/var/lib/trex-webui-deploy"
+    else
+      RELEASE_STATE_ROOT="$(dirname -- "$INSTALL_ROOT")/.$(basename -- "$INSTALL_ROOT")-release-state"
+    fi
+  fi
+  RELEASE_INFRASTRUCTURE_COMMON_MANIFEST="${RELEASE_INFRASTRUCTURE_COMMON_MANIFEST:-$RELEASE_STATE_ROOT/infrastructure-common.json}"
+  RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST="${RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST:-$RELEASE_STATE_ROOT/infrastructure-managed-local.json}"
   WEB_ROOT="$(trex_canonical_path "$WEB_ROOT" "web root")" || die "unsafe web root"
   STATIC_BACKUP_ROOT="$(trex_canonical_path "$STATIC_BACKUP_ROOT" "static backup root")" || die "unsafe static backup root"
   SOURCE_BACKUP_ROOT="$(trex_canonical_path "$SOURCE_BACKUP_ROOT" "source backup root")" || die "unsafe source backup root"
+  NGINX_CONF_TARGET="$(trex_canonical_path "$NGINX_CONF_TARGET" "Nginx configuration target")" || die "unsafe Nginx configuration target"
+  SYSTEMD_SERVICE_TARGET="$(trex_canonical_path "$SYSTEMD_SERVICE_TARGET" "API systemd service target")" || die "unsafe API systemd service target"
+  SERVICE_ENV_FILE="$(trex_canonical_path "$SERVICE_ENV_FILE" "API environment file")" || die "unsafe API environment file"
   DAEMON_SYSTEMD_SERVICE_TARGET="$(trex_canonical_path "$DAEMON_SYSTEMD_SERVICE_TARGET" "daemon systemd service target")" || die "unsafe daemon systemd service target"
   DAEMON_LIBEXEC_ROOT="$(trex_canonical_path "$DAEMON_LIBEXEC_ROOT" "daemon libexec root")" || die "unsafe daemon libexec root"
   DAEMON_SUPERVISOR_TARGET="$(trex_canonical_path "$DAEMON_SUPERVISOR_TARGET" "daemon supervisor target")" || die "unsafe daemon supervisor target"
   DAEMON_RPC_PROBE_TARGET="$(trex_canonical_path "$DAEMON_RPC_PROBE_TARGET" "daemon RPC probe target")" || die "unsafe daemon RPC probe target"
   DAEMON_NATIVE_BOUNDARY_TARGET="$(trex_canonical_path "$DAEMON_NATIVE_BOUNDARY_TARGET" "daemon native boundary target")" || die "unsafe daemon native boundary target"
+  RELEASE_RECONCILER_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_TARGET" "release reconciler target")" || die "unsafe release reconciler target"
+  RELEASE_BOOTSTRAP_TARGET="$(trex_canonical_path "$RELEASE_BOOTSTRAP_TARGET" "release infrastructure bootstrap target")" || die "unsafe release infrastructure bootstrap target"
+  TREX_OVERVIEW_VALIDATOR_TARGET="$(trex_canonical_path "$TREX_OVERVIEW_VALIDATOR_TARGET" "TRex overview validator target")" || die "unsafe TRex overview validator target"
+  TREX_PERSISTED_STATE_VALIDATOR_TARGET="$(trex_canonical_path "$TREX_PERSISTED_STATE_VALIDATOR_TARGET" "persisted state validator target")" || die "unsafe persisted state validator target"
+  RELEASE_RECONCILER_UNIT_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_UNIT_TARGET" "release reconciler unit target")" || die "unsafe release reconciler unit target"
+  RELEASE_RECONCILER_RETRY_UNIT_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" "release retry unit target")" || die "unsafe release retry unit target"
+  RELEASE_RECONCILER_ACK_UNIT_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_ACK_UNIT_TARGET" "release consumer acknowledgement unit target")" || die "unsafe release consumer acknowledgement unit target"
+  RELEASE_RECONCILER_NGINX_DROPIN_ROOT="$(trex_canonical_path "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" "release reconciler Nginx drop-in root")" || die "unsafe release reconciler Nginx drop-in root"
+  RELEASE_RECONCILER_NGINX_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" "release reconciler Nginx drop-in target")" || die "unsafe release reconciler Nginx drop-in target"
+  RELEASE_RECONCILER_API_DROPIN_ROOT="$(trex_canonical_path "$RELEASE_RECONCILER_API_DROPIN_ROOT" "release reconciler API drop-in root")" || die "unsafe release reconciler API drop-in root"
+  RELEASE_RECONCILER_API_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_API_DROPIN_TARGET" "release reconciler API drop-in target")" || die "unsafe release reconciler API drop-in target"
+  RELEASE_RECONCILER_DAEMON_DROPIN_ROOT="$(trex_canonical_path "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT" "release reconciler daemon drop-in root")" || die "unsafe release reconciler daemon drop-in root"
+  RELEASE_RECONCILER_DAEMON_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" "release reconciler daemon drop-in target")" || die "unsafe release reconciler daemon drop-in target"
+  RELEASE_ROLLBACK_DAEMON_PROBE_TARGET="$(trex_canonical_path "$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET" "stable rollback daemon probe target")" || die "unsafe stable rollback daemon probe target"
+  RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET="$(trex_canonical_path "$RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET" "stable rollback native boundary target")" || die "unsafe stable rollback native boundary target"
+  RELEASE_INFRASTRUCTURE_COMMON_MANIFEST="$(trex_canonical_path "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" "common release infrastructure manifest")" || die "unsafe common release infrastructure manifest"
+  RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST="$(trex_canonical_path "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" "managed release infrastructure manifest")" || die "unsafe managed release infrastructure manifest"
   NFTABLES_CONFIG_PATH="$(trex_canonical_path "$NFTABLES_CONFIG_PATH" "nftables service configuration")" || die "unsafe nftables service configuration"
   NFTABLES_SYSTEMD_DROPIN_ROOT="$(trex_canonical_path "$NFTABLES_SYSTEMD_DROPIN_ROOT" "nftables systemd drop-in root")" || die "unsafe nftables systemd drop-in root"
   NFTABLES_SYSTEMD_DROPIN_TARGET="$(trex_canonical_path "$NFTABLES_SYSTEMD_DROPIN_TARGET" "nftables systemd drop-in target")" || die "unsafe nftables systemd drop-in target"
@@ -547,6 +1394,42 @@ normalize_paths() {
   trex_path_is_within "$DAEMON_SUPERVISOR_TARGET" "$DAEMON_LIBEXEC_ROOT" || die "daemon supervisor target escaped its libexec root"
   trex_path_is_within "$DAEMON_RPC_PROBE_TARGET" "$DAEMON_LIBEXEC_ROOT" || die "daemon RPC probe target escaped its libexec root"
   trex_path_is_within "$DAEMON_NATIVE_BOUNDARY_TARGET" "$DAEMON_LIBEXEC_ROOT" || die "daemon native boundary target escaped its libexec root"
+  trex_path_is_within "$RELEASE_RECONCILER_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
+    die "release reconciler target escaped its libexec root"
+  trex_path_is_within "$RELEASE_BOOTSTRAP_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
+    die "release infrastructure bootstrap target escaped its libexec root"
+  trex_path_is_within "$TREX_OVERVIEW_VALIDATOR_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
+    die "TRex overview validator target escaped its libexec root"
+  trex_path_is_within "$TREX_PERSISTED_STATE_VALIDATOR_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
+    die "persisted state validator target escaped its libexec root"
+  trex_path_is_within "$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
+    die "stable rollback daemon probe target escaped its libexec root"
+  trex_path_is_within "$RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
+    die "stable rollback native boundary target escaped its libexec root"
+  trex_path_is_within \
+    "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" \
+    "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" || \
+    die "release reconciler Nginx drop-in escaped its root"
+  trex_assert_managed_path \
+    "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" \
+    "release reconciler Nginx drop-in root" \
+    "/etc/systemd/system" || die "unsafe release reconciler Nginx drop-in root"
+  trex_path_is_within \
+    "$RELEASE_RECONCILER_API_DROPIN_TARGET" \
+    "$RELEASE_RECONCILER_API_DROPIN_ROOT" || \
+    die "release reconciler API drop-in escaped its root"
+  trex_assert_managed_path \
+    "$RELEASE_RECONCILER_API_DROPIN_ROOT" \
+    "release reconciler API drop-in root" \
+    "/etc/systemd/system" || die "unsafe release reconciler API drop-in root"
+  trex_path_is_within \
+    "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" \
+    "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT" || \
+    die "release reconciler daemon drop-in escaped its root"
+  trex_assert_managed_path \
+    "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT" \
+    "release reconciler daemon drop-in root" \
+    "/etc/systemd/system" || die "unsafe release reconciler daemon drop-in root"
   trex_path_is_within "$NFTABLES_SYSTEMD_DROPIN_TARGET" "$NFTABLES_SYSTEMD_DROPIN_ROOT" || die "nftables systemd drop-in escaped its root"
   trex_path_is_within "$TREX_DAEMON_BIN" "$TREX_DAEMON_SCRIPTS_DIR" || \
     die "daemon executable escaped its scripts directory"
@@ -557,6 +1440,68 @@ normalize_paths() {
   trex_assert_disjoint_paths "$WEB_ROOT" "web root" "$STATIC_BACKUP_ROOT" "static backup root" || die "overlapping upgrade paths"
   trex_assert_disjoint_paths "$WEB_ROOT" "web root" "$SOURCE_BACKUP_ROOT" "source backup root" || die "overlapping upgrade paths"
   trex_assert_disjoint_paths "$STATIC_BACKUP_ROOT" "static backup root" "$SOURCE_BACKUP_ROOT" "source backup root" || die "overlapping upgrade paths"
+  if [[ -n "$ARCHIVE" || "$ROLLBACK_PREVIOUS" -eq 1 ]]; then
+    RELEASE_STATE_ROOT="$(trex_canonical_path "$RELEASE_STATE_ROOT" "release transaction state root")" || \
+      die "unsafe release transaction state root"
+    trex_assert_not_broad_path "$RELEASE_STATE_ROOT" "release transaction state root" || \
+      die "unsafe release transaction state root"
+    trex_assert_managed_path \
+      "$RELEASE_STATE_ROOT" \
+      "release transaction state root" \
+      "/var/lib/trex-webui-deploy" || die "unsafe release transaction state root"
+    trex_assert_disjoint_paths \
+      "$INSTALL_ROOT" "install root" \
+      "$RELEASE_STATE_ROOT" "release transaction state root" || die "overlapping release paths"
+    trex_assert_disjoint_paths \
+      "$WEB_ROOT" "web root" \
+      "$RELEASE_STATE_ROOT" "release transaction state root" || die "overlapping release paths"
+    trex_path_is_within \
+      "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" \
+      "$RELEASE_STATE_ROOT" || die "common release infrastructure manifest escaped the state root"
+    trex_path_is_within \
+      "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" \
+      "$RELEASE_STATE_ROOT" || die "managed release infrastructure manifest escaped the state root"
+    if [[ "$INSTALL_ROOT" == "/opt/trex-webui" ]]; then
+      [[ "$RELEASE_STATE_ROOT" == "/var/lib/trex-webui-deploy" ]] || \
+        die "production archive upgrades require root-only state at /var/lib/trex-webui-deploy"
+      [[ "$WEB_ROOT" == "/var/www/trex-webui/dist" && \
+        "$STATIC_BACKUP_ROOT" == "/var/www/trex-webui/backups" && \
+        "$SOURCE_BACKUP_ROOT" == "/var/backups/trex-webui/source" && \
+        "$NGINX_CONF_TARGET" == "/etc/nginx/conf.d/trex-webui.conf" && \
+        "$DAEMON_SYSTEMD_SERVICE_TARGET" == "/etc/systemd/system/trex-daemon-server.service" && \
+        "$DAEMON_LIBEXEC_ROOT" == "/usr/libexec/trex-webui" && \
+        "$DAEMON_SUPERVISOR_TARGET" == "/usr/libexec/trex-webui/trex_daemon_supervisor.py" && \
+        "$DAEMON_RPC_PROBE_TARGET" == "/usr/libexec/trex-webui/daemon_rpc_probe.py" && \
+        "$DAEMON_NATIVE_BOUNDARY_TARGET" == "/usr/libexec/trex-webui/trex_native_boundary.sh" && \
+        "$SYSTEMD_SERVICE_TARGET" == "/etc/systemd/system/trex-webui-api.service" && \
+        "$NFTABLES_SYSTEMD_DROPIN_ROOT" == "/etc/systemd/system/nftables.service.d" && \
+        "$NFTABLES_SYSTEMD_DROPIN_TARGET" == "/etc/systemd/system/nftables.service.d/trex-webui-native-boundary.conf" && \
+        "$SERVICE_ENV_FILE" == "/etc/trex-webui/trex-webui.env" && \
+        "$RELEASE_RECONCILER_TARGET" == "/usr/libexec/trex-webui/release_transaction.py" && \
+        "$RELEASE_BOOTSTRAP_TARGET" == "/usr/libexec/trex-webui/bootstrap_release_infrastructure.py" && \
+        "$TREX_OVERVIEW_VALIDATOR_TARGET" == "/usr/libexec/trex-webui/trex_overview_contract.py" && \
+        "$TREX_PERSISTED_STATE_VALIDATOR_TARGET" == "/usr/libexec/trex-webui/trex_persisted_state_contract.py" && \
+        "$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET" == "/usr/libexec/trex-webui/release_daemon_rpc_probe.py" && \
+        "$RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET" == "/usr/libexec/trex-webui/release_native_boundary.sh" && \
+        "$RELEASE_RECONCILER_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-reconcile.service" && \
+        "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-retry.service" && \
+        "$RELEASE_RECONCILER_ACK_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-consumer-ack.service" && \
+        "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" == "/etc/systemd/system/nginx.service.d" && \
+        "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" == "/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile.conf" && \
+        "$RELEASE_RECONCILER_API_DROPIN_ROOT" == "/etc/systemd/system/trex-webui-api.service.d" && \
+        "$RELEASE_RECONCILER_API_DROPIN_TARGET" == "/etc/systemd/system/trex-webui-api.service.d/trex-webui-release-reconcile.conf" && \
+        "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT" == "/etc/systemd/system/trex-daemon-server.service.d" && \
+        "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" == "/etc/systemd/system/trex-daemon-server.service.d/trex-webui-release-reconcile.conf" && \
+        "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-common.json" && \
+        "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-managed-local.json" ]] || \
+        die "production archive upgrades require the exact canonical host-artifact transaction targets"
+    fi
+  fi
+  if [[ "$ROLLBACK_PREVIOUS" -eq 1 ]]; then
+    [[ "$INSTALL_ROOT" == "/opt/trex-webui" && \
+      "$RELEASE_STATE_ROOT" == "/var/lib/trex-webui-deploy" ]] || \
+      die "N-1 rollback is supported only for the production content-addressed layout"
+  fi
   if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
     trex_assert_software_path \
       "$TREX_DAEMON_SCRIPTS_DIR" \
@@ -657,11 +1602,11 @@ check_archive() {
 }
 
 require_root_for_archive() {
-  if [[ -z "$ARCHIVE" || "$DRY_RUN" -eq 1 ]]; then
+  if [[ -z "$ARCHIVE" && "$ROLLBACK_PREVIOUS" -eq 0 || "$DRY_RUN" -eq 1 ]]; then
     return
   fi
   if [[ "$(id -u)" -ne 0 ]]; then
-    die "root is required for --archive upgrades into $INSTALL_ROOT; rerun with sudo or use --dry-run"
+    die "root is required for archive upgrades and N-1 rollback into $INSTALL_ROOT; rerun with sudo or use --dry-run"
   fi
 }
 
@@ -863,10 +1808,14 @@ extract_and_verify_archive() {
 }
 
 install_args() {
+  local installer_root="$INSTALL_ROOT"
+  if [[ -n "$ARCHIVE" ]]; then
+    installer_root="$RELEASE_PROJECT_ROOT"
+  fi
   local args=(
-    "$INSTALL_ROOT/deploy/install.sh"
+    "$installer_root/deploy/install.sh"
     "--project-root"
-    "$INSTALL_ROOT"
+    "$installer_root"
     "--web-root"
     "$WEB_ROOT"
     "--backup-root"
@@ -878,6 +1827,12 @@ install_args() {
   fi
   if [[ -n "$ARCHIVE" || "$RUN_BUILD" -eq 0 ]]; then
     args+=("--skip-build")
+  fi
+  if [[ -n "$ARCHIVE" ]]; then
+    args+=("--versioned-release")
+  if [[ "$RUN_ENABLE" -eq 1 ]]; then
+      args+=("--defer-consumer-enable")
+    fi
   fi
   if [[ "$INSTALL_PYTHON_DEPS" -eq 1 ]]; then
     args+=("--install-python-deps")
@@ -893,6 +1848,9 @@ install_args() {
   fi
   if [[ "$ALLOW_DAEMON_RUNTIME_RESTART" -eq 1 ]]; then
     args+=("--allow-daemon-runtime-restart")
+  fi
+  if [[ -n "$ARCHIVE" && "$MANAGE_LOCAL_DAEMON" -eq 1 && "$RUN_RESTART" -eq 1 ]]; then
+    args+=("--expected-daemon-restart" "$ARCHIVE_DAEMON_MUTATION_EXPECTED")
   fi
   if [[ "$INSTALL_NGINX" -eq 1 ]]; then
     args+=("--install-nginx")
@@ -914,8 +1872,13 @@ install_args() {
 }
 
 run_install() {
+  local installer_root="$INSTALL_ROOT"
+  if [[ -n "$ARCHIVE" ]]; then
+    installer_root="$RELEASE_PROJECT_ROOT"
+  fi
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    [[ -x "$INSTALL_ROOT/deploy/install.sh" ]] || die "missing executable install script: $INSTALL_ROOT/deploy/install.sh"
+    [[ -x "$installer_root/deploy/install.sh" ]] || \
+      die "missing executable install script: $installer_root/deploy/install.sh"
   fi
   local args=()
   while IFS= read -r -d '' item; do
@@ -926,6 +1889,8 @@ run_install() {
 }
 
 preflight_archive_daemon_runtime() {
+  ARCHIVE_DAEMON_MUTATION_EXPECTED=0
+  ARCHIVE_DAEMON_WAS_ACTIVE_FOR_PREFLIGHT=0
   [[ -n "$ARCHIVE" && "$MANAGE_LOCAL_DAEMON" -eq 1 && "$RUN_RESTART" -eq 1 ]] || return 0
   if [[ "$DRY_RUN" -eq 1 ]]; then
     printf '+ before archive source mutation, refuse unmanaged daemon unit authority and require Idle(1)/unreserved when the new unit needs restart\n'
@@ -934,12 +1899,28 @@ preflight_archive_daemon_runtime() {
 
   local load_state fragment_path source_unit source_probe source_supervisor source_boundary source_dropin
   local rendered_unit rendered_dropin
+  local rendered_project_root="$INSTALL_ROOT/current"
   load_state="$(systemctl show trex-daemon-server.service --property=LoadState --value)" || \
     die "unable to inspect daemon authority before archive source mutation"
   fragment_path="$(systemctl show trex-daemon-server.service --property=FragmentPath --value)" || \
     die "unable to inspect daemon fragment before archive source mutation"
   if [[ "$load_state" == "loaded" && "$fragment_path" != "$DAEMON_SYSTEMD_SERVICE_TARGET" ]]; then
     die "refusing archive upgrade over unmanaged trex-daemon-server.service from ${fragment_path:-unknown}"
+  fi
+  if [[ "$load_state" == "loaded" ]]; then
+    assert_loaded_unit_disk_authority \
+      trex-daemon-server.service "$DAEMON_SYSTEMD_SERVICE_TARGET" \
+      "trex-daemon-server.service"
+  fi
+  assert_loaded_unit_not_stale nftables.service "nftables.service"
+  if [[ -e "$NFTABLES_SYSTEMD_DROPIN_TARGET" || -L "$NFTABLES_SYSTEMD_DROPIN_TARGET" ]]; then
+    local nftables_dropins
+    [[ -f "$NFTABLES_SYSTEMD_DROPIN_TARGET" && ! -L "$NFTABLES_SYSTEMD_DROPIN_TARGET" ]] || \
+      die "existing nftables integration drop-in is unsafe"
+    nftables_dropins="$(systemctl show nftables.service --property=DropInPaths --value)" || \
+      die "unable to inspect nftables.service drop-in authority"
+    [[ " $nftables_dropins " == *" $NFTABLES_SYSTEMD_DROPIN_TARGET "* ]] || \
+      die "managed nftables drop-in exists on disk but is not loaded by systemd"
   fi
   if [[ -e "$DAEMON_SYSTEMD_SERVICE_TARGET" || -L "$DAEMON_SYSTEMD_SERVICE_TARGET" ]]; then
     [[ -f "$DAEMON_SYSTEMD_SERVICE_TARGET" && ! -L "$DAEMON_SYSTEMD_SERVICE_TARGET" ]] || \
@@ -964,7 +1945,15 @@ preflight_archive_daemon_runtime() {
   fi
   "$source_boundary" check-service "$NFTABLES_CONFIG_PATH" || \
     die "archive managed-local boundary is not supported by this host"
-  systemctl is-active --quiet trex-daemon-server.service || return 0
+  if ! systemctl is-active --quiet trex-daemon-server.service; then
+    ARCHIVE_DAEMON_MUTATION_EXPECTED=1
+    # An inactive daemon needs candidate host publication/start recovery, but
+    # no disruptive runtime override.  Never let unused broad consent cross
+    # the prepare boundary into the candidate installer.
+    ALLOW_DAEMON_RUNTIME_RESTART=0
+    return 0
+  fi
+  ARCHIVE_DAEMON_WAS_ACTIVE_FOR_PREFLIGHT=1
 
   rendered_unit="$STAGING_ROOT/trex-daemon-server.rendered.service"
   rendered_dropin="$STAGING_ROOT/nftables-trex-webui.rendered.conf"
@@ -974,7 +1963,7 @@ preflight_archive_daemon_runtime() {
   local supervisor_placeholder='@@TREX_DAEMON_SUPERVISOR@@'
   local probe_placeholder='@@TREX_DAEMON_RPC_PROBE@@'
   local boundary_placeholder='@@TREX_DAEMON_NATIVE_BOUNDARY@@'
-  escaped_install_root="$(printf '%s' "$INSTALL_ROOT" | sed 's/[\/&|]/\\&/g')"
+  escaped_install_root="$(printf '%s' "$rendered_project_root" | sed 's/[\/&|]/\\&/g')"
   escaped_scripts="$(printf '%s' "$TREX_DAEMON_SCRIPTS_DIR" | sed 's/[\/&|]/\\&/g')"
   escaped_bin="$(printf '%s' "$TREX_DAEMON_BIN" | sed 's/[\/&|]/\\&/g')"
   escaped_supervisor="$(printf '%s' "$DAEMON_SUPERVISOR_TARGET" | sed 's/[\/&|]/\\&/g')"
@@ -1015,17 +2004,95 @@ preflight_archive_daemon_runtime() {
       restart_required=0
     fi
   fi
-  [[ "$restart_required" -eq 1 ]] || return 0
-  if [[ "$ALLOW_DAEMON_RUNTIME_RESTART" -eq 1 ]]; then
-    printf 'warning: archive maintenance override permits daemon restart without preserving active TRex/reservation state\n' >&2
+  if [[ "$restart_required" -eq 0 ]]; then
+    # The loaded daemon authority already matches the candidate.  The
+    # operator's optional override was unnecessary and must not be forwarded
+    # to any journaled/candidate operation.
+    ALLOW_DAEMON_RUNTIME_RESTART=0
     return 0
   fi
-  /usr/bin/python3 "$source_probe" \
+  ARCHIVE_DAEMON_MUTATION_EXPECTED=1
+  # Prefer the ordinary strict boundary even when the operator supplied an
+  # override.  Broad consent authorizes exactly one pre-prepare convergence
+  # only when the live daemon is actually unsafe.
+  if /usr/bin/python3 "$source_probe" \
     --host 127.0.0.1 \
     --port 8090 \
     --timeout 5 \
-    safe-restart || \
+    safe-restart; then
+    ALLOW_DAEMON_RUNTIME_RESTART=0
+    return 0
+  fi
+  if [[ "$ALLOW_DAEMON_RUNTIME_RESTART" -eq 1 ]]; then
+    printf 'warning: archive maintenance override permits daemon restart without preserving active TRex/reservation state\n' >&2
+    # Consume disruptive consent before any journal/host mutation. Once the
+    # existing generation cold-starts cleanly, every later boundary is strict
+    # and neither the candidate installer nor rollback inherits broad consent.
+    systemctl restart trex-daemon-server.service || \
+      die "maintenance override could not cold-restart the existing daemon before release prepare"
+    /usr/bin/python3 "$source_probe" \
+      --host 127.0.0.1 --port 8090 --timeout 20 ready || \
+      die "maintenance override daemon failed readiness before release prepare"
+    "$source_boundary" verify || \
+      die "maintenance override daemon changed the native boundary before release prepare"
+    /usr/bin/python3 "$source_probe" \
+      --host 127.0.0.1 --port 8090 --timeout 5 safe-restart || \
+      die "maintenance override did not converge the daemon to safe restart state"
+    ARCHIVE_DAEMON_OVERRIDE_CONSUMED=1
+    ALLOW_DAEMON_RUNTIME_RESTART=0
+  else
     die "archive upgrade would restart an unsafe/unknown daemon; stop traffic/cancel reservation first, or explicitly use --allow-daemon-runtime-restart"
+  fi
+}
+
+converge_archive_daemon_runtime_after_recovery_barrier() {
+  [[ -n "$ARCHIVE" && "$MANAGE_LOCAL_DAEMON" -eq 1 && \
+    "$RUN_RESTART" -eq 1 && "$ARCHIVE_DAEMON_MUTATION_EXPECTED" -eq 1 && \
+    "$ARCHIVE_DAEMON_WAS_ACTIVE_FOR_PREFLIGHT" -eq 1 ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ after fixed recovery is durable and consumer rollback is armed, cold-restart and prove the existing daemon authority\n'
+    return 0
+  fi
+  # This is deliberately the first daemon mutation.  The candidate journal
+  # has already captured the exact active state and native boundary, while the
+  # independent retry unit is waiting on the outer deployment lock.
+  systemctl restart trex-daemon-server.service || \
+    die "existing daemon host integration cannot cold-start after recovery arm"
+  /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
+    --host 127.0.0.1 --port 8090 --timeout 20 ready || \
+    die "existing daemon host integration failed readiness after cold restart"
+  "$DAEMON_NATIVE_BOUNDARY_TARGET" verify || \
+    die "existing daemon native boundary failed after cold restart"
+}
+
+mark_archive_daemon_mutation_started() {
+  [[ -n "$ARCHIVE" && "$MANAGE_LOCAL_DAEMON" -eq 1 && \
+    "$RUN_RESTART" -eq 1 && "$ARCHIVE_DAEMON_MUTATION_EXPECTED" -eq 1 ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ fsync managed daemon mutation intent immediately before the first possible daemon/host mutation\n'
+    return 0
+  fi
+  release_engine mark-daemon-mutation-started \
+    --transaction-id "$RELEASE_TRANSACTION_ID" >/dev/null || \
+    die "unable to durably arm managed daemon mutation recovery"
+}
+
+post_fence_archive_runtime_preflight() {
+  [[ -n "$ARCHIVE" && "$MANAGE_LOCAL_DAEMON" -eq 1 && \
+    "$RUN_RESTART" -eq 1 ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ after Nginx and API are fenced, verify persisted runtime, daemon safe-restart, and the native boundary through fixed validators\n'
+    return 0
+  fi
+  /usr/bin/python3 "$TREX_PERSISTED_STATE_VALIDATOR_TARGET" \
+    "$SERVICE_RUNTIME_STATE_PATH" || \
+    die "canonical runtime state is not quiescent after fencing API control"
+  if [[ "$ARCHIVE_DAEMON_MUTATION_EXPECTED" -eq 1 && \
+    "$ARCHIVE_DAEMON_WAS_ACTIVE_FOR_PREFLIGHT" -eq 1 ]]; then
+    /usr/bin/python3 "$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET" \
+      --host 127.0.0.1 --port 8090 --timeout 5 safe-restart || \
+      die "daemon runtime changed before the armed archive mutation boundary"
+  fi
 }
 
 preflight_managed_api_environment() {
@@ -1039,31 +2106,652 @@ preflight_managed_api_environment() {
   fi
 }
 
+require_archive_transaction_contract() {
+  [[ -n "$ARCHIVE" ]] || return 0
+  if [[ "$DRY_RUN" -eq 1 || "$INSTALL_ROOT" != "/opt/trex-webui" ]]; then
+    return 0
+  fi
+  [[ "$RUN_RESTART" -eq 1 ]] || \
+    die "archive releases require restart/readiness before an atomic commit"
+  [[ "$INSTALL_PYTHON_DEPS" -eq 1 ]] || \
+    die "archive releases require a candidate-owned Python runtime; remove --skip-python-deps"
+  # Archive activation is not complete until the full deployment verifier has
+  # observed the candidate API and its static files through the live service.
+  RUN_VERIFY=1
+}
+
+require_production_archive_host_authority() {
+  [[ -n "$ARCHIVE" && "$DRY_RUN" -eq 0 ]] || return 0
+  [[ "$INSTALL_ROOT" == "/opt/trex-webui" && \
+    "$RELEASE_STATE_ROOT" == "/var/lib/trex-webui-deploy" ]] || \
+    die "non-dry-run archive upgrades require the production install/state authority pair"
+}
+
+preflight_release_systemd_shadow_authority() {
+  [[ "$DRY_RUN" -eq 0 && "$INSTALL_ROOT" == "/opt/trex-webui" && \
+    ( -n "$ARCHIVE" || "$ROLLBACK_PREVIOUS" -eq 1 ) ]] || return 0
+  local unit expected_fragment load_state fragment need_reload dropins
+  while IFS='|' read -r unit expected_fragment; do
+    load_state="$(systemctl show "$unit" --property=LoadState --value)" || \
+      die "unable to inspect fixed release unit $unit before host mutation"
+    if [[ "$load_state" == "not-found" ]]; then
+      continue
+    fi
+    [[ "$load_state" == "loaded" ]] || \
+      die "fixed release unit $unit has unexpected LoadState $load_state"
+    fragment="$(systemctl show "$unit" --property=FragmentPath --value)" || \
+      die "unable to inspect fixed release unit $unit FragmentPath"
+    need_reload="$(systemctl show "$unit" --property=NeedDaemonReload --value)" || \
+      die "unable to inspect fixed release unit $unit disk authority"
+    dropins="$(systemctl show "$unit" --property=DropInPaths --value)" || \
+      die "unable to inspect fixed release unit $unit drop-in authority"
+    [[ "$fragment" == "$expected_fragment" && "$need_reload" == "no" && \
+      -z "$dropins" ]] || \
+      die "fixed release unit $unit is shadowed or has unmanaged loaded authority"
+  done <<EOF
+trex-webui-release-reconcile.service|$RELEASE_RECONCILER_UNIT_TARGET
+trex-webui-release-retry.service|$RELEASE_RECONCILER_RETRY_UNIT_TARGET
+trex-webui-release-consumer-ack.service|$RELEASE_RECONCILER_ACK_UNIT_TARGET
+EOF
+
+  local expected_dropin
+  for unit in trex-webui-api.service trex-daemon-server.service nginx.service; do
+    if [[ "$unit" == "trex-daemon-server.service" && \
+      "$MANAGE_LOCAL_DAEMON" -eq 0 ]]; then
+      [[ ! -e "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" && \
+        ! -L "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" ]] || \
+        die "external-daemon mode found a managed release dependency drop-in; remove $RELEASE_RECONCILER_DAEMON_DROPIN_TARGET before retrying"
+      load_state="$(systemctl show "$unit" --property=LoadState --value)" || \
+        die "unable to inspect external daemon release drop-in authority"
+      if [[ "$load_state" == "loaded" ]]; then
+        dropins="$(systemctl show "$unit" --property=DropInPaths --value)" || \
+          die "unable to inspect external daemon release drop-in authority"
+        [[ " $dropins " != *" $RELEASE_RECONCILER_DAEMON_DROPIN_TARGET "* ]] || \
+          die "external-daemon mode has the managed release dependency drop-in loaded; remove it and run systemctl daemon-reload"
+      fi
+      # Every other fragment/drop-in/native decision belongs to the external
+      # daemon operator and is deliberately outside this deployment.
+      continue
+    fi
+    load_state="$(systemctl show "$unit" --property=LoadState --value)" || \
+      die "unable to inspect consumer unit $unit before host mutation"
+    [[ "$load_state" == "loaded" || "$load_state" == "not-found" ]] || \
+      die "consumer unit $unit has unexpected LoadState $load_state"
+    [[ "$load_state" == "loaded" ]] || continue
+    need_reload="$(systemctl show "$unit" --property=NeedDaemonReload --value)" || \
+      die "unable to inspect consumer unit $unit disk authority"
+    dropins="$(systemctl show "$unit" --property=DropInPaths --value)" || \
+      die "unable to inspect consumer unit $unit drop-in authority"
+    case "$unit" in
+      trex-webui-api.service)
+        expected_dropin="$RELEASE_RECONCILER_API_DROPIN_TARGET"
+        ;;
+      trex-daemon-server.service)
+        expected_dropin="$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET"
+        ;;
+      nginx.service)
+        expected_dropin="$RELEASE_RECONCILER_NGINX_DROPIN_TARGET"
+        ;;
+    esac
+    [[ "$need_reload" == "no" && \
+      ( -z "$dropins" || "$dropins" == "$expected_dropin" ) ]] || \
+      die "consumer unit $unit is stale, shadowed, or has unmanaged drop-in authority"
+  done
+}
+
+arm_installed_release_reconciler() {
+  RELEASE_TRANSACTION_ENGINE="$RELEASE_RECONCILER_TARGET"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ validate and reload the transient installed release reconciler, then run it while the outer deployment lock is held\n'
+    return 0
+  fi
+  [[ -f "$RELEASE_RECONCILER_TARGET" && ! -L "$RELEASE_RECONCILER_TARGET" && \
+    -x "$RELEASE_RECONCILER_TARGET" ]] || \
+    die "installed release reconciler is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_TARGET")" == "0:0 755 1" ]] || \
+    die "installed release reconciler must be root:root 0755 with one link"
+  [[ -f "$RELEASE_BOOTSTRAP_TARGET" && ! -L "$RELEASE_BOOTSTRAP_TARGET" && \
+    -x "$RELEASE_BOOTSTRAP_TARGET" && \
+    "$(stat -c '%u:%g %a %h' "$RELEASE_BOOTSTRAP_TARGET")" == "0:0 755 1" ]] || \
+    die "installed release infrastructure verifier is missing or unsafe"
+  local common_expected=(
+    --expected "$RELEASE_BOOTSTRAP_TARGET::0755::prerequisite"
+    --expected "$RELEASE_RECONCILER_TARGET::0755::prerequisite"
+    --expected "$TREX_OVERVIEW_VALIDATOR_TARGET::0755::prerequisite"
+    --expected "$TREX_PERSISTED_STATE_VALIDATOR_TARGET::0755::prerequisite"
+    --expected "$RELEASE_RECONCILER_UNIT_TARGET::0644::prerequisite"
+    --expected "$RELEASE_RECONCILER_RETRY_UNIT_TARGET::0644::prerequisite"
+    --expected "$RELEASE_RECONCILER_ACK_UNIT_TARGET::0644::prerequisite"
+    --expected "$RELEASE_RECONCILER_API_DROPIN_TARGET::0644::consumer-dropin"
+    --expected "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET::0644::consumer-dropin"
+  )
+  /usr/bin/python3 "$RELEASE_BOOTSTRAP_TARGET" \
+    --manifest "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" \
+    --verify-installed "${common_expected[@]}" || \
+    die "installed common release infrastructure failed exact manifest verification"
+  if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
+    local managed_expected=(
+      --expected "$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET::0755::prerequisite"
+      --expected "$RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET::0755::prerequisite"
+      --expected "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET::0644::consumer-dropin"
+    )
+    /usr/bin/python3 "$RELEASE_BOOTSTRAP_TARGET" \
+      --manifest "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" \
+      --verify-installed "${managed_expected[@]}" || \
+      die "installed managed-local release infrastructure failed exact manifest verification"
+  fi
+  [[ -f "$RELEASE_RECONCILER_UNIT_TARGET" && ! -L "$RELEASE_RECONCILER_UNIT_TARGET" ]] || \
+    die "installed release reconciler unit is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_UNIT_TARGET")" == "0:0 644 1" ]] || \
+    die "installed release reconciler unit must be root:root 0644 with one link"
+  grep -Fqx 'Type=oneshot' "$RELEASE_RECONCILER_UNIT_TARGET" || \
+    die "installed release reconciler is not a transient oneshot"
+  ! grep -Fq 'RemainAfterExit=yes' "$RELEASE_RECONCILER_UNIT_TARGET" || \
+    die "installed release reconciler would suppress recovery on later consumer starts"
+  grep -Fq -- '--deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile' \
+    "$RELEASE_RECONCILER_UNIT_TARGET" || \
+    die "installed release reconciler does not supervise boot recovery under the outer deployment lock"
+  grep -Fqx 'TimeoutStartSec=infinity' "$RELEASE_RECONCILER_UNIT_TARGET" || \
+    die "installed release reconciler can time out while consumers wait"
+  [[ -f "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" && \
+    ! -L "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" && \
+    "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_RETRY_UNIT_TARGET")" == "0:0 644 1" ]] || \
+    die "installed release retry unit is missing or unsafe"
+  grep -Fq -- '--retry-on-lock-busy reconcile' \
+    "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" || \
+    die "installed release retry unit does not retry the outer deployment lock"
+  grep -Fqx 'Restart=on-failure' "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" || \
+    die "installed release retry unit is not persistent"
+  grep -Fqx 'StartLimitIntervalSec=0' "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" || \
+    die "installed release retry unit has a bounded retry window"
+  [[ -f "$RELEASE_RECONCILER_ACK_UNIT_TARGET" && \
+    ! -L "$RELEASE_RECONCILER_ACK_UNIT_TARGET" && \
+    "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_ACK_UNIT_TARGET")" == "0:0 644 1" ]] || \
+    die "installed release acknowledgement unit is missing or unsafe"
+  systemctl daemon-reload || die "unable to reload the installed release reconciler"
+  assert_loaded_release_infrastructure_unit \
+    trex-webui-release-reconcile.service \
+    "$RELEASE_RECONCILER_UNIT_TARGET" \
+    "release reconciler" \
+    "$RELEASE_RECONCILER_TARGET --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile"
+  assert_loaded_release_infrastructure_unit \
+    trex-webui-release-retry.service \
+    "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" \
+    "release retry" \
+    "$RELEASE_RECONCILER_TARGET --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile"
+  assert_loaded_release_infrastructure_unit \
+    trex-webui-release-consumer-ack.service \
+    "$RELEASE_RECONCILER_ACK_UNIT_TARGET" \
+    "release consumer acknowledgement" \
+    "$RELEASE_RECONCILER_TARGET ack-consumers"
+  systemctl enable trex-webui-release-reconcile.service || \
+    die "unable to durably enable boot-time release reconciliation"
+  sync --file-system /etc/systemd/system || \
+    die "unable to persist boot-time release reconciliation enablement"
+  systemctl is-enabled --quiet trex-webui-release-reconcile.service || \
+    die "boot-time release reconciliation enablement did not persist"
+  systemctl restart trex-webui-release-reconcile.service || \
+    die "unable to arm release reconciliation before selector mutation"
+  systemctl start --no-block trex-webui-release-retry.service || \
+    die "unable to queue independent reconciliation retry before selector mutation"
+  local retry_active retry_substate retry_job retry_attempt
+  for ((retry_attempt = 1; retry_attempt <= 40; retry_attempt += 1)); do
+    retry_active="$(systemctl show trex-webui-release-retry.service --property=ActiveState --value)" || \
+      die "unable to inspect queued release retry state"
+    retry_substate="$(systemctl show trex-webui-release-retry.service --property=SubState --value)" || \
+      die "unable to inspect queued release retry substate"
+    retry_job="$(systemctl show trex-webui-release-retry.service --property=Job --value)" || \
+      die "unable to inspect queued release retry job"
+    if [[ "$retry_active" =~ ^(active|activating)$ || \
+      "$retry_substate" == "auto-restart" || -n "$retry_job" ]]; then
+      break
+    fi
+    ((retry_attempt < 40)) && sleep 0.05
+  done
+  [[ "$retry_active" =~ ^(active|activating)$ || \
+    "$retry_substate" == "auto-restart" || -n "$retry_job" ]] || \
+    die "independent release retry was not durably queued"
+}
+
+assert_loaded_release_infrastructure_unit() {
+  local unit="$1"
+  local expected_fragment="$2"
+  local label="$3"
+  local expected_exec="$4"
+  local load_state fragment need_reload dropins loaded_exec restart
+  load_state="$(systemctl show "$unit" --property=LoadState --value)" || \
+    die "unable to inspect $label LoadState"
+  fragment="$(systemctl show "$unit" --property=FragmentPath --value)" || \
+    die "unable to inspect $label FragmentPath"
+  need_reload="$(systemctl show "$unit" --property=NeedDaemonReload --value)" || \
+    die "unable to inspect $label NeedDaemonReload"
+  dropins="$(systemctl show "$unit" --property=DropInPaths --value)" || \
+    die "unable to inspect $label DropInPaths"
+  loaded_exec="$(systemctl show "$unit" --property=ExecStart --value)" || \
+    die "unable to inspect $label ExecStart"
+  restart="$(systemctl show "$unit" --property=Restart --value)" || \
+    die "unable to inspect $label Restart policy"
+  [[ "$load_state" == "loaded" && "$fragment" == "$expected_fragment" && \
+    "$need_reload" == "no" && -z "$dropins" && \
+    "$loaded_exec" == *"$expected_exec"* && "$restart" == "on-failure" ]] || \
+    die "$label loaded authority differs from its fixed ABI artifact"
+}
+
+prepare_previous_release() {
+  RELEASE_TRANSACTION_ENGINE="$RELEASE_RECONCILER_TARGET"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    RELEASE_CANDIDATE_DIGEST="$(printf '%064d' 0)"
+    RELEASE_PROJECT_ROOT="$INSTALL_ROOT/releases/sha256-$RELEASE_CANDIDATE_DIGEST"
+    RELEASE_TRANSACTION_PREPARED=1
+    RELEASE_CURRENT_BEFORE=""
+    if [[ -L "$INSTALL_ROOT/current" && \
+      "$(readlink -- "$INSTALL_ROOT/current")" =~ ^releases/sha256-([0-9a-f]{64})$ ]]; then
+      RELEASE_CURRENT_BEFORE="${BASH_REMATCH[1]}"
+    fi
+    printf '+ prepare the validated previous selector as a durable N-1 transaction\n'
+    return 0
+  fi
+  RELEASE_TRANSACTION_PREPARED=1
+  RELEASE_TRANSACTION_COMMITTED=0
+  local prepared
+  local prepare_args=(prepare-previous)
+  if [[ "$INSTALL_ROOT" == "/opt/trex-webui" && \
+    "$RELEASE_STATE_ROOT" == "/var/lib/trex-webui-deploy" ]]; then
+    prepare_args+=(--host-profile common)
+  fi
+  prepared="$(release_engine "${prepare_args[@]}")" || \
+    die "unable to prepare the retained N-1 release"
+  RELEASE_TRANSACTION_ID="$(release_json_field transaction_id <<<"$prepared")" || \
+    die "N-1 rollback preparation omitted its transaction id"
+  RELEASE_CANDIDATE_DIGEST="$(release_json_field candidate <<<"$prepared")" || \
+    die "N-1 rollback preparation omitted its candidate digest"
+  RELEASE_CURRENT_BEFORE="$(release_json_optional_field current_before <<<"$prepared")" || \
+    die "N-1 rollback preparation omitted its prior current authority"
+  RELEASE_PROJECT_ROOT="$INSTALL_ROOT/releases/sha256-$RELEASE_CANDIDATE_DIGEST"
+  [[ -d "$RELEASE_PROJECT_ROOT" && ! -L "$RELEASE_PROJECT_ROOT" ]] || \
+    die "retained N-1 release is missing"
+  [[ -x "$RELEASE_PROJECT_ROOT/.venv/bin/python" ]] || \
+    die "retained N-1 release has no executable API runtime"
+  [[ -f "$RELEASE_PROJECT_ROOT/apps/web/dist/index.html" && \
+    ! -L "$RELEASE_PROJECT_ROOT/apps/web/dist/index.html" ]] || \
+    die "retained N-1 release has no safe frontend entrypoint"
+}
+
+preflight_previous_release_consumers() {
+  have_cmd systemctl || die "systemctl is required for N-1 rollback"
+  have_cmd curl || die "curl is required for N-1 rollback readiness verification"
+  have_cmd nginx || die "nginx is required for N-1 rollback configuration verification"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ require active selector-based API and Nginx consumers before N-1 mutation\n'
+    return 0
+  fi
+  preflight_release_systemd_shadow_authority
+  [[ -f "$NGINX_CONF_TARGET" && ! -L "$NGINX_CONF_TARGET" ]] || \
+    die "managed Nginx configuration is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$NGINX_CONF_TARGET")" == "0:0 644 1" ]] || \
+    die "managed Nginx configuration must be root:root 0644 with one link"
+  [[ "$(grep -Fxc '    root /opt/trex-webui/current/apps/web/dist;' "$NGINX_CONF_TARGET")" -eq 1 ]] || \
+    die "Nginx does not consume the atomic current selector"
+  capture_archive_api_service_state
+  [[ "$ARCHIVE_API_SERVICE_MATCHED" -eq 1 && \
+    "$ARCHIVE_API_OLD_PROJECT_ROOT" == "$INSTALL_ROOT/current" ]] || \
+    die "trex-webui-api.service does not consume the atomic current selector"
+  [[ "$ARCHIVE_API_WAS_ACTIVE" -eq 1 ]] || \
+    die "trex-webui-api.service must be active before N-1 rollback"
+  if systemctl is-active --quiet nginx.service || systemctl is-active --quiet nginx; then
+    ROLLBACK_NGINX_WAS_ACTIVE=1
+  else
+    die "nginx must be active before N-1 rollback"
+  fi
+  nginx -t || die "Nginx configuration is invalid before N-1 rollback"
+}
+
+validate_previous_release_runtime_evidence() {
+  local runtime_payload="$1"
+  local capture_payload="$2"
+  local quick_validation_payload="$3"
+  python3.11 - "$runtime_payload" "$capture_payload" "$quick_validation_payload" <<'PY'
+from __future__ import annotations
+
+import json
+import sys
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"N-1 rollback runtime preflight failed: {message}")
+
+
+def payload(index: int, label: str) -> dict[str, object]:
+    try:
+        value = json.loads(sys.argv[index])
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        fail(f"{label} evidence is not valid JSON: {exc}")
+    if not isinstance(value, dict) or value.get("ok") is not True:
+        fail(f"{label} evidence did not report ok")
+    data = value.get("data")
+    if not isinstance(data, dict):
+        fail(f"{label} evidence omitted its canonical data object")
+    return data
+
+
+runtime = payload(1, "traffic runtime")
+if runtime.get("live_state_sampled") is not True:
+    fail("traffic runtime did not sample live state")
+if runtime.get("mutation_intent") is not None:
+    fail("traffic mutation recovery is still pending")
+session = runtime.get("session")
+if session is not None:
+    if not isinstance(session, dict) or session.get("state") != "stopped":
+        fail("canonical traffic session is active or unknown")
+records = runtime.get("port_states")
+if not isinstance(records, list):
+    fail("traffic runtime omitted typed port state evidence")
+seen: set[int] = set()
+for record in records:
+    if not isinstance(record, dict):
+        fail("traffic runtime contains an invalid port record")
+    port = record.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or port < 0 or port in seen:
+        fail("traffic runtime contains an invalid or duplicate port identity")
+    seen.add(port)
+    if record.get("state") != "stopped":
+        fail(f"port {port} is active or unknown")
+    if record.get("ownership") != "none":
+        fail(f"port {port} ownership is not released")
+available = runtime.get("available_ports")
+if (
+    not isinstance(available, list)
+    or any(isinstance(port, bool) or not isinstance(port, int) or port < 0 for port in available)
+    or len(available) != len(set(available))
+    or set(available) != seen
+):
+    fail("available ports do not exactly match stopped, unowned live evidence")
+
+capture = payload(2, "capture")
+captures = capture.get("captures")
+if not isinstance(captures, list) or captures:
+    fail("managed or external capture recorders are still active")
+usage = capture.get("port_usage")
+if not isinstance(usage, list):
+    fail("capture port usage evidence is missing or invalid")
+for record in usage:
+    if not isinstance(record, dict):
+        fail("capture port usage evidence contains an invalid record")
+    for key in ("rx_recorder_ids", "tx_recorder_ids"):
+        identifiers = record.get(key)
+        if not isinstance(identifiers, list) or identifiers:
+            fail("capture recorder ownership is not released")
+service_mode = capture.get("service_mode")
+if not isinstance(service_mode, dict):
+    fail("capture service-mode evidence is missing or invalid")
+identifiers = service_mode.get("managed_capture_ids")
+if not isinstance(identifiers, list) or identifiers:
+    fail("managed capture ownership is not released")
+
+quick_validation = payload(3, "quick validation")
+if quick_validation.get("active") is not False:
+    fail("quick validation is still active or unknown")
+if quick_validation.get("recovery_required") is not False:
+    fail("quick-validation recovery is still pending")
+PY
+}
+
+preflight_previous_release_runtime() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ require canonical live traffic idle/unowned, no mutation recovery, no captures, and no quick-validation recovery before stopping the API\n'
+    return 0
+  fi
+  local runtime_payload capture_payload quick_validation_payload
+  local quick_validation_body quick_validation_status
+  release_engine status >/dev/null || \
+    die "selected release authority is invalid before N-1 runtime sampling"
+  runtime_payload="$(curl -fsS --noproxy '*' --connect-timeout 2 --max-time 8 \
+    "http://127.0.0.1/api/trex/traffic/runtime")" || \
+    die "unable to sample canonical traffic runtime before N-1 rollback"
+  capture_payload="$(curl -fsS --noproxy '*' --connect-timeout 2 --max-time 8 \
+    "http://127.0.0.1/api/trex/capture/status")" || \
+    die "unable to sample capture authority before N-1 rollback"
+  quick_validation_body="$(mktemp -t trex-webui-qv-preflight.XXXXXX)" || \
+    die "unable to stage quick-validation preflight evidence"
+  quick_validation_status="$(curl -sS --noproxy '*' --connect-timeout 2 --max-time 8 \
+    --output "$quick_validation_body" --write-out '%{http_code}' \
+    "http://127.0.0.1/api/trex/quick-validation")" || {
+      rm -f -- "$quick_validation_body"
+      die "unable to sample quick-validation recovery before N-1 rollback"
+    }
+  if [[ -f "$INSTALL_ROOT/current/apps/api/app/trex/quick_validation.py" ]]; then
+    [[ "$quick_validation_status" == "200" ]] || {
+      rm -f -- "$quick_validation_body"
+      die "quick-validation-capable selected release did not expose canonical recovery evidence"
+    }
+    quick_validation_payload="$(<"$quick_validation_body")"
+  else
+    [[ "$quick_validation_status" == "404" ]] || {
+      rm -f -- "$quick_validation_body"
+      die "legacy selected release returned an unexpected quick-validation response"
+    }
+    # A 404 is accepted only when the already-validated immutable selected
+    # release truly predates the capability. The newer rollback wrapper still
+    # validates the shared persistent RuntimeState and QuickValidationState.
+    validate_persisted_previous_release_runtime_state \
+      "$SERVICE_RUNTIME_STATE_PATH" || {
+        rm -f -- "$quick_validation_body"
+        die "wrapper authority found pending persistent state behind the legacy API"
+      }
+    quick_validation_payload='{"ok":true,"data":{"active":false,"recovery_required":false}}'
+  fi
+  rm -f -- "$quick_validation_body"
+  validate_previous_release_runtime_evidence \
+    "$runtime_payload" \
+    "$capture_payload" \
+    "$quick_validation_payload" || \
+    die "runtime authority is not quiescent enough for N-1 rollback"
+  if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
+    /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
+      --host 127.0.0.1 \
+      --port 8090 \
+      --timeout 5 \
+      safe-restart || \
+      die "TRex daemon is running, reserved, or unknown; refusing N-1 rollback"
+  fi
+}
+
+cold_restart_forward_daemon_for_previous_release() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ after idle/unreserved proof, cold-restart the current forward daemon host generation and verify RPC/native-boundary readiness before the N-1 snapshot\n'
+    return 0
+  fi
+  [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]] || \
+    die "N-1 forward daemon convergence requires the installer-managed local daemon"
+  assert_loaded_unit_disk_authority \
+    trex-daemon-server.service "$DAEMON_SYSTEMD_SERVICE_TARGET" \
+    "trex-daemon-server.service"
+  assert_loaded_unit_not_stale nftables.service "nftables.service"
+  local target nftables_dropins
+  for target in \
+    "$DAEMON_SYSTEMD_SERVICE_TARGET" \
+    "$DAEMON_LOGROTATE_TARGET" \
+    "$DAEMON_SUPERVISOR_TARGET" \
+    "$DAEMON_RPC_PROBE_TARGET" \
+    "$DAEMON_NATIVE_BOUNDARY_TARGET" \
+    "$NFTABLES_SYSTEMD_DROPIN_TARGET"; do
+    [[ -f "$target" && ! -L "$target" ]] || \
+      die "N-1 forward daemon host authority is missing or unsafe: $target"
+    trex_assert_root_controlled_authority_path "$target" \
+      "N-1 forward daemon host authority" || \
+      die "N-1 forward daemon host authority is not root-controlled: $target"
+  done
+  grep -Fqx '# Managed by TRex WebUI deploy/install.sh.' \
+    "$DAEMON_SYSTEMD_SERVICE_TARGET" || \
+    die "N-1 forward daemon unit is not installer-managed"
+  grep -Fqx '# Managed by TRex WebUI deploy/install.sh.' \
+    "$NFTABLES_SYSTEMD_DROPIN_TARGET" || \
+    die "N-1 forward nftables integration is not installer-managed"
+  nftables_dropins="$(systemctl show nftables.service --property=DropInPaths --value)" || \
+    die "unable to inspect N-1 forward nftables drop-in authority"
+  [[ " $nftables_dropins " == *" $NFTABLES_SYSTEMD_DROPIN_TARGET "* ]] || \
+    die "N-1 forward nftables integration is not loaded by systemd"
+  /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
+    --host 127.0.0.1 --port 8090 --timeout 5 safe-restart || \
+    die "forward daemon became unsafe before its cold-start authority proof"
+  systemctl restart trex-daemon-server.service || \
+    die "forward daemon host generation cannot cold-start before the N-1 snapshot"
+  /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
+    --host 127.0.0.1 --port 8090 --timeout 20 ready || \
+    die "forward daemon host generation failed readiness after cold restart"
+  "$DAEMON_NATIVE_BOUNDARY_TARGET" verify || \
+    die "forward daemon native boundary failed after cold restart"
+}
+
+validate_persisted_previous_release_runtime_state() {
+  local state_path="$1"
+  /usr/bin/python3 "$TREX_PERSISTED_STATE_VALIDATOR_TARGET" "$state_path"
+}
+
+post_stop_previous_release_runtime_preflight() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ after stopping the API, reload canonical persistent runtime state with the current release and recheck managed-daemon safe-restart\n'
+    return 0
+  fi
+  [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]] || \
+    die "post-stop N-1 validation requires the installer-managed local daemon"
+  validate_persisted_previous_release_runtime_state \
+    "$SERVICE_RUNTIME_STATE_PATH" || \
+    die "canonical persistent runtime state is not quiescent under the rollback wrapper authority after stopping the API"
+  /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
+    --host 127.0.0.1 \
+    --port 8090 \
+    --timeout 5 \
+    safe-restart || \
+    die "TRex daemon became running, reserved, or unknown after stopping the API"
+}
+
+verify_previous_release_readiness() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ restart selector-based API and Nginx, verify API identity/health and exact selected frontend bytes, then commit\n'
+    return 0
+  fi
+  systemctl restart trex-webui-api.service || \
+    die "unable to start the N-1 API release"
+  wait_for_restored_archive_api_readiness || \
+    die "N-1 API readiness verification failed"
+  verify_restored_archive_api_identity \
+    "$INSTALL_ROOT/current/.venv/bin/python" \
+    "$INSTALL_ROOT/current" || \
+    die "N-1 API runtime identity verification failed"
+
+  nginx -t || die "Nginx configuration became invalid during N-1 rollback"
+  systemctl restart nginx || die "unable to restart Nginx for the N-1 release"
+  systemctl is-active --quiet nginx.service || \
+    systemctl is-active --quiet nginx || \
+    die "Nginx is not active for the N-1 release"
+  local frontend_body
+  frontend_body="$(mktemp -t trex-webui-rollback-index.XXXXXX)" || \
+    die "unable to stage N-1 frontend readiness response"
+  if ! curl -fsS --noproxy '*' \
+    --connect-timeout 2 --max-time 8 \
+    --output "$frontend_body" \
+    "http://127.0.0.1/"; then
+    rm -f -- "$frontend_body"
+    die "N-1 frontend readiness request failed"
+  fi
+  if ! cmp -s "$frontend_body" "$RELEASE_PROJECT_ROOT/apps/web/dist/index.html"; then
+    rm -f -- "$frontend_body"
+    die "Nginx did not serve the exact selected N-1 frontend entrypoint"
+  fi
+  rm -f -- "$frontend_body"
+  /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
+    --host 127.0.0.1 --port 8090 --timeout 5 ready || \
+    die "forward host integration daemon is not RPC-ready for the N-1 API"
+  local overview overview_validator="$TREX_OVERVIEW_VALIDATOR_TARGET"
+  [[ -f "$overview_validator" && ! -L "$overview_validator" ]] || \
+    die "rollback wrapper is missing the strict TRex overview contract"
+  overview="$(curl -fsS --noproxy '*' --connect-timeout 2 --max-time 8 \
+    "http://127.0.0.1/api/system/overview")" || \
+    die "N-1 real TRex overview request failed"
+  python3.11 "$overview_validator" <<<"$overview" || \
+    die "N-1 API is incompatible with the forward host/daemon integration"
+}
+
+run_previous_release_rollback() {
+  log "Preparing guarded rollback to the retained N-1 release"
+  preflight_previous_release_consumers
+  arm_installed_release_reconciler
+  preflight_previous_release_runtime
+  cold_restart_forward_daemon_for_previous_release
+  # A cold start can expose helper/disk drift that an already-running daemon
+  # concealed. Re-sample every canonical runtime authority before journaling.
+  preflight_previous_release_runtime
+  prepare_previous_release
+  prelabel_versioned_release_for_selinux
+  preflight_previous_release_runtime
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    arm_versioned_release_consumers n-minus-one
+    stop_versioned_release_consumers_for_selector_mutation
+  else
+    arm_versioned_release_consumers n-minus-one
+  fi
+  post_stop_previous_release_runtime_preflight
+  ROLLBACK_NGINX_MUTATION_GUARD_APPLIED=1
+  activate_versioned_release
+  verify_previous_release_readiness
+  commit_versioned_release
+  ARCHIVE_API_MUTATION_GUARD_APPLIED=0
+  ROLLBACK_NGINX_MUTATION_GUARD_APPLIED=0
+  log "N-1 release rollback committed after API and Nginx readiness verification"
+}
+
 main() {
   parse_args "$@"
   normalize_paths
-  if [[ -z "$ARCHIVE" ]]; then
+  if [[ -z "$ARCHIVE" && "$ROLLBACK_PREVIOUS" -eq 0 ]]; then
     printf 'warning: checkout upgrade cannot roll back source changes made before this command; use --archive for rollback-backed production upgrades\n' >&2
   fi
   require_root_for_archive
-  preflight_managed_api_environment
   if [[ "$DRY_RUN" -eq 0 ]]; then
     trex_acquire_deployment_lock || die "another deployment transaction is active or the deployment lock is unsafe"
+  fi
+  preflight_managed_api_environment
+  if [[ "$ROLLBACK_PREVIOUS" -eq 1 ]]; then
+    run_previous_release_rollback
+    log "TRex WebUI rollback complete"
+    return 0
   fi
   stage_archive
   check_archive
   extract_and_verify_archive
-  validate_preserved_project_runtimes
-  preflight_archive_daemon_runtime
+  require_production_archive_host_authority
+  require_archive_transaction_contract
+  preflight_release_systemd_shadow_authority
   if [[ -n "$ARCHIVE" ]]; then
     capture_archive_api_service_state
   fi
-  backup_install_root
-  if [[ -n "$ARCHIVE" && "$DRY_RUN" -eq 0 ]]; then
-    stop_archive_api_service_for_source_mutation
+  preflight_archive_daemon_runtime
+  if [[ -n "$ARCHIVE" ]]; then
+    bootstrap_release_reconciler
+    prepare_legacy_baseline
+    prepare_versioned_release
+    attach_candidate_dotenv
+    prelabel_versioned_release_for_selinux
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+      arm_versioned_release_consumers archive
+      stop_versioned_release_consumers_for_selector_mutation
+      post_fence_archive_runtime_preflight
+      mark_archive_daemon_mutation_started
+      converge_archive_daemon_runtime_after_recovery_barrier
+    else
+      arm_versioned_release_consumers archive
+      stop_versioned_release_consumers_for_selector_mutation
+      post_fence_archive_runtime_preflight
+      mark_archive_daemon_mutation_started
+      converge_archive_daemon_runtime_after_recovery_barrier
+    fi
+    activate_versioned_release
+    run_install
+    commit_versioned_release
+  else
+    run_install
   fi
-  sync_archive_source
-  run_install
   log "TRex WebUI upgrade complete"
 }
 

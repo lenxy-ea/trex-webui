@@ -6,6 +6,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DAEMON_UNIT="$PROJECT_ROOT/deploy/systemd/trex-daemon-server.service"
 NFTABLES_DROPIN="$PROJECT_ROOT/deploy/systemd/nftables-trex-webui.conf"
 API_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-api.service"
+RECONCILE_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service"
+RETRY_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry.service"
+ACK_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack.service"
 PROBE="$PROJECT_ROOT/deploy/daemon_rpc_probe.py"
 SUPERVISOR="$PROJECT_ROOT/deploy/trex_daemon_supervisor.py"
 SUPERVISOR_TEST="$PROJECT_ROOT/deploy/tests/daemon_supervisor_test.py"
@@ -26,6 +29,12 @@ assert_unit_line() {
 }
 
 [[ -f "$DAEMON_UNIT" && ! -L "$DAEMON_UNIT" ]] || fail "daemon unit template is missing or unsafe"
+[[ -f "$RECONCILE_UNIT" && ! -L "$RECONCILE_UNIT" ]] || \
+  fail "release reconciler unit template is missing or unsafe"
+[[ -f "$RETRY_UNIT" && ! -L "$RETRY_UNIT" ]] || \
+  fail "release retry unit template is missing or unsafe"
+[[ -f "$ACK_UNIT" && ! -L "$ACK_UNIT" ]] || \
+  fail "release consumer acknowledgement unit template is missing or unsafe"
 [[ -f "$NFTABLES_DROPIN" && ! -L "$NFTABLES_DROPIN" ]] || \
   fail "nftables integration drop-in is missing or unsafe"
 [[ -f "$PROBE" && ! -L "$PROBE" ]] || fail "strict daemon RPC probe is missing or unsafe"
@@ -91,7 +100,10 @@ fi
 if grep -Eq -- '^ConditionPathIsExecutable=' "$DAEMON_UNIT"; then
   fail "daemon unit uses unsupported ConditionPathIsExecutable"
 fi
-assert_unit_line "$API_UNIT" "After=network-online.target"
+assert_unit_line "$API_UNIT" \
+  "After=network-online.target trex-webui-release-reconcile.service"
+assert_unit_line "$API_UNIT" \
+  "Requires=trex-webui-release-reconcile.service"
 assert_unit_line "$API_UNIT" "Wants=network-online.target"
 assert_unit_line "$API_UNIT" \
   "Environment=TREX_WEBUI_RUNTIME_STATE_PATH=/var/lib/trex-webui/runtime-state.json"
@@ -116,12 +128,19 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     verify_root=""
     verify_daemon_unit=""
     verify_api_unit=""
+    verify_reconcile_unit=""
+    verify_retry_unit=""
+    verify_ack_unit=""
     cleanup_verify_units() {
       local status=$?
       trap - EXIT
       set +e
-      if [[ -n "$verify_api_unit" || -n "$verify_daemon_unit" ]]; then
-        rm -f -- "$verify_api_unit" "$verify_daemon_unit" >/dev/null 2>&1
+      if [[ -n "$verify_api_unit" || -n "$verify_daemon_unit" || \
+        -n "$verify_reconcile_unit" || -n "$verify_retry_unit" || \
+        -n "$verify_ack_unit" ]]; then
+        rm -f -- \
+          "$verify_api_unit" "$verify_daemon_unit" "$verify_reconcile_unit" \
+          "$verify_retry_unit" "$verify_ack_unit" >/dev/null 2>&1
       fi
       if [[ -n "$verify_root" ]]; then
         rmdir -- "$verify_root" >/dev/null 2>&1
@@ -133,7 +152,13 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     verify_root="$(mktemp -d -t trex-systemd-verify.XXXXXX)" &&
     verify_daemon_unit="$verify_root/$(basename -- "$DAEMON_UNIT")" &&
     verify_api_unit="$verify_root/$(basename -- "$API_UNIT")" &&
+    verify_reconcile_unit="$verify_root/$(basename -- "$RECONCILE_UNIT")" &&
+    verify_retry_unit="$verify_root/$(basename -- "$RETRY_UNIT")" &&
+    verify_ack_unit="$verify_root/$(basename -- "$ACK_UNIT")" &&
     cp -- "$DAEMON_UNIT" "$verify_daemon_unit" &&
+    cp -- "$RECONCILE_UNIT" "$verify_reconcile_unit" &&
+    cp -- "$RETRY_UNIT" "$verify_retry_unit" &&
+    cp -- "$ACK_UNIT" "$verify_ack_unit" &&
     sed \
       -e 's#^ExecStartPre=/opt/trex-webui/[.]venv/bin/python #ExecStartPre=/usr/bin/python3 #' \
       -e 's#^ExecStart=/opt/trex-webui/[.]venv/bin/python #ExecStart=/usr/bin/python3 #' \
@@ -144,7 +169,9 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     grep -Fqx \
       'ExecStart=/usr/bin/python3 -m uvicorn app.main:app --app-dir /opt/trex-webui/apps/api --host 127.0.0.1 --port 8080' \
       "$verify_api_unit" &&
-    systemd-analyze verify "$verify_daemon_unit" "$verify_api_unit"
+    systemd-analyze verify \
+      "$verify_daemon_unit" "$verify_api_unit" "$verify_reconcile_unit" \
+      "$verify_retry_unit" "$verify_ack_unit"
   )" || {
     printf '%s\n' "$verify_output" >&2
     fail "systemd-analyze verify rejected the supervisor units"

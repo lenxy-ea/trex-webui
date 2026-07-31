@@ -78,15 +78,67 @@ The script selects a live catalog profile, clears stats, starts RX capture,
 starts traffic, polls real stats, stops capture, explicitly stops traffic,
 collects post-stop stats/capture/port state, saves a run report archive through
 `/api/trex/reports/save`, downloads it back, and writes a local evidence copy
-under `.logs/`. The archived payload includes a `traffic_session` with start
-and stop results plus sanitized capture/stats evidence, so it can verify the
-full profile -> stats/capture -> stop -> report loop. The capture is stopped
+under `.logs/`. A passing run refreshes the persisted traffic runtime immediately
+before save and submits its exact session ID and positive revision as a CAS.
+The backend then replaces the reserved `traffic_session` payload with its own
+canonical v1 evidence and adds the matching `traffic_session_binding`; failed
+runs remain unbound and cannot submit either reserved field. The canonical
+session includes immutable start identity, mutation history, and commanded
+cleanup evidence rather than browser-owned start/stop result objects. The
+capture is stopped
 inside the active traffic window by the separate `--observe-seconds` timer, not
 only after the requested TRex `--duration` expires. Defaults are intentionally
 low impact: `udp_1pkt_simple.py`, TX port `0`, RX capture port `1`, `5kpps`,
 `2` seconds requested duration, and `1` second observation. Use `--profile`,
 `--tx-port`, `--rx-port`, `--multiplier`, `--duration`, `--observe-seconds`,
 and repeated `--tunable key=value` options for other profiles.
+
+For a configured six-port I350 lab with three cabled pairs, run the stricter
+multi-group qualification gate:
+
+```bash
+scripts/npmw run e2e:six-port -- --base-url http://127.0.0.1
+```
+
+It requires `pair-0=0/1`, `pair-1=2/3`, and `pair-2=4/5`, verifies all six
+links and the idle baseline, starts the three saved groups into one persisted
+session, proves TX and RX packet movement independently on every port, performs
+an exact session-bound stop, and saves a backend-bound report archive locally
+and on the server. This is an explicit hardware qualification command, not a
+portable default for hosts with fewer ports.
+
+To prove that the persistent traffic supervisor survives an API process crash,
+run the separate systemd gate as root on an idle lab pair:
+
+```bash
+scripts/npmw run e2e:api-restart -- --base-url http://127.0.0.1 --group-id pair-0
+```
+
+The gate starts the saved group with a backend hard-stop safety lease, sends
+`SIGKILL` only to the validated `trex-webui-api.service` MainPID, requires a new
+systemd invocation on the same boot, verifies exact v1 session adoption, then
+performs a session-bound stop and report CAS. Failures are saved unbound; if the
+API report store is unavailable, a local unbound failure archive is still kept.
+
+Guided Quick Validation is a separate backend-owned state machine exposed by
+`GET /api/trex/quick-validation`,
+`POST /api/trex/quick-validation/start`, and
+`POST /api/trex/quick-validation/cancel`. Start requires an exact nullable
+quick-run CAS, the current saved group and plan revision, a 1–60 second
+duration, and the `start-quick-validation` confirmation token when confirmation
+is enabled. Cancel requires the exact active run ID/revision and the
+`cancel-quick-validation` token. Preflight samples the live port inventory and
+rejects any selected port whose physical link is not `UP`, whose live status is
+not `IDLE`, or whose canonical runtime state is not stopped and unowned.
+
+The v1 normal deadline is poll-driven: while the Quick Validation workspace is
+open, the frontend continues polling even after transient read failures. Each
+candidate PASS must be based on the canonical traffic start time, a final
+packet-counter sample at or after the requested deadline, an exact commanded
+operator stop, WAL clearance, acquisition restoration, and a fresh idle
+sample. The persisted traffic hard-stop lease is independent of browser and API
+lifetimes; if it fires, or if the API process changes during an active guided
+run, cleanup is still reconciled but the guided result is fail-closed.
 
 Run report history is exposed through `GET /api/trex/reports/trends?limit=N`.
 The backend scans the real report archive directory, skips unreadable or
@@ -202,7 +254,12 @@ The backend exposes a first online-control surface around the real TRex STL clie
 - `GET /api/trex/profiles/preview?profile_path=...`: return a bounded text preview for allowed `.py`, `.yaml`, `.yml`, and `.json` profiles without executing profile code; binary `.pcap`/`.cap` profiles return an explicit blocker, dirty request paths return `profile_path_invalid`, and invalid-only profile roots return `profile_root_path_invalid`.
 - `GET /api/trex/traffic/runtime`: return the authoritative persisted traffic
   plan, plan revision, six-port config identity, live per-port ownership/state,
-  and the current target/generation-bound traffic session. An empty six-port
+  and the current target/generation-bound traffic session. New sessions carry a
+  positive revision and `evidence_version=1`; each plan or ad-hoc run records an
+  immutable run ID, explicit source, original plan revision/profile digest/start
+  parameters, exact mutation evidence, and commanded or observed cleanup.
+  Historical schema-v2 sessions remain readable with `evidence_version=null`
+  and are stop-only rather than being retroactively certified. An empty six-port
   plan initializes `pair-0`, `pair-1`, and `pair-2` from consecutive port pairs.
 - `PUT /api/trex/traffic/plan`: replace the complete plan only when
   `plan_revision` matches, with non-overlapping groups, known config ports, and
@@ -224,6 +281,13 @@ The backend exposes a first online-control surface around the real TRex STL clie
   the profile or stream table. The request must include the exact current
   `expected_session_id`; stale/missing session authority is rejected before live
   TRex mutation.
+- `POST /api/trex/reports/save`: save an unbound diagnostic report only when its
+  payload omits the backend-reserved `traffic_session` and
+  `traffic_session_binding` fields, or save a certifiable run by supplying the
+  exact `traffic_session_id` and `traffic_session_revision` together. Bound save
+  holds the runtime mutation fence across session load, revision comparison,
+  canonical evidence injection, and archive write; pending mutation, stale CAS,
+  or legacy evidence fails without creating a report file.
 - `GET /api/trex/capture/files`, `POST /api/trex/capture/files/download`, and `POST /api/trex/capture/files/open`: browse saved `.pcap`/`.cap` files under the backend capture root, download bounded browser-safe PCAP content, or launch a configured local analyzer. Analyzer launch is disabled unless `TREX_WEBUI_CAPTURE_OPEN_COMMAND` is set; the backend uses an argv list without shell interpolation and always appends the resolved capture file path under `daemon_log.parent/captures`.
 - `GET /api/trex/capture/status` and capture command responses include backend-normalized `port_usage` rows derived from real capture filters, so the WebUI can show active RX/TX recorder occupancy per port without re-parsing TRex-private status shapes.
 - `POST /api/trex/ports/acquire`: acquire ports; `force=true` requires confirmation token `force-acquire`.
@@ -241,7 +305,11 @@ The backend exposes a first online-control surface around the real TRex STL clie
 Every traffic start/update/pause/resume/stop and capture start/cleanup path
 persists a target/generation/baseline-bound mutation intent before its first
 live side effect. A normal completion atomically promotes the intent into the
-session or lease. A process crash is reconciled only from exact nonce and live
+session or lease and records whether it completed directly, through recovery,
+through idempotent replay, or through a hard stop. Session evidence cross-links
+every run and cleanup to a unique persisted mutation nonce; inconsistent or
+fabricated references make the runtime-state document invalid. A process crash
+is reconciled only from exact nonce and live
 baseline evidence; ambiguous or changed authority remains durable
 `cleanup_required` and blocks further mutation instead of guessing.
 
@@ -360,9 +428,10 @@ scripts/npmw run verify:major -- --base-url http://127.0.0.1 \
   --config-file /path/to/validated/trex_cfg.yaml
 ```
 
-This wrapper runs release/archive rollback tests, virtualenv/runtime transaction
-tests, the global deployment-lock suite, API tests, four Web test shards by
-default, Web typecheck/lint/build, and `git diff --check`. It publishes the fresh
+This wrapper runs archive safety and durable release-selector/reconciliation
+tests, virtualenv/runtime transaction tests, the global deployment-lock suite,
+API tests, four Web test shards by default, Web typecheck/lint/build, and
+`git diff --check`. It publishes the fresh
 `apps/web/dist` with a rollback directory, runs a strictly read-only production
 browser smoke through Nginx, runs the Nginx/API deployment probe, binds a
 gate ID to the current source and frontend build identities, and then executes
@@ -398,10 +467,14 @@ avoid restart, pass `--reuse-running-trex`. Use
 `--config-file path/to/trex_cfg.yaml` when a change must be validated against a
 specific hardware config.
 
-The gate assumes the standard LAN deployment root `/var/www/trex-webui/dist`.
-Use `--web-root` for a different Nginx static directory, or
-`--skip-web-root-sync` only when validating against an intentionally unchanged
-deployed frontend.
+The source qualification gate defaults to the checkout-oriented LAN static root
+`/var/www/trex-webui/dist`. Run it before packaging the release. Do not point its
+mutable build publication at a managed content-addressed
+`/opt/trex-webui/releases/sha256-*` tree or the `current` selector; an installed
+archive is validated separately through its manifest, stable selector consumers,
+production browser path, and `deploy/verify.sh`. Use `--web-root` only for a
+separate mutable qualification root, or `--skip-web-root-sync` when validating
+against an intentionally unchanged deployed frontend.
 Each local gate step defaults to a 30 minute timeout, and the real Standard E2E
 step also defaults to 30 minutes. Use `--step-timeout SECONDS` or
 `--e2e-timeout SECONDS` only when the lab is known to need a longer bounded
@@ -471,6 +544,28 @@ The production runtime supervisor has two explicit deployment modes:
   provide a trusted generation file, capture and traffic ownership uses a
   process-local marker and is never automatically recovered by a new API
   process.
+
+The runtime-supervisor boundary is independent of application release
+selection. A verified archive upgrade stores complete releases under
+`/opt/trex-webui/releases/sha256-*`, renders API source/runtime/profile paths and
+the Nginx static root through `/opt/trex-webui/current`, and retains the former
+selection at `previous`. Root-only journal reconciliation runs before API,
+managed daemon, and Nginx after boot. It restores only an uncommitted release
+selection; it cannot recreate a TRex workload or reservation interrupted by an
+explicit daemon maintenance override. Direct-checkout installs remain outside
+that durable archive transaction. Explicit `--rollback-previous` is supported
+only with the installer-managed local daemon: after live quiescence checks it
+stops the API, reloads the canonical persisted runtime state with the selected
+release code, and rechecks daemon `safe-restart` before selector activation.
+External-daemon mode is rejected because that supervisor is an unfenced
+mutation authority from the WebUI host's perspective.
+
+On an SELinux-enabled versioned host, archive installation automatically owns a
+persistent, exact `httpd_sys_content_t` rule for only
+`releases/sha256-*/apps/web/dist`, relabels physical current/previous frontend
+trees, and verifies both expected and applied types. It must not broaden the
+rule to the API tree or `.env`. Direct-checkout `--selinux` remains a separate
+web-root policy path.
 
 Remote mode is an explicit security opt-in, not a discovery fallback. TRex WebUI
 does not provide built-in authentication or RBAC, and it does not add

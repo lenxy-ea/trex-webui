@@ -11,6 +11,7 @@ BASE_URL="http://127.0.0.1"
 OUTPUT_DIR=".logs/standard-e2e-gate"
 REPORT_PREFIX="standard-e2e-gate"
 WEB_ROOT="/var/www/trex-webui/dist"
+WEB_ROOT_EXPLICIT=0
 SYNC_WEB_ROOT=1
 RUN_DEPLOY_VERIFY=1
 RUN_BROWSER_WRITE_ACCEPTANCE=0
@@ -35,6 +36,11 @@ WEB_ROLLBACK_DIR=""
 WEB_OLD_MOVED=0
 WEB_SWITCHED=0
 WEB_LIVE_EXISTED=0
+VERSIONED_DEPLOYMENT=0
+DEPLOY_PROJECT_ROOT=""
+SERVICE_PROJECT_ROOT=""
+VERSIONED_INSTALL_ROOT="/opt/trex-webui"
+VERSIONED_NGINX_CONFIG="/etc/nginx/conf.d/trex-webui.conf"
 
 usage() {
   cat <<'USAGE'
@@ -134,6 +140,7 @@ parse_args() {
       --web-root)
         WEB_ROOT="${2:-}"
         [[ -n "$WEB_ROOT" ]] || die "--web-root requires a value"
+        WEB_ROOT_EXPLICIT=1
         shift 2
         ;;
       --skip-web-root-sync)
@@ -199,6 +206,64 @@ parse_args() {
         ;;
     esac
   done
+}
+
+detect_versioned_deployment() {
+  DEPLOY_PROJECT_ROOT="$PROJECT_ROOT"
+  [[ "$WEB_ROOT_EXPLICIT" -eq 0 ]] || return 0
+  [[ "$BASE_URL" =~ ^https?://(127\.0\.0\.1|localhost)(:[0-9]+)?/?$ ]] || return 0
+
+  local selector="$VERSIONED_INSTALL_ROOT/current"
+  local target selected_root fragment_path need_daemon_reload working_directory nginx_config
+  if [[ ! -e "$selector" && ! -L "$selector" ]]; then
+    return 0
+  fi
+  [[ -L "$selector" ]] || \
+    die "versioned release selector path exists but is not a symbolic link: $selector"
+  target="$(readlink -- "$selector")" || die "unable to read release selector $selector"
+  [[ "$target" =~ ^releases/sha256-[0-9a-f]{64}$ ]] || \
+    die "live release selector target is unsafe: $target"
+  selected_root="$VERSIONED_INSTALL_ROOT/$target"
+  [[ -d "$selected_root" && ! -L "$selected_root" ]] || \
+    die "selected live release is missing or unsafe: $selected_root"
+  [[ "$(realpath -- "$selector")" == "$selected_root" ]] || \
+    die "live release selector does not resolve to its declared target"
+
+  command -v systemctl >/dev/null 2>&1 || \
+    die "systemctl is required to validate a versioned local deployment"
+  fragment_path="$(
+    systemctl show trex-webui-api.service --property=FragmentPath --value
+  )" || die "unable to inspect the live API unit FragmentPath"
+  [[ "$fragment_path" == "/etc/systemd/system/trex-webui-api.service" ]] || \
+    die "versioned release selector exists but the loaded API unit FragmentPath is not canonical: ${fragment_path:-missing}"
+  need_daemon_reload="$(
+    systemctl show trex-webui-api.service --property=NeedDaemonReload --value
+  )" || die "unable to inspect the live API unit reload state"
+  [[ "$need_daemon_reload" == "no" ]] || \
+    die "versioned release selector exists but the loaded API unit requires daemon-reload: ${need_daemon_reload:-missing}"
+  working_directory="$(
+    systemctl show trex-webui-api.service --property=WorkingDirectory --value
+  )" || die "unable to inspect the live API WorkingDirectory"
+  [[ "$working_directory" == "$selector" ]] || \
+    die "versioned release selector exists but the loaded API WorkingDirectory is not current: ${working_directory:-missing}"
+
+  nginx_config="$VERSIONED_NGINX_CONFIG"
+  [[ -f "$nginx_config" && ! -L "$nginx_config" ]] || \
+    die "versioned API is active but its Nginx configuration is missing or unsafe"
+  [[ "$(grep -Fxc "    root $VERSIONED_INSTALL_ROOT/current/apps/web/dist;" "$nginx_config")" -eq 1 ]] || \
+    die "versioned API is active but Nginx does not use the same current selector"
+
+  VERSIONED_DEPLOYMENT=1
+  SERVICE_PROJECT_ROOT="$selector"
+  DEPLOY_PROJECT_ROOT="$selected_root"
+  WEB_ROOT="$selected_root/apps/web/dist"
+  # A content-addressed release is immutable. The gate proves that the already
+  # deployed build equals this clean source build instead of mutating it.
+  SYNC_WEB_ROOT=0
+  printf 'detected versioned deployment:\n'
+  printf '  service_selector: %s -> %s\n' "$SERVICE_PROJECT_ROOT" "$target"
+  printf '  deployed_project: %s\n' "$DEPLOY_PROJECT_ROOT"
+  printf '  deployed_web_root: %s\n' "$WEB_ROOT"
 }
 
 sync_web_root() {
@@ -309,8 +374,35 @@ validate_gate_layout() {
   WEB_ROOT="$(trex_canonical_path "$WEB_ROOT" "web root")" || die "unsafe web root"
   source_dist="$(trex_canonical_path "$PROJECT_ROOT/apps/web/dist" "frontend dist")" || die "unsafe frontend dist"
   trex_path_is_within "$source_dist" "$PROJECT_ROOT" || die "frontend dist escaped the project root"
-  trex_assert_managed_path "$WEB_ROOT" "web root" "/var/www/trex-webui" || die "unsafe web root"
-  trex_assert_disjoint_paths "$PROJECT_ROOT" "project root" "$WEB_ROOT" "web root" || die "overlapping project/web paths"
+  if [[ "$VERSIONED_DEPLOYMENT" -eq 1 ]]; then
+    DEPLOY_PROJECT_ROOT="$(
+      trex_canonical_path "$DEPLOY_PROJECT_ROOT" "deployed project root"
+    )" || die "unsafe deployed project root"
+    [[ "$SERVICE_PROJECT_ROOT" == "$VERSIONED_INSTALL_ROOT/current" ]] || \
+      die "unsupported versioned service selector"
+    [[ "$WEB_ROOT" == "$DEPLOY_PROJECT_ROOT/apps/web/dist" ]] || \
+      die "versioned web root does not belong to the selected release"
+    trex_assert_managed_path "$WEB_ROOT" "versioned web root" "$VERSIONED_INSTALL_ROOT" || \
+      die "unsafe versioned web root"
+    [[ "$SYNC_WEB_ROOT" -eq 0 ]] || \
+      die "refusing to mutate a content-addressed frontend release"
+    # An archive installation keeps current/releases below /opt/trex-webui,
+    # which may also be the operator's Git checkout. That parent/child layout
+    # is safe because versioned mode never syncs or rolls back WEB_ROOT. Still
+    # reject running the build from the selected immutable release itself.
+    if trex_path_is_within "$source_dist" "$DEPLOY_PROJECT_ROOT"; then
+      die "gate checkout frontend dist belongs to the selected immutable release; run the gate from a separate checkout"
+    fi
+    trex_assert_root_controlled_authority_path \
+      "$DEPLOY_PROJECT_ROOT/deploy/archive_safety.py" \
+      "selected release payload verifier" || \
+      die "selected release payload verifier authority is unsafe"
+  else
+    trex_assert_managed_path "$WEB_ROOT" "web root" "/var/www/trex-webui" || \
+      die "unsafe web root"
+    trex_assert_disjoint_paths "$PROJECT_ROOT" "project root" "$WEB_ROOT" "web root" || \
+      die "overlapping project/web paths"
+  fi
   [[ ! -e "$WEB_ROOT" || -d "$WEB_ROOT" ]] || die "web root is not a directory: $WEB_ROOT"
 }
 
@@ -408,6 +500,40 @@ PY
   printf '  source: %s\n' "$EXPECTED_SOURCE_IDENTITY"
   printf '  build: %s\n' "$EXPECTED_BUILD_IDENTITY"
   printf '  identity_file: %s\n' "$identity_path"
+}
+
+verify_versioned_deployment_identity() {
+  [[ "$VERSIONED_DEPLOYMENT" -eq 1 ]] || return 0
+  run_step "Exact source/build identity of selected production release" \
+    "$PROJECT_ROOT/.venv/bin/python" - \
+      "$PROJECT_ROOT" \
+      "$DEPLOY_PROJECT_ROOT" \
+      "$EXPECTED_SOURCE_IDENTITY" \
+      "$EXPECTED_BUILD_IDENTITY" <<'PY'
+import sys
+from pathlib import Path
+
+gate_root = Path(sys.argv[1])
+deployed_root = Path(sys.argv[2])
+expected_source = sys.argv[3]
+expected_build = sys.argv[4]
+sys.path.insert(0, str(gate_root / "scripts"))
+
+from trex_standard_e2e import compute_build_identity, compute_source_identity
+
+deployed_source = compute_source_identity(deployed_root)
+deployed_build = compute_build_identity(deployed_root)
+if deployed_source.get("digest") != expected_source:
+    raise SystemExit(
+        "selected production release source identity does not match this gate"
+    )
+if deployed_build.get("digest") != expected_build:
+    raise SystemExit(
+        "selected production frontend build identity does not match this gate"
+    )
+print(f"ok: deployed source identity {expected_source}")
+print(f"ok: deployed build identity {expected_build}")
+PY
 }
 
 run_production_browser_smoke() {
@@ -532,8 +658,27 @@ if current_build.get("digest") != expected_build_identity:
     raise SystemExit("current frontend build changed during the major gate")
 
 post = payload.get("post_conditions") if isinstance(payload.get("post_conditions"), dict) else {}
+raw_target_ports = [payload.get("tx_port"), payload.get("rx_port")]
+if any(
+    isinstance(port, bool) or not isinstance(port, int) or port < 0
+    for port in raw_target_ports
+):
+    raise SystemExit(f"{latest} had invalid selected TX/RX target ports")
+target_ports = sorted(set(raw_target_ports))
+if len(target_ports) != 2 or post.get("target_ports") != target_ports:
+    raise SystemExit(f"{latest} did not prove the exact selected TX/RX target ports")
 if post.get("traffic_ports_idle") is not True:
     raise SystemExit(f"{latest} did not prove traffic ports idle")
+if post.get("active_ports_after_stop") != []:
+    raise SystemExit(f"{latest} still had active selected ports")
+if post.get("ports_unowned") is not True:
+    raise SystemExit(f"{latest} did not prove selected ports unowned")
+if post.get("acquired_ports_after_stop") != []:
+    raise SystemExit(f"{latest} still had acquired selected ports")
+if post.get("owned_ports_after_stop") != {}:
+    raise SystemExit(f"{latest} still had a live STL owner")
+if post.get("runtime_ports_stopped") is not True or post.get("runtime_ports_unowned") is not True:
+    raise SystemExit(f"{latest} did not prove stopped/unowned traffic runtime ports")
 if post.get("capture_recorders_after_stop") != 0:
     raise SystemExit(f"{latest} did not prove capture cleanup")
 
@@ -562,7 +707,7 @@ print(f"  source_identity: {expected_source_identity}")
 print(f"  build_identity: {expected_build_identity}")
 print(f"  latency_avg_us: {latency.get('latency_avg_us')}")
 print(f"  capture_packets: {capture.get('packet_count')}")
-print(f"  postconditions: traffic idle, capture recorders 0")
+print(f"  postconditions: traffic idle/unowned, acquisition empty, runtime stopped/unowned, capture recorders 0")
 PY
 }
 
@@ -613,14 +758,19 @@ main() {
   command -v timeout >/dev/null 2>&1 || die "timeout is required"
   [[ "$TIMEOUT_KILL_AFTER_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
     die "VERIFY_MAJOR_TIMEOUT_KILL_AFTER_SECONDS requires a positive integer"
-  validate_gate_layout
   verify_python_baseline
   trex_acquire_deployment_lock || die "another deployment transaction is active or the deployment lock is unsafe"
+  detect_versioned_deployment
+  validate_gate_layout
   capture_gate_source_baseline
 
   step "major-change gate for $BASE_URL"
   run_step "Python syntax check for acceptance scripts" \
-    .venv/bin/python -m py_compile scripts/trex_standard_e2e.py scripts/trex_real_acceptance.py
+    .venv/bin/python -m py_compile \
+      scripts/trex_standard_e2e.py \
+      scripts/trex_real_acceptance.py \
+      scripts/trex_six_port_e2e.py \
+      scripts/trex_api_restart_e2e.py
   run_step "Privileged daemon service contract tests" deploy/tests/daemon_service_test.sh
   run_step "Managed API environment authority tests" deploy/tests/managed_environment_test.sh
   run_step "Deployment release and rollback safety tests" deploy/tests/release_safety_test.sh
@@ -639,11 +789,20 @@ main() {
   run_step "Whitespace/conflict diff check" git diff --check
   sync_web_root
   prepare_gate_identity
+  verify_versioned_deployment_identity
   run_production_browser_smoke
 
   if [[ "$RUN_DEPLOY_VERIFY" -eq 1 ]]; then
+    local verify_args=(
+      --base-url "$BASE_URL"
+      --project-root "$DEPLOY_PROJECT_ROOT"
+      --web-root "$WEB_ROOT"
+    )
+    if [[ "$VERSIONED_DEPLOYMENT" -eq 1 ]]; then
+      verify_args+=(--service-project-root "$SERVICE_PROJECT_ROOT")
+    fi
     run_step "Nginx/API deployment probe" \
-      deploy/verify.sh --base-url "$BASE_URL" --web-root "$WEB_ROOT" "${DEPLOY_VERIFY_ARGS[@]}"
+      deploy/verify.sh "${verify_args[@]}" "${DEPLOY_VERIFY_ARGS[@]}"
   else
     printf 'skip: deploy/verify.sh disabled by --skip-deploy-verify\n'
   fi

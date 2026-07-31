@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=deploy/path_safety.sh
 source "$SCRIPT_DIR/path_safety.sh"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SERVICE_PROJECT_ROOT=""
 WEB_ROOT="/var/www/trex-webui/dist"
 BASE_URL="http://127.0.0.1"
 TIMEOUT_SECONDS=8
@@ -30,6 +31,12 @@ NFTABLES_DROPIN="${NFTABLES_SYSTEMD_DROPIN_TARGET:-$NFTABLES_DROPIN_ROOT/trex-we
 API_ENV_FILE="$TREX_MANAGED_API_ENV_FILE_DEFAULT"
 API_PROC_ROOT="/proc"
 API_UNIT="/etc/systemd/system/trex-webui-api.service"
+NGINX_CONF="/etc/nginx/conf.d/trex-webui.conf"
+RELEASE_RECONCILER="/usr/libexec/trex-webui/release_transaction.py"
+RELEASE_RECONCILER_UNIT="/etc/systemd/system/trex-webui-release-reconcile.service"
+RELEASE_RECONCILER_NGINX_DROPIN="/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile.conf"
+RELEASE_STATE_ROOT="/var/lib/trex-webui-deploy"
+VERSIONED_WEB_SELINUX_PATTERN='/opt/trex-webui/releases/sha256-[0-9a-f]{64}/apps/web/dist(/.*)?'
 API_VENV_RELEASE_MARKER_NAME=".trex-webui-venv-release"
 API_VENV_RUNTIME_MARKER_NAME=".trex-webui-venv-runtime"
 API_VENV_RUNTIME_MARKER_VALUE="trex-webui-venv-runtime-v1"
@@ -51,6 +58,8 @@ Verify an installed TRex WebUI LAN deployment.
 Options:
   --base-url URL       WebUI URL to verify. Default: http://127.0.0.1
   --project-root PATH  Project or extracted package root. Default: script parent directory
+  --service-project-root PATH
+                       Stable validated project selector used by systemd/Nginx
   --web-root PATH      Nginx static dist path. Default: /var/www/trex-webui/dist
   --timeout SECONDS    HTTP timeout. Default: 8
   --skip-systemd       Do not check systemd service states
@@ -89,6 +98,11 @@ parse_args() {
       --project-root)
         PROJECT_ROOT="${2:-}"
         [[ -n "$PROJECT_ROOT" ]] || die "--project-root requires a value"
+        shift 2
+        ;;
+      --service-project-root)
+        SERVICE_PROJECT_ROOT="${2:-}"
+        [[ -n "$SERVICE_PROJECT_ROOT" ]] || die "--service-project-root requires a value"
         shift 2
         ;;
       --web-root)
@@ -304,6 +318,50 @@ read_marker(sys.argv[3], sys.argv[4])
 PY
 }
 
+resolve_versioned_service_path() {
+  local logical_path="${1:-}"
+  local selector_root="${2:-}"
+  local label="${3:-versioned service path}"
+  [[ "$selector_root" == "/opt/trex-webui/current" && \
+    ( "$logical_path" == "$selector_root" || "$logical_path" == "$selector_root/"* ) ]] || {
+    api_service_contract_error "$label is outside the supported release selector"
+    return
+  }
+  [[ "$(realpath -ms -- "$logical_path")" == "$logical_path" ]] || {
+    api_service_contract_error "$label is not logically canonical: $logical_path"
+    return
+  }
+  [[ -L "$selector_root" ]] || {
+    api_service_contract_error "release selector is missing: $selector_root"
+    return
+  }
+  local target selected_root suffix actual canonical
+  target="$(readlink -- "$selector_root")" || return
+  [[ "$target" =~ ^releases/sha256-[0-9a-f]{64}$ ]] || {
+    api_service_contract_error "release selector target is unsafe: $target"
+    return
+  }
+  selected_root="$(dirname -- "$selector_root")/$target"
+  [[ -d "$selected_root" && ! -L "$selected_root" ]] || {
+    api_service_contract_error "selected release root is missing or unsafe: $selected_root"
+    return
+  }
+  trex_assert_root_controlled_authority_path \
+    "$selected_root" "selected release root" || return
+  suffix="${logical_path#"$selector_root"}"
+  actual="$selected_root$suffix"
+  canonical="$(trex_canonical_path "$actual" "$label")" || return
+  [[ "$canonical" == "$actual" ]] || {
+    api_service_contract_error "$label escaped the selected release: $logical_path"
+    return
+  }
+  trex_path_is_within "$actual" "$selected_root" || {
+    api_service_contract_error "$label escaped the selected release: $logical_path"
+    return
+  }
+  printf '%s\n' "$actual"
+}
+
 assert_api_runtime_exec() {
   local exec_path="${1:-}"
   local project_root="${2:-}"
@@ -339,10 +397,16 @@ assert_api_runtime_exec() {
     api_service_contract_error "$label interpreter is missing or not executable: $exec_path"
     return
   }
-  trex_assert_root_controlled_authority_path "$runtime_root" "$label runtime root" || return
-  assert_api_runtime_tree "$runtime_root" "$label runtime tree" || return
+  local authority_runtime="$runtime_root"
+  if [[ "$project_root" == "/opt/trex-webui/current" ]]; then
+    authority_runtime="$(
+      resolve_versioned_service_path "$runtime_root" "$project_root" "$label runtime root"
+    )" || return
+  fi
+  trex_assert_root_controlled_authority_path "$authority_runtime" "$label runtime root" || return
+  assert_api_runtime_tree "$authority_runtime" "$label runtime tree" || return
   if [[ -n "$runtime_suffix" ]]; then
-    assert_api_versioned_runtime_markers "$runtime_root" "$runtime_suffix" || return
+    assert_api_versioned_runtime_markers "$authority_runtime" "$runtime_suffix" || return
   fi
 }
 
@@ -450,7 +514,13 @@ normalize_systemd_path_list() {
       api_service_contract_error "systemd path is not absolute: $raw"
       return
     }
-    path="$(trex_canonical_path "$path" "systemd sandbox path")" || return
+    if [[ "$SERVICE_PROJECT_ROOT" == "/opt/trex-webui/current" && \
+      ( "$path" == "$SERVICE_PROJECT_ROOT" || "$path" == "$SERVICE_PROJECT_ROOT/"* ) ]]; then
+      resolve_versioned_service_path \
+        "$path" "$SERVICE_PROJECT_ROOT" "systemd sandbox path" >/dev/null || return
+    else
+      path="$(trex_canonical_path "$path" "systemd sandbox path")" || return
+    fi
     result_ref+=("$path")
   done
 }
@@ -519,6 +589,70 @@ unit_exact_line() {
   [[ "$(grep -Fxc -- "$expected" "$unit_path")" -eq 1 ]]
 }
 
+systemd_word_list_has() {
+  local value="${1:-}"
+  local expected="${2:-}"
+  [[ -n "$expected" && " $value " == *" $expected "* ]]
+}
+
+release_reconcile_contract_error() {
+  printf 'release reconciliation contract error: %s\n' "$*" >&2
+  return 1
+}
+
+assert_release_reconcile_unit_dependency() {
+  local unit_path="${1:-}"
+  local label="${2:-systemd unit}"
+  local after_lines=()
+  [[ -f "$unit_path" && ! -L "$unit_path" ]] || {
+    release_reconcile_contract_error "$label is missing or unsafe: $unit_path"
+    return
+  }
+  [[ "$(grep -Ec '^Requires=' "$unit_path")" -eq 1 && \
+    "$(grep -Fxc 'Requires=trex-webui-release-reconcile.service' "$unit_path")" -eq 1 ]] || {
+    release_reconcile_contract_error \
+      "$label must have exactly one release-reconciler Requires directive"
+    return
+  }
+  mapfile -t after_lines < <(sed -n 's/^After=//p' "$unit_path")
+  [[ "${#after_lines[@]}" -eq 1 ]] || {
+    release_reconcile_contract_error "$label must have exactly one After directive"
+    return
+  }
+  systemd_word_list_has \
+    "${after_lines[0]}" \
+    "trex-webui-release-reconcile.service" || {
+    release_reconcile_contract_error "$label is not ordered after release reconciliation"
+    return
+  }
+}
+
+assert_loaded_release_reconcile_dependency() {
+  local unit_name="${1:-}"
+  local label="${2:-systemd unit}"
+  local requires after
+  requires="$(systemctl show "$unit_name" --property=Requires --value)" || {
+    release_reconcile_contract_error \
+      "unable to inspect loaded $label Requires dependency"
+    return
+  }
+  after="$(systemctl show "$unit_name" --property=After --value)" || {
+    release_reconcile_contract_error \
+      "unable to inspect loaded $label ordering"
+    return
+  }
+  systemd_word_list_has "$requires" "trex-webui-release-reconcile.service" || {
+    release_reconcile_contract_error \
+      "loaded $label does not propagate release reconciliation failures"
+    return
+  }
+  systemd_word_list_has "$after" "trex-webui-release-reconcile.service" || {
+    release_reconcile_contract_error \
+      "loaded $label is not ordered after release reconciliation"
+    return
+  }
+}
+
 assert_api_disk_unit_contract() {
   local project_root="${1:-}"
   local unit_path="${2:-}"
@@ -534,6 +668,11 @@ assert_api_disk_unit_contract() {
     return
   }
   trex_assert_root_controlled_authority_path "$unit_path" "on-disk API unit" || return
+  if [[ "$project_root" == "/opt/trex-webui/current" ]]; then
+    assert_release_reconcile_unit_dependency \
+      "$unit_path" \
+      "on-disk API unit" || return
+  fi
 
   for line in \
     "User=trex-webui" \
@@ -771,13 +910,20 @@ assert_managed_api_service_contract() {
   local start_exec start_argv pre_exec pre_argv main_pid disk_runtime
   local canonical_project_root
 
-  canonical_project_root="$(
-    trex_canonical_path "$project_root" "API project root"
-  )" || return
-  [[ "$canonical_project_root" == "$project_root" ]] || {
-    api_service_contract_error "API project root is not canonical: $project_root"
-    return
-  }
+  if [[ "$project_root" == "/opt/trex-webui/current" && -L "$project_root" ]]; then
+    canonical_project_root="$(realpath -- "$project_root")" || return
+  else
+    canonical_project_root="$(
+      trex_canonical_path "$project_root" "API project root"
+    )" || return
+  fi
+  if [[ "$canonical_project_root" != "$project_root" ]]; then
+    [[ "$project_root" == "/opt/trex-webui/current" && -L "$project_root" && \
+      "$(readlink -- "$project_root")" =~ ^releases/sha256-[0-9a-f]{64}$ ]] || {
+      api_service_contract_error "API project root is not canonical: $project_root"
+      return
+    }
+  fi
 
   assert_api_disk_unit_contract "$project_root" "$unit_path" || return
   disk_runtime="$VERIFIED_API_RUNTIME"
@@ -814,6 +960,12 @@ assert_managed_api_service_contract() {
     return
   }
   VERIFIED_API_NEED_RELOAD="$need_reload"
+
+  if [[ "$project_root" == "/opt/trex-webui/current" ]]; then
+    assert_loaded_release_reconcile_dependency \
+      trex-webui-api.service \
+      "API unit" || return
+  fi
 
   assert_api_loaded_sandbox_contract "$project_root" || return
   start_value="$(
@@ -1014,6 +1166,17 @@ if actual != expected:
 check_layout() {
   PROJECT_ROOT="$(trex_canonical_path "$PROJECT_ROOT" "project root")" || \
     die "unsafe project root"
+  if [[ -z "$SERVICE_PROJECT_ROOT" ]]; then
+    SERVICE_PROJECT_ROOT="$PROJECT_ROOT"
+  else
+    [[ "$SERVICE_PROJECT_ROOT" == "/opt/trex-webui/current" ]] || \
+      die "service project root must be /opt/trex-webui/current"
+    [[ -L "$SERVICE_PROJECT_ROOT" ]] || die "service project selector is missing"
+    [[ "$(readlink -- "$SERVICE_PROJECT_ROOT")" =~ ^releases/sha256-[0-9a-f]{64}$ ]] || \
+      die "service project selector target is unsafe"
+    [[ "$(realpath -- "$SERVICE_PROJECT_ROOT")" == "$PROJECT_ROOT" ]] || \
+      die "service project selector does not resolve to the verified project root"
+  fi
   WEB_ROOT="$(trex_canonical_path "$WEB_ROOT" "web root")" || die "unsafe web root"
   if [[ "$CHECK_DAEMON" -eq 1 ]]; then
     DAEMON_LIBEXEC_ROOT="$(
@@ -1074,13 +1237,226 @@ check_layout() {
   pass "deployment paths exist"
 }
 
+selinux_mode() {
+  if have_cmd getenforce; then
+    getenforce
+    return
+  fi
+  if [[ -r /sys/fs/selinux/enforce ]]; then
+    if [[ "$(< /sys/fs/selinux/enforce)" == "1" ]]; then
+      printf 'Enforcing\n'
+    else
+      printf 'Permissive\n'
+    fi
+    return
+  fi
+  printf 'Disabled\n'
+}
+
+assert_selinux_type() {
+  local path="$1"
+  local expected_type="$2"
+  local label="$3"
+  local expected_context actual_context
+  expected_context="$(matchpathcon "$path")" || {
+    printf 'error: unable to resolve expected SELinux context for %s: %s\n' \
+      "$label" "$path" >&2
+    return 1
+  }
+  [[ "$expected_context" == *":$expected_type:"* ]] || {
+    printf 'error: persisted SELinux policy gives %s the wrong type: %s\n' \
+      "$label" "$expected_context" >&2
+    return 1
+  }
+  actual_context="$(stat -c '%C' -- "$path")" || {
+    printf 'error: unable to inspect actual SELinux context for %s: %s\n' \
+      "$label" "$path" >&2
+    return 1
+  }
+  [[ "$actual_context" == *":$expected_type:"* ]] || {
+    printf 'error: actual SELinux context gives %s the wrong type: %s\n' \
+      "$label" "$actual_context" >&2
+    return 1
+  }
+}
+
+assert_selinux_not_http_content() {
+  local path="$1"
+  local label="$2"
+  local expected_context actual_context=""
+  expected_context="$(matchpathcon "$path")" || {
+    printf 'error: unable to resolve expected SELinux context for %s: %s\n' \
+      "$label" "$path" >&2
+    return 1
+  }
+  [[ "$expected_context" != *":httpd_sys_content_t:"* ]] || {
+    printf 'error: versioned frontend SELinux policy escapes into %s: %s\n' \
+      "$label" "$path" >&2
+    return 1
+  }
+  if [[ -e "$path" || -L "$path" ]]; then
+    actual_context="$(stat -c '%C' -- "$path")" || {
+      printf 'error: unable to inspect actual SELinux context for %s: %s\n' \
+        "$label" "$path" >&2
+      return 1
+    }
+    [[ "$actual_context" != *":httpd_sys_content_t:"* ]] || {
+      printf 'error: private %s is labeled as Nginx-readable content: %s\n' \
+        "$label" "$path" >&2
+      return 1
+    }
+  fi
+}
+
+assert_exact_versioned_selinux_fcontext() {
+  local local_rules
+  have_cmd semanage || \
+    die "semanage is required to verify persistent versioned SELinux policy"
+  local_rules="$(LC_ALL=C semanage fcontext -l -C)" || \
+    die "unable to inspect local SELinux file-context policy"
+  python3 -c '
+import sys
+
+pattern = sys.argv[1]
+records = []
+for raw_line in sys.stdin:
+    fields = raw_line.split()
+    if not fields or not fields[0].startswith("/opt/trex-webui"):
+        continue
+    context = next((field for field in reversed(fields) if ":object_r:" in field), "")
+    if context:
+        records.append((fields[0], context))
+exact = [context for spec, context in records if spec == pattern]
+if len(exact) != 1 or ":httpd_sys_content_t:" not in exact[0]:
+    raise SystemExit(
+        "exact versioned frontend httpd_sys_content_t local fcontext is missing or duplicated"
+    )
+escaped = [
+    spec
+    for spec, context in records
+    if spec != pattern and ":httpd_sys_content_t:" in context
+]
+if escaped:
+    raise SystemExit(
+        "broader or competing /opt/trex-webui httpd content rules are forbidden: "
+        + ", ".join(escaped)
+    )
+' "$VERSIONED_WEB_SELINUX_PATTERN" <<<"$local_rules" || \
+    die "versioned frontend SELinux policy is not exact and persistent"
+}
+
+check_versioned_release_selinux() {
+  local mode
+  mode="$(selinux_mode)" || die "unable to inspect SELinux mode"
+  [[ "$mode" =~ ^(Disabled|Permissive|Enforcing)$ ]] || \
+    die "unexpected SELinux mode: $mode"
+  [[ "$mode" != "Disabled" ]] || return 0
+  have_cmd matchpathcon || \
+    die "matchpathcon is required to verify versioned SELinux policy"
+  assert_exact_versioned_selinux_fcontext
+
+  local selector target release_path static_path artifact
+  for selector in current previous; do
+    if [[ ! -L "/opt/trex-webui/$selector" ]]; then
+      [[ "$selector" == "previous" ]] && continue
+      die "versioned current selector is missing during SELinux verification"
+    fi
+    target="$(readlink -- "/opt/trex-webui/$selector")" || \
+      die "unable to inspect $selector selector during SELinux verification"
+    [[ "$target" =~ ^releases/sha256-[0-9a-f]{64}$ ]] || \
+      die "$selector selector is unsafe during SELinux verification"
+    release_path="/opt/trex-webui/$target"
+    [[ -d "$release_path" && ! -L "$release_path" && \
+      "$(realpath -- "$release_path")" == "$release_path" ]] || \
+      die "$selector release is unsafe during SELinux verification"
+    if [[ "$selector" == "current" && "$release_path" != "$PROJECT_ROOT" ]]; then
+      die "current SELinux release authority does not match the verified project root"
+    fi
+    static_path="$release_path/apps/web/dist"
+    trex_assert_plain_static_tree "$static_path" "$selector release frontend" || \
+      die "$selector release frontend tree is unsafe"
+    while IFS= read -r -d '' artifact; do
+      assert_selinux_type "$artifact" httpd_sys_content_t \
+        "$selector release frontend" || \
+        die "$selector release frontend SELinux label is not deployable"
+    done < <(find "$static_path" -xdev \( -type d -o -type f \) -print0)
+    while IFS= read -r -d '' artifact; do
+      assert_selinux_not_http_content "$artifact" \
+        "$selector API tree" || \
+        die "$selector release API SELinux boundary is unsafe"
+    done < <(find "$release_path/apps/api" -xdev \
+      \( -type d -o -type f \) -print0)
+    assert_selinux_not_http_content "$release_path/.env" \
+      "$selector environment file" || \
+      die "$selector release environment SELinux boundary is unsafe"
+  done
+  pass "versioned frontend SELinux policy is persistent, exact, and applied"
+}
+
+check_versioned_release_consumers() {
+  [[ "$SERVICE_PROJECT_ROOT" == "/opt/trex-webui/current" ]] || return 0
+  local previous=""
+  previous="$(readlink -- "/opt/trex-webui/previous" 2>/dev/null || true)"
+  if [[ -n "$previous" ]]; then
+    [[ "$previous" =~ ^releases/sha256-[0-9a-f]{64}$ ]] || \
+      die "previous release selector target is unsafe"
+    [[ -d "/opt/trex-webui/$previous" && ! -L "/opt/trex-webui/$previous" ]] || \
+      die "previous release selector is incomplete"
+  fi
+
+  [[ -f "$NGINX_CONF" && ! -L "$NGINX_CONF" ]] || \
+    die "versioned Nginx configuration is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$NGINX_CONF")" == "0:0 644 1" ]] || \
+    die "versioned Nginx configuration has unsafe ownership or mode"
+  trex_assert_root_controlled_authority_path \
+    "$NGINX_CONF" "versioned Nginx configuration" || \
+    die "versioned Nginx configuration authority is unsafe"
+  [[ "$(grep -Fxc '    root /opt/trex-webui/current/apps/web/dist;' "$NGINX_CONF")" -eq 1 ]] || \
+    die "Nginx does not consume the atomic current release selector"
+
+  [[ -f "$RELEASE_RECONCILER" && ! -L "$RELEASE_RECONCILER" ]] || \
+    die "installed release reconciler is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER")" == "0:0 755 1" ]] || \
+    die "installed release reconciler has unsafe ownership or mode"
+  [[ -f "$RELEASE_RECONCILER_UNIT" && ! -L "$RELEASE_RECONCILER_UNIT" ]] || \
+    die "installed release reconciler unit is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_UNIT")" == "0:0 644 1" ]] || \
+    die "installed release reconciler unit has unsafe ownership or mode"
+  cmp -s "$PROJECT_ROOT/deploy/release_transaction.py" "$RELEASE_RECONCILER" || \
+    die "installed release reconciler does not match the candidate bundle"
+  cmp -s \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service" \
+    "$RELEASE_RECONCILER_UNIT" || \
+    die "installed release reconciler unit does not match the candidate bundle"
+  [[ -f "$RELEASE_RECONCILER_NGINX_DROPIN" && \
+    ! -L "$RELEASE_RECONCILER_NGINX_DROPIN" ]] || \
+    die "Nginx release reconciliation dependency is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_NGINX_DROPIN")" == "0:0 644 1" ]] || \
+    die "Nginx release reconciliation dependency has unsafe ownership or mode"
+  cmp -s \
+    "$PROJECT_ROOT/deploy/systemd/nginx-trex-webui-release-reconcile.conf" \
+    "$RELEASE_RECONCILER_NGINX_DROPIN" || \
+    die "Nginx release reconciliation dependency does not match the candidate bundle"
+  [[ -d "$RELEASE_STATE_ROOT" && ! -L "$RELEASE_STATE_ROOT" ]] || \
+    die "root-only release transaction state directory is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a' "$RELEASE_STATE_ROOT")" == "0:0 700" ]] || \
+    die "release transaction state directory must be root:root 0700"
+  [[ -f "$RELEASE_STATE_ROOT/transaction.json" && \
+    ! -L "$RELEASE_STATE_ROOT/transaction.json" ]] || \
+    die "durable release transaction journal is missing or unsafe"
+  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_STATE_ROOT/transaction.json")" == "0:0 600 1" ]] || \
+    die "release transaction journal must be root:root 0600 with one link"
+  check_versioned_release_selinux
+  pass "API and Nginx consume the atomic release selector"
+}
+
 check_systemd() {
   if [[ "$CHECK_SYSTEMD" -eq 0 ]]; then
     return
   fi
   have_cmd systemctl || die "systemctl not found; rerun with --skip-systemd on non-systemd hosts"
   systemctl is-active --quiet trex-webui-api.service || die "trex-webui-api.service is not active"
-  assert_managed_api_service_contract "$PROJECT_ROOT" "$API_UNIT" "$API_PROC_ROOT" || \
+  assert_managed_api_service_contract "$SERVICE_PROJECT_ROOT" "$API_UNIT" "$API_PROC_ROOT" || \
     die "managed API systemd, on-disk unit, runtime, and MainPID authorities disagree"
   if [[ "$CHECK_DAEMON" -eq 1 ]]; then
     systemctl is-active --quiet trex-daemon-server.service || die "trex-daemon-server.service is not active"
@@ -1096,6 +1472,30 @@ check_systemd() {
       "$VERIFIED_API_MAIN_PID" \
       "$API_PROC_ROOT" || \
       die "managed API MainPID is not pinned to the exact local TRex authority"
+  fi
+  if [[ "$SERVICE_PROJECT_ROOT" == "/opt/trex-webui/current" ]]; then
+    assert_loaded_release_reconcile_dependency \
+      nginx.service \
+      "Nginx unit" || \
+      die "Nginx release reconciliation dependency is not loaded"
+    if [[ "$CHECK_DAEMON" -eq 1 ]]; then
+      [[ -f "$DAEMON_UNIT" && ! -L "$DAEMON_UNIT" ]] || \
+        die "versioned daemon unit is missing or unsafe: $DAEMON_UNIT"
+      [[ "$(stat -c '%u:%g %a %h' "$DAEMON_UNIT")" == "0:0 644 1" ]] || \
+        die "versioned daemon unit must be root:root 0644 with one hard link"
+      trex_assert_root_controlled_authority_path \
+        "$DAEMON_UNIT" \
+        "versioned daemon unit" || \
+        die "versioned daemon unit authority is unsafe"
+      assert_release_reconcile_unit_dependency \
+        "$DAEMON_UNIT" \
+        "on-disk daemon unit" || \
+        die "on-disk daemon release reconciliation dependency is incomplete"
+      assert_loaded_release_reconcile_dependency \
+        trex-daemon-server.service \
+        "daemon unit" || \
+        die "daemon release reconciliation dependency is not loaded"
+    fi
   fi
   systemctl is-active --quiet nginx.service || systemctl is-active --quiet nginx || die "nginx service is not active"
   pass "systemd services are active and the API runtime contract is exact"
@@ -1271,7 +1671,7 @@ PY
       grep -Fq -- "--daemon-bin $running_daemon_bin --generation-file $DAEMON_GENERATION" <<<"$exec_start" || \
       die "managed daemon MainPID is not the project supervisor launcher"
 
-    expected_profile_roots="$daemon_working_directory/stl:$PROJECT_ROOT/profiles:/var/lib/trex-webui/profiles"
+    expected_profile_roots="$daemon_working_directory/stl:$SERVICE_PROJECT_ROOT/profiles:/var/lib/trex-webui/profiles"
     api_fragment_path="$(
       systemctl show trex-webui-api.service --property=FragmentPath --value
     )" || die "unable to inspect managed API unit authority"
@@ -1391,8 +1791,8 @@ check_trex_overview() {
   fi
   local body
   body="$(curl_body "$(url_join "$BASE_URL" "/api/system/overview")")" || die "/api/system/overview failed"
-  grep -q '"ok"[[:space:]]*:[[:space:]]*true' <<<"$body" || die "/api/system/overview did not report ok"
-  grep -q '"port_ids"' <<<"$body" || die "/api/system/overview missing port_ids"
+  python3.11 "$SCRIPT_DIR/trex_overview_contract.py" <<<"$body" || \
+    die "/api/system/overview failed the strict real-TRex contract"
   pass "real TRex overview responds"
 }
 
@@ -1401,6 +1801,7 @@ main() {
   have_cmd curl || die "curl is required"
   log "Verifying TRex WebUI deployment at $BASE_URL"
   check_layout
+  check_versioned_release_consumers
   check_systemd
   check_daemon_boundary
   check_static_assets
