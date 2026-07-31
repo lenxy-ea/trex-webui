@@ -844,7 +844,8 @@ expect_failure "release payload file changed" \
   --web-root "$TEST_ROOT/premutation-web" \
   --backup-root "$TEST_ROOT/premutation-static-backups" \
   --source-backup-root "$TEST_ROOT/premutation-source-backups" \
-  --skip-python-deps --skip-enable --skip-restart --sync-method portable
+  --skip-python-deps --skip-enable --skip-restart --external-daemon \
+  --sync-method portable
 [[ "$(<"$PREMUTATION_INSTALL/sentinel")" == "old" ]] || \
   fail "payload identity failure mutated the install root"
 
@@ -876,7 +877,8 @@ if [[ "$(id -u)" -eq 0 ]]; then
     --web-root "$TEST_ROOT/postextract-web" \
     --backup-root "$TEST_ROOT/postextract-static-backups" \
     --source-backup-root "$TEST_ROOT/postextract-source-backups" \
-    --skip-python-deps --skip-enable --skip-restart --sync-method portable
+    --skip-python-deps --skip-enable --skip-restart --external-daemon \
+    --sync-method portable
   [[ "$(<"$POSTEXTRACT_INSTALL/sentinel")" == "old" ]] || \
     fail "post-extraction payload failure mutated the install root"
   [[ ! -e "$TEST_ROOT/postextract-source-backups" ]] || \
@@ -1483,8 +1485,18 @@ expect_failure "did not become ready" archive_api_readiness_failure_fixture
 
 chmod 0755 "$TEST_ROOT"
 READ_PROJECT="$TEST_ROOT/read-project"
+READ_TREX_SCRIPTS="$TEST_ROOT/read-trex-scripts"
+READ_TREX_INTERACTIVE="$READ_TREX_SCRIPTS/automation/trex_control_plane/interactive"
 mkdir -p "$READ_PROJECT/apps/api/app/core" "$READ_PROJECT/apps/api/app/trex" \
-  "$READ_PROJECT/profiles"
+  "$READ_PROJECT/profiles" "$READ_TREX_SCRIPTS/stl" \
+  "$READ_TREX_INTERACTIVE/trex/stl"
+printf '' >"$READ_TREX_INTERACTIVE/trex/__init__.py"
+printf '' >"$READ_TREX_INTERACTIVE/trex/stl/__init__.py"
+printf 'class STLClient:\n    pass\n' >"$READ_TREX_INTERACTIVE/trex/stl/api.py"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$READ_TREX_SCRIPTS/trex_daemon_server"
+chmod 0755 "$READ_TREX_SCRIPTS/trex_daemon_server"
+find "$READ_TREX_SCRIPTS" -type d -exec chmod 0755 '{}' +
+find "$READ_TREX_SCRIPTS" -type f ! -perm /111 -exec chmod 0644 '{}' +
 cp -a --reflink=auto "$PROJECT_ROOT/.venv" "$READ_PROJECT/.venv"
 rm -f -- "$READ_PROJECT/.venv/$TREX_MANAGED_MARKER_NAME"
 printf '' >"$READ_PROJECT/apps/api/app/__init__.py"
@@ -1522,6 +1534,8 @@ if getent passwd nobody >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; t
     SERVICE_USER=nobody
     SERVICE_CONFIG_PATH="$TEST_ROOT/read-project-config.yaml"
     SERVICE_STATE_PROFILE_ROOT="$READ_PROJECT/profiles"
+    TREX_DAEMON_SCRIPTS_DIR="$READ_TREX_SCRIPTS"
+    TREX_DAEMON_BIN="$READ_TREX_SCRIPTS/trex_daemon_server"
     DRY_RUN=0
     smoke_test_service_import
   )
@@ -1780,20 +1794,36 @@ unsafe_static_fixture() (
 expect_failure "frontend production build contains unsafe entries" unsafe_static_fixture
 
 if [[ "$(id -u)" -eq 0 ]]; then
+  FAKE_SYSTEMCTL_BIN="$TEST_ROOT/fake-systemctl-bin"
+  FAKE_SYSTEMCTL_LOG="$TEST_ROOT/archive-rollback-systemctl.log"
+  mkdir -p "$FAKE_SYSTEMCTL_BIN"
+  printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
+    'printf "%s\n" "$*" >>"${FAKE_SYSTEMCTL_LOG:?}"' \
+    'case "$*" in' \
+    '  "show trex-webui-api.service --property=LoadState --value") printf "%s\n" "${FAKE_SYSTEMCTL_LOAD_STATE:-loaded}" ;;' \
+    '  "show trex-webui-api.service --property=WorkingDirectory --value") printf "%s\n" "${FAKE_SYSTEMCTL_WORKING_DIRECTORY:-/opt/trex-webui}" ;;' \
+    '  *) printf "unexpected systemctl call: %s\n" "$*" >&2; exit 64 ;;' \
+    'esac' >"$FAKE_SYSTEMCTL_BIN/systemctl"
+  chmod 0755 "$FAKE_SYSTEMCTL_BIN/systemctl"
+
   ROLLBACK_ARCHIVE="$TEST_ROOT/failing-install.tar.gz"
   make_fixture_archive "$ROLLBACK_ARCHIVE" failing-install
   ROLLBACK_INSTALL="$TEST_ROOT/rollback-install"
   mkdir "$ROLLBACK_INSTALL"
   trex_write_managed_marker "$ROLLBACK_INSTALL"
   printf 'old\n' >"$ROLLBACK_INSTALL/sentinel"
-  expect_failure "" \
+  expect_failure "" env \
+    PATH="$FAKE_SYSTEMCTL_BIN:$PATH" \
+    FAKE_SYSTEMCTL_LOG="$FAKE_SYSTEMCTL_LOG" \
+    FAKE_SYSTEMCTL_LOAD_STATE=not-found \
     "$PROJECT_ROOT/deploy/upgrade.sh" \
     --archive "$ROLLBACK_ARCHIVE" \
     --install-root "$ROLLBACK_INSTALL" \
     --web-root "$TEST_ROOT/rollback-web" \
     --backup-root "$TEST_ROOT/rollback-static-backups" \
     --source-backup-root "$TEST_ROOT/rollback-source-backups" \
-    --skip-python-deps --skip-enable --skip-restart --sync-method portable
+    --skip-python-deps --skip-enable --skip-restart --external-daemon \
+    --sync-method portable
   [[ "$(<"$ROLLBACK_INSTALL/sentinel")" == "old" ]] || fail "source rollback did not restore the original sentinel"
   [[ ! -e "$ROLLBACK_INSTALL/new-release-file" ]] || fail "source rollback left release files behind"
 
@@ -1803,16 +1833,6 @@ if [[ "$(id -u)" -eq 0 ]]; then
   mkdir -p "$VENV_ROLLBACK_INSTALL/.venv"
   trex_write_managed_marker "$VENV_ROLLBACK_INSTALL"
   printf 'old-release\n' >"$VENV_ROLLBACK_INSTALL/.venv/release-sentinel"
-  FAKE_SYSTEMCTL_BIN="$TEST_ROOT/fake-systemctl-bin"
-  FAKE_SYSTEMCTL_LOG="$TEST_ROOT/archive-rollback-systemctl.log"
-  mkdir -p "$FAKE_SYSTEMCTL_BIN"
-  printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail' \
-    'printf "%s\n" "$*" >>"${FAKE_SYSTEMCTL_LOG:?}"' \
-    'case "$*" in' \
-    '  "show trex-webui-api.service --property=LoadState --value") printf "loaded\n" ;;' \
-    '  "show trex-webui-api.service --property=WorkingDirectory --value") printf "/opt/trex-webui\n" ;;' \
-    'esac' >"$FAKE_SYSTEMCTL_BIN/systemctl"
-  chmod 0755 "$FAKE_SYSTEMCTL_BIN/systemctl"
   expect_failure "" env \
     PATH="$FAKE_SYSTEMCTL_BIN:$PATH" \
     FAKE_SYSTEMCTL_LOG="$FAKE_SYSTEMCTL_LOG" \

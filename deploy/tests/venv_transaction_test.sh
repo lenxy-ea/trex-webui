@@ -19,6 +19,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+TREX_TEST_SCRIPTS_DIR="$TEST_ROOT/trex-scripts"
+TREX_TEST_INTERACTIVE="$TREX_TEST_SCRIPTS_DIR/automation/trex_control_plane/interactive"
+mkdir -p "$TREX_TEST_SCRIPTS_DIR/stl" "$TREX_TEST_INTERACTIVE/trex/stl"
+printf '' >"$TREX_TEST_INTERACTIVE/trex/__init__.py"
+printf '' >"$TREX_TEST_INTERACTIVE/trex/stl/__init__.py"
+printf 'class STLClient:\n    pass\n' >"$TREX_TEST_INTERACTIVE/trex/stl/api.py"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$TREX_TEST_SCRIPTS_DIR/trex_daemon_server"
+chmod 0755 "$TREX_TEST_SCRIPTS_DIR/trex_daemon_server"
+find "$TREX_TEST_SCRIPTS_DIR" -type d -exec chmod 0755 '{}' +
+find "$TREX_TEST_SCRIPTS_DIR" -type f ! -perm /111 -exec chmod 0644 '{}' +
+export TREX_DAEMON_SCRIPTS_DIR="$TREX_TEST_SCRIPTS_DIR"
+export TREX_DAEMON_BIN="$TREX_TEST_SCRIPTS_DIR/trex_daemon_server"
+
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
@@ -278,11 +291,11 @@ write_service_unit_fixture "$PIN_PRESERVE_UNIT" "$PIN_PRESERVE_PROJECT" "$PIN_PR
   smoke_test_service_runtime_entrypoint() {
     run runuser -u "$SERVICE_USER" -- "$1/bin/python" -V >/dev/null
   }
-  resolve_existing_service_runtime_pin
-  [[ "$VENV_SERVICE_PATH" == "$PIN_PRESERVE_RUNTIME" && "$SERVICE_RUNTIME_PIN_PRESERVED" -eq 1 ]] || return 81
-  stage_versioned_service_runtime
-  secure_service_read_paths
-  smoke_test_service_import "$VENV_SERVICE_PATH"
+  resolve_existing_service_runtime_pin &&
+  [[ "$VENV_SERVICE_PATH" == "$PIN_PRESERVE_RUNTIME" && "$SERVICE_RUNTIME_PIN_PRESERVED" -eq 1 ]] &&
+  stage_versioned_service_runtime &&
+  secure_service_read_paths &&
+  smoke_test_service_import "$VENV_SERVICE_PATH" &&
   smoke_test_service_runtime_entrypoint "$VENV_SERVICE_PATH"
 ) || fail "no-deps deployment did not preserve and service-user smoke the trusted active runtime pin"
 
