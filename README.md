@@ -273,8 +273,8 @@ Traffic and capture smoke tests have separate opt-ins because they mutate real
 ports. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for those commands and
 their cleanup contract.
 
-Major changes require a real-hardware Standard E2E with a host-validated
-configuration:
+Major TRex WebUI changes require a real-hardware Standard E2E with a
+host-validated configuration:
 
 ```bash
 scripts/npmw run verify:major -- --base-url http://127.0.0.1 \
@@ -292,9 +292,10 @@ scripts/npmw run verify:major -- --base-url http://127.0.0.1 \
 
 Never point either command at the unedited public example. A passing gate binds
 the current source, frontend assets, API identity, active configuration,
-observed hardware, and clean postconditions into matching local/server report
-archives. A hardware, link, RPC, permission, or configuration failure remains
-a blocker; an illustrative fixture cannot waive this gate.
+observed hardware, and clean postconditions into a
+fresh local/server report pair. A hardware, link, RPC, permission, or
+configuration failure remains a blocker; an illustrative fixture cannot waive
+this gate.
 
 ## Repository map
 
