@@ -156,9 +156,24 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     verify_retry_unit="$verify_root/$(basename -- "$RETRY_UNIT")" &&
     verify_ack_unit="$verify_root/$(basename -- "$ACK_UNIT")" &&
     cp -- "$DAEMON_UNIT" "$verify_daemon_unit" &&
-    cp -- "$RECONCILE_UNIT" "$verify_reconcile_unit" &&
-    cp -- "$RETRY_UNIT" "$verify_retry_unit" &&
-    cp -- "$ACK_UNIT" "$verify_ack_unit" &&
+    # systemd-analyze validates that ExecStart binaries exist. GitHub's
+    # setup-python keeps 3.11 outside /usr/bin, so use the runner's stable
+    # interpreter only in these temporary syntax-validation copies.
+    sed -e 's#^ExecStart=/usr/bin/python3[.]11 #ExecStart=/usr/bin/python3 #' \
+      "$RECONCILE_UNIT" >"$verify_reconcile_unit" &&
+    sed -e 's#^ExecStart=/usr/bin/python3[.]11 #ExecStart=/usr/bin/python3 #' \
+      "$RETRY_UNIT" >"$verify_retry_unit" &&
+    sed -e 's#^ExecStart=/usr/bin/python3[.]11 #ExecStart=/usr/bin/python3 #' \
+      "$ACK_UNIT" >"$verify_ack_unit" &&
+    grep -Fqx \
+      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile' \
+      "$verify_reconcile_unit" &&
+    grep -Fqx \
+      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile' \
+      "$verify_retry_unit" &&
+    grep -Fqx \
+      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/release_transaction.py ack-consumers' \
+      "$verify_ack_unit" &&
     sed \
       -e 's#^ExecStartPre=/opt/trex-webui/[.]venv/bin/python #ExecStartPre=/usr/bin/python3 #' \
       -e 's#^ExecStart=/opt/trex-webui/[.]venv/bin/python #ExecStart=/usr/bin/python3 #' \

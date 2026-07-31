@@ -800,10 +800,19 @@ git -C "$PACKAGE_PROJECT" add \
   scripts/release_contract.py \
   scripts/release_evidence.py \
   scripts/release_metadata.py
-git -C "$PACKAGE_PROJECT" commit --quiet -m "release provenance fixture"
+# The release-chain overlays may already be identical to the cloned HEAD once
+# the implementation is committed. A distinct empty fixture commit still gives
+# the exact-tag contract an isolated, clean source SHA to bind and verify.
+git -C "$PACKAGE_PROJECT" commit --quiet --allow-empty -m "release provenance fixture"
 PACKAGE_RELEASE_SHA="$(git -C "$PACKAGE_PROJECT" rev-parse HEAD)"
 PACKAGE_VERSION="$(python3.11 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$PACKAGE_PROJECT/package.json")"
 PACKAGE_RELEASE_REF="refs/tags/v${PACKAGE_VERSION}"
+# A release-workflow checkout already carries the real version tag. This clone
+# is an isolated fixture repository, so replace only its inherited tag before
+# binding the same required ref shape to the fixture's distinct source commit.
+if git -C "$PACKAGE_PROJECT" rev-parse --verify "$PACKAGE_RELEASE_REF" >/dev/null 2>&1; then
+  git -C "$PACKAGE_PROJECT" tag --delete "v${PACKAGE_VERSION}" >/dev/null
+fi
 git -C "$PACKAGE_PROJECT" tag "v${PACKAGE_VERSION}"
 PACKAGE_SIGNER_WORKFLOW="lenxy-ea/trex-webui/.github/workflows/release.yml"
 PACKAGE_GITHUB_OUTPUT="$TEST_ROOT/package-github-output"

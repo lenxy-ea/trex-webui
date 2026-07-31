@@ -347,16 +347,37 @@ def test_verified_upgrade_uses_snapshot_and_rechecks_tag_before_execution(
             "UPGRADE_LOG": str(upgrade_log),
         }
     )
+    command = [
+        str(paths["verified-upgrade"]),
+        "--tag",
+        f"v{VERSION}",
+        "--metadata",
+        str(metadata_path),
+        "--",
+        "--dry-run",
+    ]
+    if os.geteuid() != 0:
+        root_environment = (
+            "PATH",
+            "SOURCE_SHA",
+            "GH_LOG",
+            "API_COUNT",
+            "MOVE_TAG",
+            "MOVED_SHA",
+            "ARCHIVE_NAME",
+            "ORIGINAL_ARCHIVE",
+            "MUTATION_MARKER",
+            "UPGRADE_LOG",
+        )
+        command = [
+            "sudo",
+            "--non-interactive",
+            "env",
+            *(f"{name}={environment[name]}" for name in root_environment),
+            *command,
+        ]
     completed = subprocess.run(
-        [
-            str(paths["verified-upgrade"]),
-            "--tag",
-            f"v{VERSION}",
-            "--metadata",
-            str(metadata_path),
-            "--",
-            "--dry-run",
-        ],
+        command,
         cwd=tmp_path,
         env=environment,
         text=True,
