@@ -46,6 +46,14 @@ it is removed from every upload, delete, PATCH, attestation, and local contract
 validator subprocess. A missing or unauthorized secret fails before any asset
 mutation.
 
+Restrict the environment to a custom deployment tag policy for the exact tag
+being released (for example `v0.1.0-rc.2`, type `tag`). Do not select protected
+branches or `main`: this workflow is intentionally dispatched from the tag ref.
+For a single-maintainer repository, add that maintainer as the required reviewer
+and leave self-review enabled; preventing self-review with no second reviewer
+deadlocks the release. Replace the exact tag policy for each release. A broader
+`v*` tag policy reduces maintenance but also widens the deployment boundary.
+
 The tag is always `v<package.json version>` and must resolve directly to the
 clean source commit. Create the draft with its target pinned to that commit:
 
