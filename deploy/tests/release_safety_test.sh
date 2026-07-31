@@ -15,16 +15,11 @@ source "$PROJECT_ROOT/deploy/path_safety.sh"
 TEST_ROOT="$(mktemp -d -t trex-webui-release-safety.XXXXXX)"
 trex_write_managed_marker "$TEST_ROOT"
 UNOWNED_ROOT=""
-PROJECT_VENV_MARKER="$PROJECT_ROOT/.venv/$TREX_MANAGED_MARKER_NAME"
-PROJECT_VENV_MARKER_CREATED=0
 
 cleanup() {
   local status=$?
   trap - EXIT
   set +e
-  if [[ "$PROJECT_VENV_MARKER_CREATED" -eq 1 ]]; then
-    rm -f -- "$PROJECT_VENV_MARKER" || status=1
-  fi
   if [[ -n "$UNOWNED_ROOT" && -d "$UNOWNED_ROOT" ]]; then
     rmdir "$UNOWNED_ROOT"
   fi
@@ -40,18 +35,6 @@ fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
 }
-
-# CI checkouts live outside the production /opt prefix. Mark only the
-# disposable development venv so path-overlap tests reach their intended
-# invariant without weakening the installer's managed-path policy.
-if [[ -e "$PROJECT_VENV_MARKER" || -L "$PROJECT_VENV_MARKER" ]]; then
-  trex_assert_managed_marker "$PROJECT_ROOT/.venv" || \
-    fail "project Python environment has an unsafe managed marker"
-else
-  trex_write_managed_marker "$PROJECT_ROOT/.venv" || \
-    fail "could not mark the disposable project Python environment"
-  PROJECT_VENV_MARKER_CREATED=1
-fi
 
 expect_failure() {
   local expected="$1"
@@ -903,7 +886,8 @@ else
 fi
 
 expect_failure "too broad" \
-  "$PROJECT_ROOT/deploy/install.sh" --dry-run --skip-build --skip-enable --skip-restart --web-root /var
+  checkout_install_dry_run_fixture \
+  --dry-run --skip-build --skip-enable --skip-restart --web-root /var
 
 for deploy_entrypoint in "$PROJECT_ROOT/deploy/install.sh" "$PROJECT_ROOT/deploy/upgrade.sh"; do
   expect_failure "--verify cannot be combined with --skip-restart" \
@@ -914,19 +898,19 @@ done
 
 UNOWNED_ROOT="$(mktemp -d -t trex-webui-unowned.XXXXXX)"
 expect_failure "no trusted .trex-webui-managed owner" \
-  "$PROJECT_ROOT/deploy/install.sh" \
+  checkout_install_dry_run_fixture \
   --dry-run --skip-build --skip-enable --skip-restart \
   --web-root "$UNOWNED_ROOT/web" --backup-root "$UNOWNED_ROOT/backups"
 
 mkdir "$TEST_ROOT/real-web"
 ln -s "$TEST_ROOT/real-web" "$TEST_ROOT/web-link"
 expect_failure "symbolic-link component" \
-  "$PROJECT_ROOT/deploy/install.sh" \
+  checkout_install_dry_run_fixture \
   --dry-run --skip-build --skip-enable --skip-restart \
   --web-root "$TEST_ROOT/web-link" --backup-root "$TEST_ROOT/backups"
 
 expect_failure "must not be equal, parent, or child" \
-  "$PROJECT_ROOT/deploy/install.sh" \
+  checkout_install_dry_run_fixture \
   --dry-run --skip-build --skip-enable --skip-restart \
   --web-root "$TEST_ROOT/overlap" --backup-root "$TEST_ROOT/overlap/backups"
 
