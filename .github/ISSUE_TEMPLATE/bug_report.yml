@@ -1,0 +1,88 @@
+name: Bug report
+description: Report reproducible incorrect behavior in a supported environment
+title: "[Bug]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a problem. Do not report vulnerabilities here; follow SECURITY.md and use GitHub private vulnerability reporting.
+        Sanitize logs and screenshots. Never attach credentials, PCAP payloads, private addresses, MAC addresses, PCI identifiers, or customer data.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Provide the release tag or full commit SHA.
+      placeholder: v0.1.0-rc.1 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment mode
+      options:
+        - Managed local daemon behind Nginx
+        - External daemon with operator-owned supervisor
+        - Local development
+        - Unsupported or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Sanitized environment
+      description: Include host OS/architecture, TRex version, Python version, browser, NIC model, configured port count, and relevant link state.
+      placeholder: |
+        OS: AlmaLinux 9.8 x86_64
+        TRex: v3.08
+        Python: 3.11.x
+        Browser: Chromium ...
+        NIC/ports/link state: ...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: List the smallest repeatable sequence, including whether it mutates hardware.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include exact visible blockers or error codes.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Paste the smallest relevant log, test output, or screenshot. Do not attach a full report archive or PCAP.
+      render: shell
+  - type: textarea
+    id: validation
+    attributes:
+      label: Checks already run
+      description: List commands and results, plus the exact blocker for any skipped real-hardware gate.
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Safety checks
+      options:
+        - label: I confirmed that this is not a security vulnerability.
+          required: true
+        - label: I removed secrets, private lab identifiers, traffic payloads, and customer data.
+          required: true
+        - label: I identified any operation that starts traffic, captures packets, changes configuration, or restarts a service.
+          required: true

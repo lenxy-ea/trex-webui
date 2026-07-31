@@ -1,0 +1,33 @@
+{
+  "name": "trex-webui",
+  "private": true,
+  "version": "0.1.0-rc.1",
+  "description": "Modern WebUI for Cisco TRex",
+  "license": "Apache-2.0",
+  "packageManager": "npm@11.13.0",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11"
+  },
+  "scripts": {
+    "test": "scripts/tests/node_toolchain_test.sh && npm run test:api && scripts/npmw run test:web",
+    "test:toolchain": "scripts/tests/node_toolchain_test.sh",
+    "test:api": ".venv/bin/python -m pytest apps/api/tests",
+    "acceptance:trex": ".venv/bin/python scripts/trex_real_acceptance.py",
+    "e2e:standard": ".venv/bin/python scripts/trex_standard_e2e.py",
+    "verify:major": "scripts/verify_major_change.sh",
+    "test:web": "scripts/npmw --prefix apps/web test",
+    "test:web:shard": "scripts/npmw --prefix apps/web test -- --shard",
+    "test:web:shards": "scripts/run_web_test_shards.sh",
+    "dev:web": "scripts/npmw --prefix apps/web run dev --",
+    "build:web": "scripts/npmw --prefix apps/web run build",
+    "smoke:web:production": "scripts/npmw --prefix apps/web run smoke:production --",
+    "acceptance:web:production-write": "scripts/npmw --prefix apps/web run acceptance:production-write --",
+    "package:deploy": "deploy/package.sh",
+    "deploy:upgrade": "deploy/upgrade.sh",
+    "deploy:verify": "deploy/verify.sh",
+    "screenshot:web": "scripts/npmw --prefix apps/web run screenshot --",
+    "lint:web": "scripts/npmw --prefix apps/web run lint",
+    "typecheck:web": "scripts/npmw --prefix apps/web run typecheck"
+  }
+}

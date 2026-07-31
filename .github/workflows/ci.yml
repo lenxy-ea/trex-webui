@@ -1,0 +1,200 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - name: Install backend development dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: \
+            -r apps/api/requirements-dev.lock
+
+      - name: Backend tests
+        run: .venv/bin/python -m pytest apps/api/tests
+
+      - name: Deployment transaction safety tests
+        run: |
+          sudo env "PATH=$PATH" deploy/tests/daemon_service_test.sh
+          sudo env "PATH=$PATH" deploy/tests/managed_environment_test.sh
+          sudo env "PATH=$PATH" deploy/tests/release_safety_test.sh
+          sudo env "PATH=$PATH" deploy/tests/venv_transaction_test.sh
+          sudo env "PATH=$PATH" deploy/tests/deployment_lock_test.sh
+
+      - name: Locked Python dependency audit
+        run: .venv/bin/python -m pip_audit -r apps/api/requirements-dev.lock
+
+  frontend-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["1/4", "2/4", "3/4", "4/4"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix apps/web ci
+
+      - name: Frontend test shard ${{ matrix.shard }}
+        run: npm run test:web:shard -- ${{ matrix.shard }} --maxWorkers 2
+
+  frontend-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix apps/web ci
+
+      - name: Frontend checks
+        run: |
+          npm --prefix apps/web audit --audit-level=high
+          npm run typecheck:web
+          npm run lint:web
+          npm run build:web
+
+  production-browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install application and browser dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes nginx
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: \
+            -r apps/api/requirements.lock
+          npm --prefix apps/web ci
+          npm --prefix apps/web exec -- playwright install --with-deps chromium
+
+      - name: Build production frontend
+        run: npm run build:web
+
+      - name: Run read-only production browser smoke through Nginx
+        run: |
+          set -Eeuo pipefail
+          .venv/bin/python -m uvicorn app.main:app --app-dir apps/api --host 127.0.0.1 --port 8080 > /tmp/trex-webui-api.log 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true; sudo nginx -s stop 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8080/api/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:8080/api/health >/dev/null
+          sudo nginx -s stop 2>/dev/null || true
+          sudo install -d /var/www/trex-webui/dist /etc/nginx/trex-webui/access.d /etc/nginx/trex-webui/security.d
+          sudo cp -a apps/web/dist/. /var/www/trex-webui/dist/
+          sudo cp deploy/nginx/trex-webui.conf /etc/nginx/conf.d/trex-webui.conf
+          sudo rm -f /etc/nginx/sites-enabled/default
+          sudo nginx -t
+          sudo nginx
+          npm run smoke:web:production -- --base-url http://127.0.0.1 --gate-id ci-${{ github.sha }} --output .logs/ci-production-browser-smoke.json
+
+      - name: Upload production browser evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-browser-smoke
+          path: |
+            .logs/ci-production-browser-smoke.json
+            .logs/ci-production-browser-smoke.png
+          if-no-files-found: warn
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.16.0"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install locked supply-chain dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --require-hashes --only-binary=:all: \
+            -r apps/api/requirements-dev.lock
+          npm --prefix apps/web ci
+
+      - name: Validate dependency licenses and direct runtime notices
+        run: |
+          .venv/bin/python scripts/check_dependency_licenses.py \
+            --node-lock apps/web/package-lock.json \
+            --python-lock apps/api/requirements-dev.lock \
+            --python-requirements apps/api/requirements.txt \
+            --python-runtime-lock apps/api/requirements.lock \
+            --notice THIRD_PARTY_NOTICES.md
+
+      - name: Validate Python lock freshness
+        run: |
+          scripts/check_python_locks.sh
+          scripts/tests/python_lock_freshness_test.sh
+
+      - name: Test supply-chain generators
+        run: .venv/bin/python -m pytest scripts/tests/sbom_generator_test.py
+
+      - name: Validate public source policy
+        run: scripts/tests/public_source_test.sh
+
+      - name: Generate release SBOMs
+        run: scripts/generate_sbom.sh --output-dir dist/sbom
+
+      - name: Export public source archive
+        run: scripts/export_public_source.sh --output-dir dist/public-source
+
+      - name: Upload supply-chain artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: supply-chain
+          path: |
+            dist/sbom/SBOM.web.cdx.json
+            dist/sbom/SBOM.python.cdx.json
+            dist/public-source/*.tar.gz
+            dist/public-source/*.tar.gz.sha256
+          if-no-files-found: error

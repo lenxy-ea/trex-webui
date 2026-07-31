@@ -1,0 +1,16 @@
+TRex WebUI
+Copyright 2026 TRex WebUI contributors
+
+This product includes software developed by TRex WebUI contributors.
+
+TRex WebUI is an independent, unofficial Web interface for Cisco TRex.
+It is not affiliated with, sponsored by, or endorsed by Cisco Systems, Inc.
+Cisco and other product names and marks are the property of their respective
+owners.
+
+The project is informed by the workflows and interoperability surface of the
+Apache-2.0-licensed Cisco TRex and trex-stateless-gui projects. See
+docs/PROVENANCE.md for source and design provenance.
+
+This product includes third-party software and fonts under their own licenses.
+See THIRD_PARTY_NOTICES.md and the release SBOM files for details.

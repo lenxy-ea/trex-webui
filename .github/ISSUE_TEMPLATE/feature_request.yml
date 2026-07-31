@@ -1,0 +1,62 @@
+name: Feature request
+description: Propose a concrete TRex operator workflow or compatibility improvement
+title: "[Feature]: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the operator problem and measurable outcome. Generic dashboard additions without a TRex workflow are outside the project direction.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator problem
+      description: What real TRex task is difficult, unsafe, or unavailable today?
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed workflow
+      description: Describe inputs, actions, success state, and visible failure state.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: TRex and hardware context
+      description: Include relevant TRex versions, NIC/port topology, deployment mode, and whether real hardware is available for validation.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility impact
+      description: Identify traffic, capture, config, daemon, privilege, timeout, and rollback implications.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Explain current workarounds or upstream APIs already evaluated.
+  - type: dropdown
+    id: contribution
+    attributes:
+      label: Contribution intent
+      options:
+        - I can help implement and test this
+        - I can provide real-hardware validation
+        - I can provide requirements or review only
+        - I am not currently able to contribute
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope checks
+      options:
+        - label: This request is tied to a concrete TRex operator workflow.
+          required: true
+        - label: I have not included confidential lab or customer information.
+          required: true

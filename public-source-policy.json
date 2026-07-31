@@ -1,0 +1,991 @@
+{
+  "version": 2,
+  "scopes": [
+    {
+      "bindings": {
+        "apps/web/src/App.runReports.test.tsx": {
+          "ipv4": [
+            "10.0.0.20",
+            "10.0.0.99"
+          ]
+        },
+        "apps/web/src/App.shell.test.tsx": {
+          "ipv4": [
+            "10.0.0.10"
+          ]
+        },
+        "apps/web/src/PacketCapture.app.test.tsx": {
+          "ipv4": [
+            "10.10.10.1",
+            "10.10.10.2"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.rawIpTcp.test.tsx": {
+          "ipv4": [
+            "10.1.2.250",
+            "10.10.10.1",
+            "10.10.10.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.tunnels.gre.test.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.2.0.1",
+            "10.2.0.10",
+            "10.2.0.2",
+            "10.2.0.20",
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.failures.test.ts": {
+          "ipv4": [
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.greUdpSctp.test.ts": {
+          "ipv4": [
+            "10.2.0.10",
+            "10.2.0.20",
+            "10.2.1.10",
+            "10.2.1.20",
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.summary.test.ts": {
+          "ipv4": [
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.tcp.test.ts": {
+          "ipv4": [
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/advancedVmInnerIpv4Model.test.ts": {
+          "ipv4": [
+            "10.0.0.250",
+            "10.0.1.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/advancedVmModel.test.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.11",
+            "10.0.0.12",
+            "10.0.0.2"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/advancedVmOuterIpv4Model.test.ts": {
+          "ipv4": [
+            "10.0.0.10",
+            "10.0.0.20"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/advancedVmOuterIpv4TransportModel.test.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.11",
+            "10.0.0.12",
+            "10.0.0.2"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/model.ts": {
+          "ipv4": [
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/packetViewerModel.test.ts": {
+          "ipv4": [
+            "1.1.1.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/pcapImportModel.test.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "20.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/pcapImportModel.ts": {
+          "ipv4": [
+            "16.0.0.1",
+            "48.0.0.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/workspacePcapImportHandlers.test.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "20.0.0.1"
+          ]
+        },
+        "tools/audit_traffic_profiles.py": {
+          "ipv4": [
+            "16.0.0.1"
+          ]
+        }
+      },
+      "reason": "Deterministic TRex packet fields used by source defaults and focused tests."
+    },
+    {
+      "bindings": {
+        "apps/api/app/main.py": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/api/app/trex/workbench_values.py": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/api/tests/test_acceptance_script.py": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.0.0.3",
+            "10.0.0.4",
+            "10.1.0.10",
+            "10.1.0.11",
+            "10.1.0.12",
+            "10.1.0.13",
+            "10.10.0.10",
+            "10.10.0.11",
+            "10.10.0.12",
+            "10.10.0.13",
+            "10.2.0.10",
+            "10.2.0.11",
+            "10.2.0.12",
+            "10.2.0.13",
+            "10.2.0.20",
+            "10.2.0.21",
+            "10.2.1.10",
+            "10.2.1.20",
+            "10.20.0.20",
+            "10.3.0.10",
+            "10.3.0.11",
+            "10.3.0.12",
+            "10.3.0.13",
+            "10.3.0.20",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:50",
+            "00:11:22:33:44:51",
+            "00:11:22:33:44:52",
+            "00:11:22:33:44:53",
+            "00:11:22:33:44:55",
+            "02:00:00:00:00:00",
+            "02:00:00:00:00:01",
+            "02:00:00:00:00:04",
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:10",
+            "66:55:44:33:22:11",
+            "66:55:44:33:22:12",
+            "66:55:44:33:22:13"
+          ]
+        },
+        "apps/api/tests/test_workbench_packet_import.py": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "aa:bb:cc:dd:ee:ff"
+          ]
+        },
+        "apps/api/tests/test_workbench_pcap.py": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "16.0.0.1",
+            "30.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "66:55:44:33:22:11",
+            "66:55:44:33:22:12"
+          ]
+        },
+        "apps/api/tests/test_workbench_vm.py": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.0.0.250",
+            "10.0.255.250",
+            "10.1.0.10",
+            "10.1.0.20",
+            "10.10.0.10",
+            "10.10.0.20",
+            "10.10.0.30",
+            "10.10.0.40",
+            "10.2.0.10",
+            "10.2.0.20",
+            "10.9.0.1",
+            "10.9.0.2",
+            "16.0.0.1",
+            "48.0.0.250"
+          ],
+          "mac": [
+            "00:00:00:00:00:f0",
+            "00:11:22:33:44:01",
+            "00:11:22:33:44:10",
+            "00:11:22:33:44:50",
+            "00:11:22:33:44:f0"
+          ]
+        },
+        "apps/web/src/App.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/web/src/PortRuntime.test.tsx": {
+          "ipv4": [
+            "1.1.1.1",
+            "10.0.0.10",
+            "16.0.0.1",
+            "2.2.2.2",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.advanced.test.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.10.10.1",
+            "10.10.10.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "20.0.0.1",
+            "30.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:01",
+            "00:11:22:33:44:55",
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:11",
+            "aa:bb:cc:dd:ee:f0"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.basic.test.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.10.10.1",
+            "10.10.10.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "66:55:44:33:22:11"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.fieldEngineTargets.test.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.0.0.2",
+            "10.0.0.20",
+            "10.10.0.10",
+            "10.10.0.20",
+            "10.10.0.30",
+            "10.10.0.40",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:10"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.profileOps.test.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.10.0.10",
+            "10.10.0.20",
+            "10.10.0.30",
+            "10.10.0.40",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:10",
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.protocolData.test.tsx": {
+          "ipv4": [
+            "10.10.10.1",
+            "10.10.10.2"
+          ],
+          "mac": [
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:11"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.rawControlProtocols.test.tsx": {
+          "ipv4": [
+            "10.0.0.10",
+            "10.0.0.20",
+            "10.10.10.1",
+            "10.10.10.2",
+            "16.0.0.1",
+            "16.0.0.10",
+            "16.0.0.9",
+            "48.0.0.1",
+            "48.0.0.20"
+          ],
+          "mac": [
+            "00:11:22:33:44:50",
+            "00:11:22:33:44:55",
+            "00:11:22:33:44:56",
+            "00:aa:bb:cc:dd:ee",
+            "66:55:44:33:22:10",
+            "66:55:44:33:22:11"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.rawDnsDhcp.test.tsx": {
+          "ipv4": [
+            "10.10.0.10",
+            "10.10.0.20",
+            "10.10.0.30",
+            "10.10.0.40",
+            "16.0.0.1",
+            "192.168.1.1",
+            "192.168.1.100",
+            "192.168.1.101",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.rawEditor.test.tsx": {
+          "ipv4": [
+            "10.10.10.1",
+            "10.10.10.2",
+            "16.0.0.1",
+            "16.0.0.9",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "aa:bb:cc:dd:ee:10",
+            "aa:bb:cc:dd:ee:ff"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.rawTunnels.test.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.1.0.10",
+            "10.1.0.11",
+            "10.1.0.20",
+            "10.2.0.10",
+            "10.2.0.11",
+            "10.2.0.20",
+            "10.9.0.1",
+            "10.9.0.2",
+            "10.9.0.3",
+            "16.0.0.1",
+            "172.16.0.1",
+            "172.16.0.2",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "aa:bb:cc:dd:ee:ff"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.tunnels.gtpu.test.tsx": {
+          "ipv4": [
+            "10.9.0.1",
+            "10.9.0.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:11"
+          ]
+        },
+        "apps/web/src/TrafficProfiles.tunnels.vxlan.test.tsx": {
+          "ipv4": [
+            "10.1.0.10",
+            "10.1.0.20",
+            "172.16.0.1",
+            "172.16.0.2"
+          ],
+          "mac": [
+            "00:11:22:33:44:50",
+            "00:11:22:33:44:55",
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:10",
+            "66:55:44:33:22:11",
+            "aa:bb:cc:dd:ee:ff"
+          ]
+        },
+        "apps/web/src/components/workbench/PacketCaptureWorkspace.test.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "66:77:88:99:aa:bb"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.dnsVxlanL2.test.ts": {
+          "ipv4": [
+            "10.1.0.10",
+            "10.1.0.20",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:10",
+            "66:55:44:33:22:11",
+            "66:55:44:33:22:12",
+            "66:55:44:33:22:13"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.gtpuArp.test.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.0.0.3",
+            "10.0.0.4",
+            "10.3.0.10",
+            "10.3.0.11",
+            "10.3.0.12",
+            "10.3.0.13",
+            "10.3.0.20",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:50",
+            "00:11:22:33:44:51",
+            "00:11:22:33:44:52",
+            "00:11:22:33:44:53",
+            "00:11:22:33:44:55",
+            "66:55:44:33:22:11"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.icmp.test.ts": {
+          "ipv4": [
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "66:55:44:33:22:11"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.ipEthernet.test.ts": {
+          "ipv4": [
+            "10.10.0.10",
+            "10.10.0.11",
+            "10.10.0.12",
+            "10.10.0.13",
+            "10.20.0.20",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "02:00:00:00:00:00",
+            "02:00:00:00:00:01",
+            "02:00:00:00:00:02",
+            "02:00:00:00:00:03",
+            "02:00:00:00:00:04"
+          ]
+        },
+        "apps/web/src/components/workbench/runReport.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/advancedVmArpModel.test.ts": {
+          "ipv4": [
+            "16.0.0.1",
+            "48.0.0.2"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "66:55:44:33:22:10"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/advancedVmValueModel.test.ts": {
+          "ipv4": [
+            "255.255.255.250"
+          ],
+          "mac": [
+            "00:11:22:33:44:10",
+            "00:11:22:33:44:55",
+            "00:11:22:33:44:f0",
+            "00:11:22:ff:ff:f0"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/model.test.ts": {
+          "ipv4": [
+            "1.1.1.1",
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.1.0.10",
+            "10.1.0.20",
+            "10.30.0.10",
+            "10.30.0.20",
+            "16.0.0.1",
+            "172.16.0.10",
+            "172.16.0.20",
+            "2.2.2.2",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "00:aa:bb:cc:dd:ee",
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:11"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/rawPacketModel.ts": {
+          "ipv4": [
+            "16.0.0.1"
+          ],
+          "mac": [
+            "aa:bb:cc:dd:ee:ff"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/streamPatchModel.test.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.0.0.2",
+            "172.16.0.10",
+            "172.16.0.20",
+            "172.18.0.10",
+            "172.18.0.20",
+            "172.20.0.10",
+            "172.20.0.20"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "00:11:22:33:44:66",
+            "00:aa:bb:cc:dd:ee",
+            "00:de:ad:be:ef:01",
+            "66:77:88:99:aa:bb"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/workspaceProtocolDataDhcpHandlers.test.ts": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.10"
+          ],
+          "mac": [
+            "00:de:ad:be:ef:01"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/workspaceProtocolDataTunnelHandlers.test.ts": {
+          "ipv4": [
+            "172.18.0.10"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "scripts/trex_real_acceptance.py": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        }
+      },
+      "reason": "Deterministic TRex packet fields used by source defaults and focused tests."
+    },
+    {
+      "bindings": {
+        "apps/api/tests/test_api.py": {
+          "ipv4": [
+            "1.1.1.1",
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.0.0.2",
+            "10.10.0.10",
+            "10.10.0.20",
+            "10.10.0.30",
+            "10.10.0.40",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "10.9.0.1",
+            "10.9.0.2",
+            "16.0.0.1",
+            "2.2.2.2",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:00:00:00:00:01",
+            "00:11:22:33:44:10",
+            "00:11:22:33:44:55"
+          ],
+          "pci_bdf": [
+            "0000:02:00.0",
+            "03:00.0",
+            "03:00.1"
+          ]
+        },
+        "apps/api/tests/test_config_model.py": {
+          "ipv4": [
+            "1.1.1.1",
+            "2.2.2.2"
+          ],
+          "mac": [
+            "02:00:00:5d:82:d1"
+          ],
+          "pci_bdf": [
+            "0000:01:00.0",
+            "0000:01:00.1",
+            "0000:01:00.2",
+            "0000:01:00.3",
+            "0000:02:00.0",
+            "0000:02:00.1",
+            "0000:03:00.0",
+            "02:00.0",
+            "02:00.1",
+            "03:00.0",
+            "03:00.1",
+            "04:00.0",
+            "04:00.1"
+          ]
+        },
+        "apps/api/tests/test_stl_client.py": {
+          "ipv4": [
+            "1.1.1.1",
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.0.0.2",
+            "10.0.0.3",
+            "10.0.0.4",
+            "10.0.0.99",
+            "10.1.0.10",
+            "10.1.0.20",
+            "10.1.0.30",
+            "10.10.0.10",
+            "10.10.0.20",
+            "10.10.0.30",
+            "10.10.0.40",
+            "10.10.10.1",
+            "10.10.10.2",
+            "10.2.0.10",
+            "10.2.0.20",
+            "10.2.1.10",
+            "10.2.1.20",
+            "10.4.0.1",
+            "10.4.0.2",
+            "10.9.0.1",
+            "10.9.0.2",
+            "16.0.0.1",
+            "172.16.0.1",
+            "172.16.0.2",
+            "2.2.2.2",
+            "20.0.0.1",
+            "30.0.0.1",
+            "48.0.0.1",
+            "48.0.0.250"
+          ],
+          "mac": [
+            "00:00:00:00:00:f0",
+            "00:11:22:33:44:01",
+            "00:11:22:33:44:10",
+            "00:11:22:33:44:55",
+            "02:00:00:00:00:03",
+            "02:00:00:00:00:04",
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:10",
+            "66:55:44:33:22:11",
+            "66:77:88:99:aa:bb",
+            "aa:bb:cc:dd:ee:ff"
+          ],
+          "pci_bdf": [
+            "03:00.0"
+          ]
+        },
+        "apps/web/src/api.test.ts": {
+          "ipv4": [
+            "1.1.1.1",
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.0.0.2",
+            "10.10.10.1",
+            "10.10.10.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "2.2.2.2",
+            "20.0.0.1",
+            "30.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:11"
+          ],
+          "pci_bdf": [
+            "0000:02:00.0"
+          ]
+        },
+        "apps/web/src/test/appTestHarness.tsx": {
+          "ipv4": [
+            "10.0.0.1",
+            "10.0.0.10",
+            "10.0.0.2",
+            "10.10.10.1",
+            "10.10.10.2",
+            "10.2.0.1",
+            "10.2.0.2",
+            "10.3.0.1",
+            "10.3.0.2",
+            "16.0.0.1",
+            "48.0.0.1"
+          ],
+          "mac": [
+            "00:11:22:33:44:55",
+            "10:20:30:40:50:60",
+            "66:55:44:33:22:11"
+          ],
+          "pci_bdf": [
+            "0000:02:00.0",
+            "0000:02:00.1"
+          ]
+        }
+      },
+      "reason": "Deterministic mixed network and hardware identifiers used only as test fixtures."
+    },
+    {
+      "bindings": {
+        "apps/api/tests/test_standard_e2e_script.py": {
+          "ipv4": [
+            "1.1.1.1",
+            "2.2.2.2"
+          ],
+          "pci_bdf": [
+            "0000:01:00.0",
+            "0000:01:00.1",
+            "0000:01:00.2",
+            "0000:01:00.3",
+            "0000:02:00.0",
+            "0000:02:00.1",
+            "03:00.0",
+            "03:00.1"
+          ]
+        },
+        "apps/web/src/TrexDaemon.app.test.tsx": {
+          "ipv4": [
+            "10.0.0.10"
+          ],
+          "pci_bdf": [
+            "0000:02:00.0",
+            "0000:02:00.1",
+            "03:00.0"
+          ]
+        },
+        "scripts/trex_standard_e2e.py": {
+          "ipv4": [
+            "1.1.1.1",
+            "2.2.2.2"
+          ],
+          "pci_bdf": [
+            "03:00.0",
+            "03:00.1"
+          ]
+        }
+      },
+      "reason": "Reference acceptance fixtures model packet fields and synthetic port topology."
+    },
+    {
+      "bindings": {
+        "apps/web/src/components/workbench/capturePacketBuffer.test.ts": {
+          "mac": [
+            "00:00:00:00:00:01",
+            "00:00:00:00:00:02"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/advancedVmL2Model.test.ts": {
+          "mac": [
+            "00:00:00:00:00:01",
+            "00:00:00:00:00:10",
+            "00:00:00:00:00:20"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/workspaceProtocolDataArpHandlers.test.ts": {
+          "mac": [
+            "00:11:22:33:44:55",
+            "66:77:88:99:aa:bb"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/workspaceProtocolDataIcmpHandlers.test.ts": {
+          "mac": [
+            "00:11:22:33:44:55"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/workspaceProtocolDataIcmpv6Handlers.test.ts": {
+          "mac": [
+            "00:11:22:33:44:55",
+            "00:22:33:44:55:66",
+            "00:aa:bb:cc:dd:ee"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/workspaceProtocolDataLinkHandlers.test.ts": {
+          "mac": [
+            "00:11:22:33:44:55",
+            "66:77:88:99:aa:bb"
+          ]
+        }
+      },
+      "reason": "Deterministic link-layer values used only by packet-model unit tests."
+    },
+    {
+      "bindings": {
+        "examples/trex_cfg.yaml": {
+          "mac": [
+            "02:00:00:01:00:01",
+            "02:00:00:01:00:02",
+            "02:00:00:02:00:01",
+            "02:00:00:02:00:02",
+            "02:00:00:03:00:01",
+            "02:00:00:03:00:02"
+          ],
+          "pci_bdf": [
+            "0000:01:00.0",
+            "0000:01:00.1",
+            "0000:01:00.2",
+            "0000:01:00.3",
+            "0000:02:00.0",
+            "0000:02:00.1"
+          ]
+        }
+      },
+      "reason": "Documented six-port example uses local synthetic MACs and sequential PCI fixtures."
+    },
+    {
+      "bindings": {
+        "apps/api/tests/test_runtime.py": {
+          "pci_bdf": [
+            "0000:02:00.0",
+            "0000:02:00.1"
+          ]
+        },
+        "apps/api/tests/test_traffic_runtime.py": {
+          "pci_bdf": [
+            "0000:01:00.0",
+            "0000:01:00.1",
+            "0000:01:00.2",
+            "0000:01:00.3",
+            "0000:02:00.0",
+            "0000:02:00.1"
+          ]
+        },
+        "apps/web/src/components/workbench/trafficProfiles/portPairPlanModel.test.ts": {
+          "pci_bdf": [
+            "0000:01:00.0",
+            "0000:01:00.1"
+          ]
+        }
+      },
+      "reason": "Synthetic port identifiers used only by runtime and pairing tests."
+    }
+  ],
+  "generated_scopes": [
+    {
+      "pattern": "apps/web/dist/assets/*.js",
+      "values": {
+        "ipv4": [
+          "10.0.0.1",
+          "10.0.0.2",
+          "10.2.0.1",
+          "10.2.0.2",
+          "10.3.0.1",
+          "10.3.0.2",
+          "16.0.0.1",
+          "48.0.0.1"
+        ],
+        "mac": [
+          "00:11:22:33:44:55",
+          "aa:bb:cc:dd:ee:ff"
+        ]
+      },
+      "reason": "Vite bundles exact source-approved packet fixtures into content-named assets."
+    }
+  ]
+}

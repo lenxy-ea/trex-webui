@@ -1,0 +1,65 @@
+[Unit]
+Description=TRex WebUI API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=trex-webui
+Group=trex-webui
+WorkingDirectory=/opt/trex-webui
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TREX_WEBUI_TREX_CONFIG_PATH=/var/lib/trex-webui/trex_cfg.yaml
+Environment=TREX_WEBUI_PROFILE_ROOTS=/opt/trex-core/scripts/stl:/opt/trex-webui/profiles:/var/lib/trex-webui/profiles
+Environment=TREX_WEBUI_RUNTIME_STATE_PATH=/var/lib/trex-webui/runtime-state.json
+EnvironmentFile=-/etc/trex-webui/trex-webui.env
+# The installer replaces this marker with forced loopback authority in local
+# supervisor mode and removes it in explicit external-daemon mode.
+# @@TREX_WEBUI_DAEMON_MODE_ENV@@
+ExecStartPre=/opt/trex-webui/.venv/bin/python -c "import fastapi, httptools, uvicorn, uvicorn.supervisors.statreload, uvloop, watchfiles.run, websockets"
+ExecStart=/opt/trex-webui/.venv/bin/python -m uvicorn app.main:app --app-dir /opt/trex-webui/apps/api --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+# Persistent WebUI state stays writable without granting access to /etc or the
+# application source tree. Only WebUI-owned output subdirectories under
+# /var/log/trex are writable; the privileged daemon log remains read-only.
+StateDirectory=trex-webui
+StateDirectoryMode=0750
+ReadOnlyPaths=-/opt/trex-core/scripts /opt/trex-webui
+ReadWritePaths=/var/lib/trex-webui /var/log/trex/captures /var/log/trex/reports /var/log/trex/config-versions
+UMask=0027
+
+# The API controls TRex through STL/daemon RPC. It does not inherit root or
+# device privileges from the TRex daemon process.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+DevicePolicy=closed
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+KeyringMode=private
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

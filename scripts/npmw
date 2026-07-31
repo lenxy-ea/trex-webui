@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PROJECT_NODE_ROOT="$PROJECT_ROOT/.tools/node-v24.16.0-linux-x64"
+PROJECT_NODE_BIN="$PROJECT_NODE_ROOT/bin"
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+version_major() {
+  local version="${1#v}"
+  [[ "$version" =~ ^([0-9]+)([.][0-9]+){1,2}$ ]] || return 1
+  printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+validate_runtime() {
+  local node_command="$1"
+  local npm_command="$2"
+  local runtime_path="$3"
+  local node_version npm_version node_major npm_major
+
+  node_version="$("$node_command" --version 2>/dev/null)" || return 1
+  npm_version="$(PATH="$runtime_path:$PATH" "$npm_command" --version 2>/dev/null)" || return 1
+  node_major="$(version_major "$node_version")" || return 1
+  npm_major="$(version_major "$npm_version")" || return 1
+  [[ "$node_major" == "24" && "$npm_major" == "11" ]]
+}
+
+if [[ -e "$PROJECT_NODE_ROOT" || -L "$PROJECT_NODE_ROOT" ]]; then
+  [[ -d "$PROJECT_NODE_ROOT" && ! -L "$PROJECT_NODE_ROOT" ]] || \
+    die "project Node.js toolchain path is unsafe: $PROJECT_NODE_ROOT"
+  [[ -d "$PROJECT_NODE_BIN" && ! -L "$PROJECT_NODE_BIN" ]] || \
+    die "project Node.js toolchain is incomplete; run scripts/bootstrap_node.sh"
+  [[ -x "$PROJECT_NODE_BIN/node" && -x "$PROJECT_NODE_BIN/npm" ]] || \
+    die "project Node.js toolchain is incomplete; run scripts/bootstrap_node.sh"
+  validate_runtime "$PROJECT_NODE_BIN/node" "$PROJECT_NODE_BIN/npm" "$PROJECT_NODE_BIN" || \
+    die "project Node.js toolchain must provide Node 24 and npm 11; run scripts/bootstrap_node.sh"
+  exec env PATH="$PROJECT_NODE_BIN:$PATH" "$PROJECT_NODE_BIN/npm" "$@"
+fi
+
+command -v node >/dev/null 2>&1 || \
+  die "Node.js is unavailable; run scripts/bootstrap_node.sh"
+command -v npm >/dev/null 2>&1 || \
+  die "npm is unavailable; run scripts/bootstrap_node.sh"
+SYSTEM_NODE="$(command -v node)"
+SYSTEM_NPM="$(command -v npm)"
+SYSTEM_NODE_BIN="$(dirname -- "$SYSTEM_NODE")"
+validate_runtime "$SYSTEM_NODE" "$SYSTEM_NPM" "$SYSTEM_NODE_BIN" || \
+  die "Node 24 and npm 11 are required; run scripts/bootstrap_node.sh"
+exec "$SYSTEM_NPM" "$@"

@@ -1,0 +1,13 @@
+# Managed by TRex WebUI deploy/install.sh.
+/var/log/trex/trex_daemon_server.log {
+    daily
+    maxsize 1M
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su root trex-webui
+    create 0640 root trex-webui
+}

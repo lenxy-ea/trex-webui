@@ -1,0 +1,57 @@
+# FICTIONAL EXAMPLE ONLY.
+# Replace every PCI address, MAC/IP value, NUMA socket, and CPU assignment after
+# inspecting the target host. This file is not evidence that any i350/TRex/driver
+# combination is supported or certified.
+#
+# The six logical ports are arranged as three adjacent pairs:
+#   P0 <-> P1, P2 <-> P3, P4 <-> P5
+#
+# 192.0.2.0/24, 198.51.100.0/24, and 203.0.113.0/24 are documentation networks.
+# 02:00:* values are locally administered unicast MAC placeholders.
+
+- version: 2
+  port_limit: 6
+  interfaces:
+    - "0000:01:00.0"
+    - "0000:01:00.1"
+    - "0000:01:00.2"
+    - "0000:01:00.3"
+    - "0000:02:00.0"
+    - "0000:02:00.1"
+  port_bandwidth_gb: 1
+  c: 1
+  port_info:
+    - ip: 192.0.2.1
+      default_gw: 192.0.2.2
+      src_mac: "02:00:00:01:00:01"
+      dest_mac: "02:00:00:01:00:02"
+    - ip: 192.0.2.2
+      default_gw: 192.0.2.1
+      src_mac: "02:00:00:01:00:02"
+      dest_mac: "02:00:00:01:00:01"
+    - ip: 198.51.100.1
+      default_gw: 198.51.100.2
+      src_mac: "02:00:00:02:00:01"
+      dest_mac: "02:00:00:02:00:02"
+    - ip: 198.51.100.2
+      default_gw: 198.51.100.1
+      src_mac: "02:00:00:02:00:02"
+      dest_mac: "02:00:00:02:00:01"
+    - ip: 203.0.113.1
+      default_gw: 203.0.113.2
+      src_mac: "02:00:00:03:00:01"
+      dest_mac: "02:00:00:03:00:02"
+    - ip: 203.0.113.2
+      default_gw: 203.0.113.1
+      src_mac: "02:00:00:03:00:02"
+      dest_mac: "02:00:00:03:00:01"
+  platform:
+    master_thread_id: 0
+    latency_thread_id: 1
+    dual_if:
+      - socket: 0
+        threads: [2]
+      - socket: 0
+        threads: [3]
+      - socket: 0
+        threads: [4]

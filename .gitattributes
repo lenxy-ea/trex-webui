@@ -1,0 +1,6 @@
+/.agents export-ignore
+/.pensieve export-ignore
+/AGENTS.md export-ignore
+/CLAUDE.md export-ignore
+/skills-lock.json export-ignore
+/apps/api/tests/test_internal_project_instructions.py export-ignore

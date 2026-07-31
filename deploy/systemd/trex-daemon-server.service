@@ -1,0 +1,62 @@
+# Managed by TRex WebUI deploy/install.sh.
+[Unit]
+Description=TRex privileged daemon server
+Documentation=file:///opt/trex-webui/docs/NGINX_DEPLOYMENT.md
+After=network-online.target firewalld.service nftables.service
+Wants=network-online.target
+PartOf=nftables.service
+Before=trex-webui-api.service
+AssertFileIsExecutable=/opt/trex-core/scripts/trex_daemon_server
+AssertFileIsExecutable=/usr/libexec/trex-webui/trex_daemon_supervisor.py
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/trex-core/scripts
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TREX_DAEMON_LOG=/var/log/trex/trex_daemon_server.log
+
+# The managed launcher keeps upstream "start-live" in this foreground process,
+# reaps stopped TRex children, and avoids the upstream same-thread shutdown
+# deadlock. The daemon RPC binds to loopback. Upstream TRex hardcodes its native
+# TCP services to wildcard addresses, so publish and verify the host boundary
+# before starting any process that can launch those listeners.
+ExecStartPre=/usr/bin/bash /usr/libexec/trex-webui/trex_native_boundary.sh apply
+ExecStartPre=/usr/bin/install -d -o root -g trex-webui -m 2750 /var/log/trex
+ExecStartPre=/usr/bin/touch /var/log/trex/trex_daemon_server.log
+ExecStartPre=/usr/bin/chown root:trex-webui /var/log/trex/trex_daemon_server.log
+ExecStartPre=/usr/bin/chmod 0640 /var/log/trex/trex_daemon_server.log
+ExecStart=/usr/bin/python3 -I /usr/libexec/trex-webui/trex_daemon_supervisor.py --daemon-bin /opt/trex-core/scripts/trex_daemon_server --generation-file /run/trex-webui/daemon-generation -- --daemon-port 8090 --trex-host 127.0.0.1 start-live
+ExecStartPost=/usr/bin/bash /usr/libexec/trex-webui/trex_native_boundary.sh verify
+ExecStartPost=/usr/bin/python3 /usr/libexec/trex-webui/daemon_rpc_probe.py --host 127.0.0.1 --port 8090 --timeout 20 ready
+StandardOutput=append:/var/log/trex/trex_daemon_server.log
+StandardError=append:/var/log/trex/trex_daemon_server.log
+
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=30
+TimeoutStopSec=30
+KillMode=mixed
+UMask=0027
+RuntimeDirectory=trex-webui
+RuntimeDirectoryMode=0755
+LimitCORE=infinity
+LimitMEMLOCK=infinity
+LimitNOFILE=1048576
+
+# The daemon must remain root and retain device/sysfs access because it launches
+# TRex/DPDK. Keep the safe restrictions that do not prevent that hardware path.
+ProtectHome=true
+ProtectHostname=true
+LockPersonality=true
+
+# This cgroup filter covers every AF_INET/AF_INET6 socket created by the daemon
+# and its TRex/Scapy descendants. The nftables rule above remains the fail-closed
+# authority on hosts where systemd cannot attach its cgroup eBPF filter.
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+[Install]
+WantedBy=multi-user.target

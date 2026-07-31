@@ -1,0 +1,48 @@
+:root {
+  /* Dense data-center console palette: quiet surfaces, explicit state colors. */
+  --font-sans: "IBM Plex Sans Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --color-canvas: #dce4e8;
+  --color-shell: #e8eef1;
+  --color-chrome: #f5f7f8;
+  --color-chrome-muted: #e7ecef;
+  --color-surface: #ffffff;
+  --color-surface-raised: #fbfcfd;
+  --color-surface-subtle: #f3f6f8;
+  --color-surface-muted: #eaf0f3;
+
+  --color-text-strong: #132832;
+  --color-text: #2b3f49;
+  --color-text-muted: #5e717b;
+  --color-text-subtle: #75868e;
+  --color-text-inverse: #ffffff;
+
+  --color-border-strong: #95a5ad;
+  --color-border: #bdc9cf;
+  --color-border-soft: #dce5e9;
+
+  --color-accent-strong: #0b6f94;
+  --color-accent: #168bb2;
+  --color-accent-soft: #d9edf5;
+  --color-accent-hover: #075b79;
+  --color-focus: #087aa5;
+
+  --color-success: #177249;
+  --color-success-soft: #e8f5ed;
+  --color-warning: #805400;
+  --color-warning-soft: #fff5dc;
+  --color-danger: #a13731;
+  --color-danger-soft: #fff0ef;
+  --color-info: #155f86;
+  --color-info-soft: #e4f2f8;
+
+  --shadow-chrome: 0 1px 4px rgba(19, 40, 50, 0.16);
+  --shadow-window: 0 14px 34px rgba(19, 40, 50, 0.24);
+  --shadow-menu: 0 6px 16px rgba(19, 40, 50, 0.2);
+
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --transition-fast: 120ms ease;
+}
