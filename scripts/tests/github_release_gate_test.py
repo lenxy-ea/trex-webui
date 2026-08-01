@@ -126,9 +126,28 @@ if method == "GET" and endpoint == f"repos/{repository}/commits/{state['tag']}":
     print(json.dumps({"sha": state["tag_sha"]}))
     raise SystemExit(0)
 
-if method == "GET" and endpoint == f"repos/{repository}/releases/tags/{state['tag']}":
-    print(json.dumps(release()))
+parsed_endpoint = urllib.parse.urlsplit(endpoint)
+if method == "GET" and parsed_endpoint.path == f"repos/{repository}/releases":
+    query = urllib.parse.parse_qs(parsed_endpoint.query)
+    if query.get("per_page") != ["100"] or len(query.get("page", [])) != 1:
+        die("release listing did not use exact bounded pagination", 97)
+    page = int(query["page"][0])
+    filler = [
+        {"id": 1000 + index, "tag_name": f"v0.0.0-fixture-{index}"}
+        for index in range(state.get("release_filler_count", 0))
+    ]
+    releases = [*filler, release()]
+    if state.get("duplicate_exact_tag"):
+        duplicate = release()
+        duplicate["id"] = state["release_id"] + 1
+        releases.append(duplicate)
+    start = (page - 1) * 100
+    log({"kind": "release-list", "page": page})
+    print(json.dumps(releases[start:start + 100]))
     raise SystemExit(0)
+
+if method == "GET" and endpoint == f"repos/{repository}/releases/tags/{state['tag']}":
+    die("draft release is not visible through the tag endpoint", 44)
 
 if endpoint.startswith(asset_prefix):
     asset_id = int(endpoint.removeprefix(asset_prefix))
@@ -327,6 +346,8 @@ def base_state(
         "mutations": [],
         "fail_after_patch": False,
         "immutable_forbidden": False,
+        "release_filler_count": 0,
+        "duplicate_exact_tag": False,
     }
 
 
@@ -400,6 +421,59 @@ def test_prepare_persists_exact_release_id_and_downloads_starters_by_asset_id(
         directory / SIX_PORT
     ).read_bytes()
     assert output_path.read_text(encoding="utf-8") == "published=false\nrelease_id=101\n"
+    assert load_state(state_path)["mutations"] == []
+
+
+def test_prepare_finds_draft_on_second_release_page_without_using_tag_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory, identity, inventory = make_local_release(tmp_path)
+    state = base_state(directory, identity, inventory, {STANDARD, SIX_PORT})
+    state["release_filler_count"] = 100
+    github, state_path, log_path = fake_environment(tmp_path, monkeypatch, state)
+    args = SimpleNamespace(
+        repository=REPOSITORY,
+        tag=TAG,
+        source_sha=SOURCE_SHA,
+        standard_report_asset=STANDARD,
+        six_port_report_asset=SIX_PORT,
+        identity=str(tmp_path / "identity.json"),
+        starter_dir=str(tmp_path / "qualification"),
+        artifact_dir=str(tmp_path / "published-assets"),
+        github_output=None,
+    )
+
+    gate.command_prepare(args, github)
+
+    logged = [
+        json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [item["page"] for item in logged if item["kind"] == "release-list"] == [1, 2]
+    assert load_state(state_path)["mutations"] == []
+
+
+def test_prepare_rejects_multiple_release_rows_for_exact_tag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory, identity, inventory = make_local_release(tmp_path)
+    state = base_state(directory, identity, inventory, {STANDARD, SIX_PORT})
+    state["duplicate_exact_tag"] = True
+    github, state_path, _log_path = fake_environment(tmp_path, monkeypatch, state)
+    args = SimpleNamespace(
+        repository=REPOSITORY,
+        tag=TAG,
+        source_sha=SOURCE_SHA,
+        standard_report_asset=STANDARD,
+        six_port_report_asset=SIX_PORT,
+        identity=str(tmp_path / "identity.json"),
+        starter_dir=str(tmp_path / "qualification"),
+        artifact_dir=str(tmp_path / "published-assets"),
+        github_output=None,
+    )
+
+    with pytest.raises(gate.ReleaseGateError, match="multiple releases"):
+        gate.command_prepare(args, github)
+
     assert load_state(state_path)["mutations"] == []
 
 
@@ -692,6 +766,45 @@ def test_gate_uses_subprocess_argv_and_prohibits_mutable_release_cli_shortcuts()
     ):
         assert prohibited not in content
     assert gate.API_VERSION == "2026-03-10"
+
+
+def test_api_json_retries_read_only_cli_failures_without_retrying_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+    responses = [
+        SimpleNamespace(returncode=1, stderr=b"transient TLS failure", stdout=b""),
+        SimpleNamespace(returncode=1, stderr=b"transient TLS failure", stdout=b""),
+        SimpleNamespace(returncode=0, stderr=b"", stdout=b'{"ok": true}'),
+    ]
+
+    def fake_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        calls.append(command)
+        return responses.pop(0)
+
+    monkeypatch.setattr(gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(gate.time, "sleep", sleeps.append)
+    github = gate.GitHub("gh-fixture")
+
+    assert github.api_json("GET", "repos/example/project", label="read") == {
+        "ok": True
+    }
+    assert len(calls) == 3
+    assert sleeps == [0.25, 0.5]
+
+    calls.clear()
+    responses[:] = [
+        SimpleNamespace(returncode=1, stderr=b"write failure", stdout=b"")
+    ]
+    with pytest.raises(gate.ReleaseGateError, match="write failure"):
+        github.api_json(
+            "PATCH",
+            "repos/example/project/releases/1",
+            body=b"{}",
+            label="write",
+        )
+    assert len(calls) == 1
 
 
 def test_local_contract_subprocess_receives_no_github_tokens(

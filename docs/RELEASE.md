@@ -103,6 +103,12 @@ the two operator reports and the tag target before dispatch: a passing workflow
 publishes the prerelease. A partial draft rerun uploads only missing assets; an
 exact immutable published rerun performs final validation without mutation.
 
+GitHub's release-by-tag REST endpoint does not expose draft releases. The gate
+therefore resolves the initial draft through the authenticated, bounded release
+listing, requires one exact tag match, and immediately pins its numeric release
+ID. Every subsequent read, download, upload, and publication check uses that
+exact ID and fails if the tag, target, state, or asset identities change.
+
 ## 4. Run a verified archive upgrade
 
 Download every published asset into one new directory. The metadata inventory names

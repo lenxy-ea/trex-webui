@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,9 @@ API_VERSION = "2026-03-10"
 JSON_ACCEPT = "application/vnd.github+json"
 OCTET_ACCEPT = "application/octet-stream"
 ADMIN_TOKEN_ENV = "RELEASE_ADMIN_TOKEN"
+RELEASE_LIST_PAGE_SIZE = 100
+MAX_RELEASE_LIST_PAGES = 100
+READ_RETRY_ATTEMPTS = 3
 RELEASE_WORKFLOW_PATH = ".github/workflows/release.yml"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SAFE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}\Z")
@@ -236,6 +240,7 @@ class GitHub:
         output_file=None,
         label: str,
         administration: bool = False,
+        attempts: int = 1,
     ) -> bytes:
         command = [self.executable, *arguments]
         environment = os.environ.copy()
@@ -247,23 +252,28 @@ class GitHub:
                     "Administration(read) preflight"
                 )
             environment["GH_TOKEN"] = admin_token
-        try:
-            completed = subprocess.run(
-                command,
-                input=input_bytes,
-                stdout=output_file if output_file is not None else subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=environment,
-                check=False,
-            )
-        except OSError as exc:
-            raise ReleaseGateError(f"cannot run {label}: {exc}") from exc
-        if completed.returncode != 0:
+        for attempt in range(1, attempts + 1):
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=input_bytes,
+                    stdout=output_file if output_file is not None else subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=environment,
+                    check=False,
+                )
+            except OSError as exc:
+                raise ReleaseGateError(f"cannot run {label}: {exc}") from exc
+            if completed.returncode == 0:
+                if output_file is not None:
+                    return b""
+                return completed.stdout
+            if attempt < attempts:
+                time.sleep(0.25 * (2 ** (attempt - 1)))
+                continue
             stderr = completed.stderr.decode("utf-8", errors="replace").strip()
             fail(f"{label} failed with status {completed.returncode}: {stderr}")
-        if output_file is not None:
-            return b""
-        return completed.stdout
+        raise AssertionError("unreachable subprocess retry state")
 
     @staticmethod
     def _headers(accept: str) -> list[str]:
@@ -291,6 +301,7 @@ class GitHub:
             input_bytes=body,
             label=label,
             administration=administration,
+            attempts=READ_RETRY_ATTEMPTS if method == "GET" else 1,
         )
         return strict_json(output, label)
 
@@ -368,6 +379,69 @@ class GitHub:
 
 def release_endpoint(identity: Identity) -> str:
     return f"repos/{identity.repository}/releases/{identity.release_id}"
+
+
+def resolve_release_by_exact_tag(
+    github: GitHub,
+    *,
+    repository: str,
+    tag: str,
+) -> object:
+    """Resolve drafts and published releases without trusting a mutable tag URL.
+
+    GitHub's ``releases/tags/{tag}`` endpoint does not expose draft releases,
+    even to an authenticated repository administrator.  The release workflow
+    necessarily starts from a draft, so enumerate the authenticated release
+    listing, require one exact tag match, and let the caller immediately pin
+    that result to its immutable numeric release ID.
+
+    Duplicate IDs across pages fail closed because they indicate that the
+    offset-based listing changed while it was being traversed.  A full final
+    page also fails closed rather than claiming uniqueness beyond the bounded
+    traversal.
+    """
+
+    seen_ids: set[int] = set()
+    matched: object | None = None
+    for page in range(1, MAX_RELEASE_LIST_PAGES + 1):
+        releases = github.api_json(
+            "GET",
+            (
+                f"repos/{repository}/releases"
+                f"?per_page={RELEASE_LIST_PAGE_SIZE}&page={page}"
+            ),
+            label=f"initial release listing page {page}",
+        )
+        if not isinstance(releases, list):
+            fail(f"initial release listing page {page} is not an array")
+        for index, release in enumerate(releases):
+            label = f"initial release listing page {page} item {index}"
+            if not isinstance(release, dict):
+                fail(f"{label} is not an object")
+            release_id = release.get("id")
+            release_tag = release.get("tag_name")
+            if (
+                isinstance(release_id, bool)
+                or not isinstance(release_id, int)
+                or release_id < 1
+            ):
+                fail(f"{label} has an invalid release ID")
+            if not isinstance(release_tag, str):
+                fail(f"{label} has an invalid tag name")
+            if release_id in seen_ids:
+                fail("release listing changed during pagination")
+            seen_ids.add(release_id)
+            if release_tag == tag:
+                if matched is not None:
+                    fail("release listing contains multiple releases for the exact tag")
+                matched = release
+        if len(releases) < RELEASE_LIST_PAGE_SIZE:
+            break
+    else:
+        fail("release listing exceeded the bounded exact-tag search")
+    if matched is None:
+        fail("release listing contains no release for the exact tag")
+    return matched
 
 
 def parse_asset(value: object, label: str) -> Asset:
@@ -964,10 +1038,10 @@ def initial_identity(
 ) -> tuple[Identity, str]:
     check_immutable_setting(github, repository)
     encoded_tag = urllib.parse.quote(tag, safe="")
-    release = github.api_json(
-        "GET",
-        f"repos/{repository}/releases/tags/{encoded_tag}",
-        label="initial exact-tag release resolution",
+    release = resolve_release_by_exact_tag(
+        github,
+        repository=repository,
+        tag=tag,
     )
     identity, state = validate_initial_release(
         release,
