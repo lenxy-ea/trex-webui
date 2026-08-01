@@ -2455,6 +2455,7 @@ LEGACY_RELEASE_RECONCILER_TARGET="$3"
 INSTALL_ROOT="$4/install"
 RELEASE_STATE_ROOT="$4/state"
 RELEASE_RECONCILER_TARGET="$5"
+RELEASE_RECOVERY_PYTHON="$6"
 verify_legacy_terminal_handoff_to_v2
 trap - EXIT
 '''
@@ -2469,6 +2470,7 @@ trap - EXIT
             str(legacy_engine),
             str(tmp_path),
             str(source_engine),
+            sys.executable,
         ],
         capture_output=True,
         text=True,
@@ -2519,6 +2521,32 @@ def test_recovery_v2_handoff_uses_installed_engine_for_n_minus_one_rollback(
         use_installed_v2=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_recovery_v2_handoff_rejects_noncanonical_python_in_production() -> None:
+    script = r'''
+set -Eeuo pipefail
+source "$1/deploy/upgrade.sh"
+INSTALL_ROOT=/opt/trex-webui
+RELEASE_RECONCILER_TARGET="$1/deploy/release_transaction.py"
+RELEASE_RECOVERY_PYTHON="$2"
+verify_legacy_terminal_handoff_to_v2
+trap - EXIT
+'''
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "handoff-production-python",
+            str(PROJECT_ROOT),
+            sys.executable,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "production recovery handoff requires /usr/bin/python3.11" in result.stderr
 
 
 @pytest.mark.parametrize("failure", ["divergent", "nonterminal", "retained"])

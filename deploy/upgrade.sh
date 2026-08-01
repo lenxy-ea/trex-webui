@@ -68,6 +68,7 @@ TREX_DAEMON_BIN="${TREX_DAEMON_BIN:-$TREX_DAEMON_SCRIPTS_DIR/trex_daemon_server}
 SERVICE_ENV_FILE="$TREX_MANAGED_API_ENV_FILE_DEFAULT"
 SERVICE_RUNTIME_STATE_PATH="/var/lib/trex-webui/runtime-state.json"
 RELEASE_STATE_ROOT="${RELEASE_STATE_ROOT:-}"
+RELEASE_RECOVERY_PYTHON="/usr/bin/python3.11"
 RECOVERY_V2_ROOT="${RECOVERY_V2_ROOT:-$DAEMON_LIBEXEC_ROOT/recovery-v2}"
 RELEASE_RECONCILER_TARGET="${RELEASE_RECONCILER_TARGET:-$RECOVERY_V2_ROOT/release_transaction.py}"
 RELEASE_BOOTSTRAP_TARGET="${RELEASE_BOOTSTRAP_TARGET:-$RECOVERY_V2_ROOT/bootstrap_release_infrastructure.py}"
@@ -762,14 +763,19 @@ verify_legacy_terminal_handoff_to_v2() {
   fi
   [[ -f "$source_v2_engine" && ! -L "$source_v2_engine" && -x "$source_v2_engine" ]] || \
     die "recovery ABI v2 handoff engine is missing or unsafe"
+  [[ -x "$RELEASE_RECOVERY_PYTHON" ]] || \
+    die "release recovery Python is missing or not executable"
+  [[ "$INSTALL_ROOT" != "/opt/trex-webui" || \
+    "$RELEASE_RECOVERY_PYTHON" == "/usr/bin/python3.11" ]] || \
+    die "production recovery handoff requires /usr/bin/python3.11"
   local legacy_status v2_status
-  legacy_status="$(/usr/bin/python3.11 "$LEGACY_RELEASE_RECONCILER_TARGET" \
+  legacy_status="$("$RELEASE_RECOVERY_PYTHON" "$LEGACY_RELEASE_RECONCILER_TARGET" \
     --install-root "$INSTALL_ROOT" --state-root "$RELEASE_STATE_ROOT" status)" || \
     die "recovery ABI v1 cannot read the durable release journal"
-  v2_status="$(/usr/bin/python3.11 "$source_v2_engine" \
+  v2_status="$("$RELEASE_RECOVERY_PYTHON" "$source_v2_engine" \
     --install-root "$INSTALL_ROOT" --state-root "$RELEASE_STATE_ROOT" status)" || \
     die "candidate recovery ABI v2 cannot read the durable release journal"
-  /usr/bin/python3.11 - "$legacy_status" "$v2_status" <<'PY' || \
+  "$RELEASE_RECOVERY_PYTHON" - "$legacy_status" "$v2_status" <<'PY' || \
     die "recovery ABI v1 to v2 terminal handoff precondition failed"
 import json
 import sys
