@@ -1410,6 +1410,36 @@ def test_confirmed_daemon_termination_retires_cross_generation_session_without_r
     )
 
 
+def test_confirmed_daemon_termination_is_idempotent_for_stopped_session(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path, supervisor="systemd")
+    client = FakeTrafficClient()
+    runtime = authority(env, client)
+    revision = runtime.snapshot().data["plan_revision"]
+    started = runtime.start_group("pair-0", revision, None)
+    session_id = started.data["session"]["id"]
+    assert runtime.action(
+        "stop",
+        [0, 1],
+        expected_session_id=session_id,
+    ).ok
+    before = RuntimeStateStore(env.runtime_state_path).load()
+    assert before.traffic_session is not None
+
+    retired = runtime.retire_after_trex_termination()
+
+    assert retired.ok is True
+    assert retired.data == {
+        "retired": False,
+        "session_id": session_id,
+        "ports": [],
+        "mutation_intent_cleared": False,
+    }
+    after = RuntimeStateStore(env.runtime_state_path).load()
+    assert after == before
+
+
 def test_reaper_session_cas_refuses_replaced_session_without_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

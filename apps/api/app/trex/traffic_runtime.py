@@ -715,13 +715,28 @@ class TrafficRuntimeAuthority:
                 return _failure("traffic_runtime_state_invalid", str(exc))
             session_before = before.traffic_session
             intent_before = before.traffic_mutation_intent
-            if session_before is None and intent_before is None:
+            session_needs_retirement = (
+                session_before is not None
+                and (
+                    session_before.state != "stopped"
+                    or any(
+                        group.state != "stopped"
+                        or group.hard_stop_at is not None
+                        for group in session_before.groups
+                    )
+                )
+            )
+            if not session_needs_retirement and intent_before is None:
                 self._owned_session_id = None
                 return TrexCallResult(
                     True,
                     data={
                         "retired": False,
-                        "session_id": None,
+                        "session_id": (
+                            session_before.id
+                            if session_before is not None
+                            else None
+                        ),
                         "ports": [],
                         "mutation_intent_cleared": False,
                     },
