@@ -52,6 +52,97 @@ run_verify_helper() (
   "$helper" "$@"
 )
 
+run_private_selinux_fixture() (
+  local release_root="$1"
+  local inspected_log="$2"
+  local mismatched_path="${3:-}"
+  local mismatched_context="${4:-}"
+  # shellcheck source=deploy/verify.sh
+  source "$PROJECT_ROOT/deploy/verify.sh"
+  matchpathcon() {
+    [[ "$#" -eq 3 && "$1" == "-n" && "$2" == "--" ]] || return 97
+    printf '%s\n' "$3" >>"$inspected_log"
+    case "$3" in
+      "$release_root/.venv/bin"|"$release_root/.venv/bin/python")
+        printf 'system_u:object_r:bin_t:s0\n'
+        ;;
+      *)
+        printf 'system_u:object_r:usr_t:s0\n'
+        ;;
+    esac
+  }
+  stat() {
+    [[ "$#" -eq 4 && "$1" == "-c" && "$2" == "%C" && "$3" == "--" ]] || \
+      return 98
+    if [[ "$4" == "$mismatched_path" ]]; then
+      printf '%s\n' "$mismatched_context"
+    else
+      case "$4" in
+        "$release_root/.venv/bin"|"$release_root/.venv/bin/python")
+          printf 'system_u:object_r:bin_t:s0\n'
+          ;;
+        *)
+          printf 'system_u:object_r:usr_t:s0\n'
+          ;;
+      esac
+    fi
+  }
+  assert_release_private_selinux "$release_root" fixture
+)
+
+SELINUX_RELEASE_FIXTURE="$TEST_ROOT/selinux-release"
+SELINUX_API_CHILD="$SELINUX_RELEASE_FIXTURE/apps/api/app/main.py"
+SELINUX_PYTHON_LINK="$SELINUX_RELEASE_FIXTURE/.venv/bin/python"
+SELINUX_INSPECTED_LOG="$TEST_ROOT/selinux-inspected.log"
+mkdir -p \
+  "$SELINUX_RELEASE_FIXTURE/apps/api/app" \
+  "$SELINUX_RELEASE_FIXTURE/apps/web" \
+  "$SELINUX_RELEASE_FIXTURE/.venv/bin"
+printf 'pass\n' >"$SELINUX_API_CHILD"
+printf 'TREX_WEBUI_TREX_HOST=127.0.0.1\n' >"$SELINUX_RELEASE_FIXTURE/.env"
+ln -s /usr/bin/python3 "$SELINUX_PYTHON_LINK"
+run_private_selinux_fixture \
+  "$SELINUX_RELEASE_FIXTURE" \
+  "$SELINUX_INSPECTED_LOG" || \
+  fail "verifier rejected private release paths with exact policy labels"
+for inspected_path in \
+  "$SELINUX_RELEASE_FIXTURE" \
+  "$SELINUX_RELEASE_FIXTURE/apps" \
+  "$SELINUX_RELEASE_FIXTURE/apps/web" \
+  "$SELINUX_RELEASE_FIXTURE/apps/api" \
+  "$SELINUX_API_CHILD" \
+  "$SELINUX_RELEASE_FIXTURE/.env" \
+  "$SELINUX_RELEASE_FIXTURE/.venv" \
+  "$SELINUX_RELEASE_FIXTURE/.venv/bin" \
+  "$SELINUX_PYTHON_LINK"; do
+  grep -Fxq "$inspected_path" "$SELINUX_INSPECTED_LOG" || \
+    fail "verifier did not inspect SELinux policy for $inspected_path"
+done
+
+: >"$SELINUX_INSPECTED_LOG"
+expect_failure "does not match persisted policy" \
+  run_private_selinux_fixture \
+  "$SELINUX_RELEASE_FIXTURE" \
+  "$SELINUX_INSPECTED_LOG" \
+  "$SELINUX_API_CHILD" \
+  "unconfined_u:object_r:usr_t:s0"
+
+: >"$SELINUX_INSPECTED_LOG"
+expect_failure "does not match persisted policy" \
+  run_private_selinux_fixture \
+  "$SELINUX_RELEASE_FIXTURE" \
+  "$SELINUX_INSPECTED_LOG" \
+  "$SELINUX_PYTHON_LINK" \
+  "system_u:object_r:user_tmp_t:s0"
+
+: >"$SELINUX_INSPECTED_LOG"
+expect_failure "does not match persisted policy" \
+  run_private_selinux_fixture \
+  "$SELINUX_RELEASE_FIXTURE" \
+  "$SELINUX_INSPECTED_LOG" \
+  "$SELINUX_RELEASE_FIXTURE/.venv/bin" \
+  "system_u:object_r:user_tmp_t:s0"
+
 secure_environment_file() {
   local path="$1"
   chown root:root "$path"

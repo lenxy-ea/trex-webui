@@ -28,16 +28,16 @@ UNIT_PATH = (
     PROJECT_ROOT
     / "deploy"
     / "systemd"
-    / "trex-webui-release-reconcile.service"
+    / "trex-webui-release-reconcile-v2.service"
 )
 RETRY_UNIT_PATH = (
-    PROJECT_ROOT / "deploy" / "systemd" / "trex-webui-release-retry.service"
+    PROJECT_ROOT / "deploy" / "systemd" / "trex-webui-release-retry-v2.service"
 )
 ACK_UNIT_PATH = (
     PROJECT_ROOT
     / "deploy"
     / "systemd"
-    / "trex-webui-release-consumer-ack.service"
+    / "trex-webui-release-consumer-ack-v2.service"
 )
 API_UNIT_PATH = PROJECT_ROOT / "deploy" / "systemd" / "trex-webui-api.service"
 DAEMON_UNIT_PATH = (
@@ -47,7 +47,21 @@ NGINX_DROPIN_PATH = (
     PROJECT_ROOT
     / "deploy"
     / "systemd"
-    / "nginx-trex-webui-release-reconcile.conf"
+    / "trex-webui-release-reconcile-v2.conf"
+)
+BRIDGE_PATHS = (
+    PROJECT_ROOT
+    / "deploy"
+    / "systemd"
+    / "trex-webui-release-reconcile-v1-bridge-v2.conf",
+    PROJECT_ROOT
+    / "deploy"
+    / "systemd"
+    / "trex-webui-release-retry-v1-bridge-v2.conf",
+    PROJECT_ROOT
+    / "deploy"
+    / "systemd"
+    / "trex-webui-release-consumer-ack-v1-bridge-v2.conf",
 )
 
 
@@ -1750,12 +1764,22 @@ def test_legacy_snapshot_makes_first_migration_crash_serviceable(tmp_path: Path)
     snapshot = tmp_path / "staging" / "legacy-baseline"
     snapshot.parent.mkdir()
     snapshot.parent.chmod(0o700)
-    result = engine.snapshot_legacy(
-        destination=snapshot,
-        static_root=static,
-        runtime_root=runtime,
-    )
+    previous_umask = os.umask(0o077)
+    try:
+        result = engine.snapshot_legacy(
+            destination=snapshot,
+            static_root=static,
+            runtime_root=runtime,
+        )
+    finally:
+        os.umask(previous_umask)
     assert result["digest"]
+    for service_ancestor in (
+        snapshot,
+        snapshot / "apps",
+        snapshot / "apps" / "web",
+    ):
+        assert stat.S_IMODE(service_ancestor.stat().st_mode) == 0o755
     baseline, baseline_digest = select_release(engine, snapshot)
     assert baseline["phase"] == "committed"
 
@@ -2352,7 +2376,7 @@ def test_reconciler_unit_orders_recovery_before_services() -> None:
     assert "Before=trex-daemon-server.service" not in content
     assert (
         "ExecStart=/usr/bin/python3.11 "
-        "/usr/libexec/trex-webui/release_transaction.py "
+        "/usr/libexec/trex-webui/recovery-v2/release_transaction.py "
         "--deployment-lock /run/lock/trex-webui/deploy.lock "
         "--supervise-errors reconcile"
     ) in content
@@ -2376,9 +2400,9 @@ def test_reconciler_unit_orders_recovery_before_services() -> None:
     assert content.index(deny_privileged) < content.index("SystemCallFilter=@chown")
     for consumer in (API_UNIT_PATH, DAEMON_UNIT_PATH, NGINX_DROPIN_PATH):
         consumer_content = consumer.read_text(encoding="utf-8")
-        assert "Requires=trex-webui-release-reconcile.service" in consumer_content
+        assert "Requires=trex-webui-release-reconcile-v2.service" in consumer_content
         assert "After=" in consumer_content
-        assert "trex-webui-release-reconcile.service" in consumer_content
+        assert "trex-webui-release-reconcile-v2.service" in consumer_content
     retry_content = RETRY_UNIT_PATH.read_text(encoding="utf-8")
     assert "--retry-on-lock-busy reconcile" in retry_content
     assert "Restart=on-failure" in retry_content
@@ -2393,6 +2417,181 @@ def test_reconciler_unit_orders_recovery_before_services() -> None:
     assert "Restart=on-failure" in ack_content
     assert "StartLimitIntervalSec=0" in ack_content
     assert "trex-daemon-server.service" not in ack_content
+    for bridge_path in BRIDGE_PATHS:
+        bridge_content = bridge_path.read_text(encoding="utf-8")
+        assert "ExecStart=\n" in bridge_content
+        assert "ExecStart=/usr/bin/true" in bridge_content
+        assert "ExecStartPost=\n" in bridge_content
+        assert "Restart=no" in bridge_content
+        assert "/usr/libexec/trex-webui/release_transaction.py" not in bridge_content
+
+
+def _run_recovery_v2_handoff_fixture(
+    tmp_path: Path,
+    legacy_status: dict[str, object],
+    candidate_status: dict[str, object],
+    *,
+    use_installed_v2: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    archive_root = tmp_path / "archive"
+    source_engine = archive_root / "deploy" / "release_transaction.py"
+    legacy_engine = tmp_path / "legacy_release_transaction.py"
+    source_engine.parent.mkdir(parents=True)
+    for path, payload in (
+        (legacy_engine, legacy_status),
+        (source_engine, candidate_status),
+    ):
+        path.write_text(
+            "#!/usr/bin/env python3.11\n"
+            f"print({json.dumps(json.dumps(payload, sort_keys=True))})\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+    script = r'''
+set -Eeuo pipefail
+source "$1/deploy/upgrade.sh"
+ARCHIVE_SOURCE_ROOT="$2"
+LEGACY_RELEASE_RECONCILER_TARGET="$3"
+INSTALL_ROOT="$4/install"
+RELEASE_STATE_ROOT="$4/state"
+RELEASE_RECONCILER_TARGET="$5"
+verify_legacy_terminal_handoff_to_v2
+trap - EXIT
+'''
+    return subprocess.run(
+        [
+            "bash",
+            "-c",
+            script,
+            "handoff-fixture",
+            str(PROJECT_ROOT),
+            "" if use_installed_v2 else str(archive_root),
+            str(legacy_engine),
+            str(tmp_path),
+            str(source_engine),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _terminal_handoff_status(*, phase: str = "rolled_back") -> dict[str, object]:
+    current = "a" * 64
+    previous = None
+    return {
+        "schema": "trex-webui-release-selection-status/v1",
+        "current": current,
+        "previous": previous,
+        "transaction": {
+            "phase": phase,
+            "current_before": current,
+            "previous_before": previous,
+            "rollback_authority_retired": True,
+            "consumer_mutation_armed": False,
+            "daemon_mutation_started": False,
+            "rollback_restored": False,
+            "consumer_active_before": [],
+            "consumer_baseline": [],
+            "consumer_enable": [],
+            "consumer_start": [],
+            "host_artifacts": [],
+            "native_boundary": None,
+        },
+    }
+
+
+def test_recovery_v2_handoff_accepts_identical_retired_terminal_journal(
+    tmp_path: Path,
+) -> None:
+    status = _terminal_handoff_status()
+    result = _run_recovery_v2_handoff_fixture(tmp_path, status, status)
+    assert result.returncode == 0, result.stderr
+
+
+def test_recovery_v2_handoff_uses_installed_engine_for_n_minus_one_rollback(
+    tmp_path: Path,
+) -> None:
+    status = _terminal_handoff_status()
+    result = _run_recovery_v2_handoff_fixture(
+        tmp_path,
+        status,
+        status,
+        use_installed_v2=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("failure", ["divergent", "nonterminal", "retained"])
+def test_recovery_v2_handoff_rejects_unsafe_migration_state(
+    tmp_path: Path, failure: str
+) -> None:
+    legacy = _terminal_handoff_status()
+    candidate = json.loads(json.dumps(legacy))
+    transaction = candidate["transaction"]
+    assert isinstance(transaction, dict)
+    if failure == "divergent":
+        candidate["previous"] = "b" * 64
+    elif failure == "nonterminal":
+        transaction["phase"] = "activated"
+    else:
+        transaction["consumer_mutation_armed"] = True
+    result = _run_recovery_v2_handoff_fixture(tmp_path, legacy, candidate)
+    assert result.returncode != 0
+    assert "terminal handoff precondition failed" in result.stderr
+
+
+def test_upgrade_publishes_v2_only_after_v1_terminal_migration_gate() -> None:
+    source = (PROJECT_ROOT / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
+    bootstrap = source[
+        source.index("bootstrap_release_reconciler() {") : source.index("have_cmd() {")
+    ]
+    assert bootstrap.index("preflight_recovery_v2_migration") < bootstrap.index(
+        "/usr/bin/python3 \"$source_bootstrap\""
+    )
+    assert bootstrap.index(
+        '"$source_reconcile_bridge::$LEGACY_RELEASE_RECONCILER_BRIDGE_TARGET::0644"'
+    ) < bootstrap.index(
+        '"$source_dropin::$RELEASE_RECONCILER_API_DROPIN_TARGET::0644"'
+    )
+    preflight = source[
+        source.index("preflight_recovery_v2_migration() {") : source.index(
+            "bootstrap_release_reconciler() {"
+        )
+    ]
+    assert preflight.index("verify_legacy_release_infrastructure_exact") < preflight.index(
+        "assert_legacy_release_units_quiescent"
+    ) < preflight.index("verify_legacy_terminal_handoff_to_v2")
+    legacy_probe = source[
+        source.index("legacy_release_infrastructure_present() {") : source.index(
+            "verify_legacy_release_infrastructure_exact() {"
+        )
+    ]
+    assert '"$LEGACY_RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST"' in legacy_probe
+    assert '"$LEGACY_RELEASE_RECONCILER_DAEMON_DROPIN_TARGET"' in legacy_probe
+    arm = source[
+        source.index("arm_installed_release_reconciler() {") : source.index(
+            "assert_loaded_release_infrastructure_unit() {"
+        )
+    ]
+    assert arm.index("verify_legacy_terminal_handoff_to_v2") < arm.index(
+        "assert_legacy_release_units_quiescent"
+    ) < arm.index("systemctl daemon-reload")
+    install_source = (PROJECT_ROOT / "deploy" / "install.sh").read_text(
+        encoding="utf-8"
+    )
+    installer = install_source[
+        install_source.index("install_release_reconciler() {") : install_source.index(
+            "install_packages() {"
+        )
+    ]
+    assert '"$RELEASE_STATE_ROOT/infrastructure-managed-local.json"' in installer
+    assert (
+        '"$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT/'
+        'trex-webui-release-reconcile.conf"'
+    ) in installer
+    assert installer.index("recovery ABI v1 must be migrated") < installer.index(
+        'install -d -o root -g root -m 0755'
+    )
 
 
 def test_supervised_reconcile_retries_raw_exceptions_in_same_process(
@@ -3911,6 +4110,7 @@ upgrade_selinux_mode() { printf 'Enforcing\n'; }
 have_cmd() { return 0; }
 semanage() { printf 'semanage %s\n' "$*"; }
 matchpathcon() { printf '%s system_u:object_r:httpd_sys_content_t:s0\n' "$1"; }
+chmod() { printf 'chmod %s\n' "$*"; }
 restorecon() { printf 'restorecon %s\n' "$*"; }
 setsebool() { printf 'setsebool %s\n' "$*"; }
 prelabel_versioned_release_for_selinux
@@ -3936,7 +4136,202 @@ def test_selinux_prelabel_accepts_fresh_install_without_current(
     result = _run_prelabel_fixture(install_root, candidate, "")
 
     assert result.returncode == 0, result.stderr
-    assert f"restorecon -RF {candidate}/apps/web/dist" in result.stdout
+    for service_ancestor in (
+        candidate,
+        candidate / "apps",
+        candidate / "apps" / "web",
+    ):
+        assert f"chmod 0755 {service_ancestor}" in result.stdout
+    assert f"restorecon -RF {candidate}" in result.stdout
+
+
+def test_versioned_selinux_relabels_complete_release_tree() -> None:
+    upgrade = (PROJECT_ROOT / "deploy" / "upgrade.sh").read_text(encoding="utf-8")
+    prelabel = upgrade.split("prelabel_versioned_release_for_selinux() {", 1)[1].split(
+        "\nprepare_legacy_baseline() {", 1
+    )[0]
+    assert 'run restorecon -RF "$release_path"' in prelabel
+    assert 'run restorecon -RF "$release_path/apps/web/dist"' not in prelabel
+
+    installer = (PROJECT_ROOT / "deploy" / "install.sh").read_text(encoding="utf-8")
+    configure = installer.split("configure_selinux() {", 1)[1].split(
+        "\nconfigure_firewalld() {", 1
+    )[0]
+    assert 'run restorecon -RF "$release_path"' in configure
+    assert 'run restorecon -RF "$release_path/apps/web/dist"' not in configure
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "/usr/bin/python3",
+        "{ path=/usr/bin/python3 ; ignore_errors=no }",
+        "{ path=/usr/bin/python3 ; argv[]=/usr/bin/python3 app.py ; "
+        "ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; "
+        "pid=invalid ; code=(null) ; status=0/0 }",
+    ],
+)
+def test_systemd_exec_identity_rejects_malformed_values(value: str) -> None:
+    with pytest.raises(
+        release_transaction.ReleaseTransactionError,
+        match="systemd ExecStart identity",
+    ):
+        release_transaction._stable_systemd_exec_start(value)
+
+
+def test_systemd_exec_identity_ignores_only_process_runtime_fields() -> None:
+    before = (
+        "{ path=/opt/trex-webui/.venv/bin/python ; "
+        "argv[]=/opt/trex-webui/.venv/bin/python -m uvicorn app.main:app ; "
+        "ignore_errors=no ; start_time=[Sat 2026-08-01 08:02:44 JST] ; "
+        "stop_time=[n/a] ; pid=1577952 ; code=(null) ; status=0/0 }"
+    )
+    after = (
+        "{ path=/opt/trex-webui/.venv/bin/python ; "
+        "argv[]=/opt/trex-webui/.venv/bin/python -m uvicorn app.main:app ; "
+        "ignore_errors=no ; start_time=[Sat 2026-08-01 08:03:32 JST] ; "
+        "stop_time=[n/a] ; pid=1579764 ; code=(null) ; status=0/0 }"
+    )
+    changed_command = after.replace("app.main:app", "other.main:app")
+
+    stable = release_transaction._stable_systemd_exec_start(before)
+    assert stable == release_transaction._stable_systemd_exec_start(after)
+    assert stable == release_transaction._stable_systemd_exec_start(stable)
+    assert release_transaction._stable_systemd_exec_start(
+        before
+    ) != release_transaction._stable_systemd_exec_start(changed_command)
+
+
+def _api_consumer_ready_fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    working_directory: str,
+    exec_start: str,
+    main_pid: int,
+    argv0: str,
+) -> None:
+    properties = {
+        "WorkingDirectory": working_directory,
+        "ExecStart": exec_start,
+        "MainPID": str(main_pid),
+    }
+    proc_cmdline = Path(f"/proc/{main_pid}/cmdline")
+    original_read_bytes = Path.read_bytes
+
+    def read_bytes(path: Path) -> bytes:
+        if path == proc_cmdline:
+            return os.fsencode(argv0) + b"\0-m\0uvicorn\0app.main:app\0"
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(
+        release_transaction, "systemd_consumer_is_active", lambda _unit: True
+    )
+    monkeypatch.setattr(release_transaction, "_api_health_ready", lambda: True)
+    monkeypatch.setattr(
+        release_transaction,
+        "_systemctl_property",
+        lambda _unit, name: properties[name],
+    )
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_systemd_api_consumer_ready_accepts_restart_with_same_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    argv0 = "/usr/bin/python3"
+    working_directory = "/opt/trex-webui/current/apps/api"
+    baseline_exec_start = (
+        f"{{ path={argv0} ; "
+        f"argv[]={argv0} -m uvicorn app.main:app ; "
+        "ignore_errors=no ; start_time=[Sat 2026-08-01 08:02:44 JST] ; "
+        "stop_time=[n/a] ; pid=1577952 ; code=(null) ; status=0/0 }"
+    )
+    restarted_exec_start = (
+        f"{{ path={argv0} ; "
+        f"argv[]={argv0} -m uvicorn app.main:app ; "
+        "ignore_errors=no ; start_time=[Sat 2026-08-01 08:03:32 JST] ; "
+        "stop_time=[n/a] ; pid=1579764 ; code=(null) ; status=0/0 }"
+    )
+    _api_consumer_ready_fixture(
+        monkeypatch,
+        working_directory=working_directory,
+        exec_start=restarted_exec_start,
+        main_pid=1579764,
+        argv0=argv0,
+    )
+    baseline = {
+        "unit": "trex-webui-api.service",
+        "kind": "api",
+        "working_directory": working_directory,
+        "exec_start": baseline_exec_start,
+        "argv0": argv0,
+        "resolved_exec": str(Path(argv0).resolve(strict=True)),
+    }
+
+    assert release_transaction.systemd_consumer_is_ready(baseline, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("working_directory", "path", "application"),
+    [
+        (
+            "/opt/trex-webui/previous/apps/api",
+            "/usr/bin/python3",
+            "app.main:app",
+        ),
+        (
+            "/opt/trex-webui/current/apps/api",
+            "/usr/local/bin/python3",
+            "app.main:app",
+        ),
+        (
+            "/opt/trex-webui/current/apps/api",
+            "/usr/bin/python3",
+            "other.main:app",
+        ),
+    ],
+    ids=["working-directory", "executable-path", "argv"],
+)
+def test_systemd_api_consumer_ready_rejects_identity_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    working_directory: str,
+    path: str,
+    application: str,
+) -> None:
+    argv0 = "/usr/bin/python3"
+    expected_working_directory = "/opt/trex-webui/current/apps/api"
+    baseline_exec_start = (
+        f"{{ path={argv0} ; "
+        f"argv[]={argv0} -m uvicorn app.main:app ; "
+        "ignore_errors=no ; start_time=[Sat 2026-08-01 08:02:44 JST] ; "
+        "stop_time=[n/a] ; pid=1577952 ; code=(null) ; status=0/0 }"
+    )
+    restarted_exec_start = (
+        f"{{ path={path} ; "
+        f"argv[]={argv0} -m uvicorn {application} ; "
+        "ignore_errors=no ; start_time=[Sat 2026-08-01 08:03:32 JST] ; "
+        "stop_time=[n/a] ; pid=1579764 ; code=(null) ; status=0/0 }"
+    )
+    _api_consumer_ready_fixture(
+        monkeypatch,
+        working_directory=working_directory,
+        exec_start=restarted_exec_start,
+        main_pid=1579764,
+        argv0=argv0,
+    )
+    baseline = {
+        "unit": "trex-webui-api.service",
+        "kind": "api",
+        "working_directory": expected_working_directory,
+        "exec_start": baseline_exec_start,
+        "argv0": argv0,
+        "resolved_exec": str(Path(argv0).resolve(strict=True)),
+    }
+
+    assert not release_transaction.systemd_consumer_is_ready(baseline, tmp_path)
 
 
 def test_selinux_prelabel_rejects_missing_prepared_current(
@@ -4000,9 +4395,9 @@ def test_verifier_rejects_incomplete_consumer_dependency(
     unit = tmp_path / "consumer.service"
     lines = ["[Unit]"]
     if missing != "requires":
-        lines.append("Requires=trex-webui-release-reconcile.service")
+        lines.append("Requires=trex-webui-release-reconcile-v2.service")
     if missing != "after":
-        lines.append("After=network.target trex-webui-release-reconcile.service")
+        lines.append("After=network.target trex-webui-release-reconcile-v2.service")
     unit.write_text("\n".join(lines) + "\n", encoding="utf-8")
     result = subprocess.run(
         [

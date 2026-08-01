@@ -1,8 +1,8 @@
 [Unit]
 Description=TRex WebUI API
-After=network-online.target trex-webui-release-reconcile.service
+After=network-online.target trex-webui-release-reconcile-v2.service
 Wants=network-online.target
-Requires=trex-webui-release-reconcile.service
+Requires=trex-webui-release-reconcile-v2.service
 
 [Service]
 Type=simple

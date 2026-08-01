@@ -1,0 +1,53 @@
+# Managed by TRex WebUI deploy/install.sh.
+[Unit]
+Description=Reconcile interrupted TRex WebUI release selection (recovery ABI v2)
+Documentation=file:///opt/trex-webui/current/docs/PROJECT_ROADMAP.md
+After=local-fs.target
+Before=trex-webui-api.service nginx.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+StateDirectory=trex-webui-deploy
+StateDirectoryMode=0700
+ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/recovery-v2/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile
+ExecStartPost=/usr/bin/systemctl start --no-block trex-webui-release-consumer-ack-v2.service
+TimeoutStartSec=infinity
+Restart=on-failure
+RestartSec=1
+ReadWritePaths=/opt/trex-webui /var/lib/trex-webui-deploy /run/lock
+ReadWritePaths=-/etc/nginx/conf.d -/etc/systemd/system -/etc/systemd/system/nftables.service.d -/etc/logrotate.d -/etc/trex-webui -/usr/libexec/trex-webui
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=~@clock @cpu-emulation @debug @module @mount @obsolete @privileged @raw-io @reboot @swap
+# @privileged includes @chown. Restoring the exact root:service ownership of
+# trex-webui.env requires fchown/lchown; remove only that narrow group from the
+# deny set while retaining the rest of @privileged.
+SystemCallFilter=@chown
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

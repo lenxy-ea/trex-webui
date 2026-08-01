@@ -16,24 +16,31 @@ DAEMON_LIBEXEC_ROOT="${DAEMON_LIBEXEC_ROOT:-/usr/libexec/trex-webui}"
 DAEMON_SUPERVISOR_TARGET="${DAEMON_SUPERVISOR_TARGET:-$DAEMON_LIBEXEC_ROOT/trex_daemon_supervisor.py}"
 DAEMON_RPC_PROBE_TARGET="${DAEMON_RPC_PROBE_TARGET:-$DAEMON_LIBEXEC_ROOT/daemon_rpc_probe.py}"
 DAEMON_NATIVE_BOUNDARY_TARGET="${DAEMON_NATIVE_BOUNDARY_TARGET:-$DAEMON_LIBEXEC_ROOT/trex_native_boundary.sh}"
-RELEASE_RECONCILER_TARGET="${RELEASE_RECONCILER_TARGET:-$DAEMON_LIBEXEC_ROOT/release_transaction.py}"
-RELEASE_BOOTSTRAP_TARGET="${RELEASE_BOOTSTRAP_TARGET:-$DAEMON_LIBEXEC_ROOT/bootstrap_release_infrastructure.py}"
+RECOVERY_V2_ROOT="${RECOVERY_V2_ROOT:-$DAEMON_LIBEXEC_ROOT/recovery-v2}"
+RELEASE_RECONCILER_TARGET="${RELEASE_RECONCILER_TARGET:-$RECOVERY_V2_ROOT/release_transaction.py}"
+RELEASE_BOOTSTRAP_TARGET="${RELEASE_BOOTSTRAP_TARGET:-$RECOVERY_V2_ROOT/bootstrap_release_infrastructure.py}"
 TREX_OVERVIEW_VALIDATOR_TARGET="${TREX_OVERVIEW_VALIDATOR_TARGET:-$DAEMON_LIBEXEC_ROOT/trex_overview_contract.py}"
 TREX_PERSISTED_STATE_VALIDATOR_TARGET="${TREX_PERSISTED_STATE_VALIDATOR_TARGET:-$DAEMON_LIBEXEC_ROOT/trex_persisted_state_contract.py}"
-RELEASE_RECONCILER_UNIT_TARGET="${RELEASE_RECONCILER_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-reconcile.service}"
-RELEASE_RECONCILER_RETRY_UNIT_TARGET="${RELEASE_RECONCILER_RETRY_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-retry.service}"
-RELEASE_RECONCILER_ACK_UNIT_TARGET="${RELEASE_RECONCILER_ACK_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-consumer-ack.service}"
+RELEASE_RECONCILER_UNIT_TARGET="${RELEASE_RECONCILER_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-reconcile-v2.service}"
+RELEASE_RECONCILER_RETRY_UNIT_TARGET="${RELEASE_RECONCILER_RETRY_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-retry-v2.service}"
+RELEASE_RECONCILER_ACK_UNIT_TARGET="${RELEASE_RECONCILER_ACK_UNIT_TARGET:-/etc/systemd/system/trex-webui-release-consumer-ack-v2.service}"
 RELEASE_RECONCILER_NGINX_DROPIN_ROOT="${RELEASE_RECONCILER_NGINX_DROPIN_ROOT:-/etc/systemd/system/nginx.service.d}"
-RELEASE_RECONCILER_NGINX_DROPIN_TARGET="${RELEASE_RECONCILER_NGINX_DROPIN_TARGET:-$RELEASE_RECONCILER_NGINX_DROPIN_ROOT/trex-webui-release-reconcile.conf}"
+RELEASE_RECONCILER_NGINX_DROPIN_TARGET="${RELEASE_RECONCILER_NGINX_DROPIN_TARGET:-$RELEASE_RECONCILER_NGINX_DROPIN_ROOT/trex-webui-release-reconcile-v2.conf}"
 RELEASE_RECONCILER_API_DROPIN_ROOT="${RELEASE_RECONCILER_API_DROPIN_ROOT:-/etc/systemd/system/trex-webui-api.service.d}"
-RELEASE_RECONCILER_API_DROPIN_TARGET="${RELEASE_RECONCILER_API_DROPIN_TARGET:-$RELEASE_RECONCILER_API_DROPIN_ROOT/trex-webui-release-reconcile.conf}"
+RELEASE_RECONCILER_API_DROPIN_TARGET="${RELEASE_RECONCILER_API_DROPIN_TARGET:-$RELEASE_RECONCILER_API_DROPIN_ROOT/trex-webui-release-reconcile-v2.conf}"
 RELEASE_RECONCILER_DAEMON_DROPIN_ROOT="${RELEASE_RECONCILER_DAEMON_DROPIN_ROOT:-/etc/systemd/system/trex-daemon-server.service.d}"
-RELEASE_RECONCILER_DAEMON_DROPIN_TARGET="${RELEASE_RECONCILER_DAEMON_DROPIN_TARGET:-$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT/trex-webui-release-reconcile.conf}"
+RELEASE_RECONCILER_DAEMON_DROPIN_TARGET="${RELEASE_RECONCILER_DAEMON_DROPIN_TARGET:-$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT/trex-webui-release-reconcile-v2.conf}"
+RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT="${RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT:-/etc/systemd/system/trex-webui-release-reconcile.service.d}"
+RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET="${RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET:-$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT/trex-webui-recovery-v2-bridge.conf}"
+RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT="${RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT:-/etc/systemd/system/trex-webui-release-retry.service.d}"
+RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET="${RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET:-$RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT/trex-webui-recovery-v2-bridge.conf}"
+RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT="${RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT:-/etc/systemd/system/trex-webui-release-consumer-ack.service.d}"
+RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET="${RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET:-$RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT/trex-webui-recovery-v2-bridge.conf}"
 RELEASE_ROLLBACK_DAEMON_PROBE_TARGET="${RELEASE_ROLLBACK_DAEMON_PROBE_TARGET:-$DAEMON_LIBEXEC_ROOT/release_daemon_rpc_probe.py}"
 RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET="${RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET:-$DAEMON_LIBEXEC_ROOT/release_native_boundary.sh}"
 RELEASE_STATE_ROOT="${RELEASE_STATE_ROOT:-/var/lib/trex-webui-deploy}"
-RELEASE_INFRASTRUCTURE_COMMON_MANIFEST="${RELEASE_INFRASTRUCTURE_COMMON_MANIFEST:-$RELEASE_STATE_ROOT/infrastructure-common.json}"
-RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST="${RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST:-$RELEASE_STATE_ROOT/infrastructure-managed-local.json}"
+RELEASE_INFRASTRUCTURE_COMMON_MANIFEST="${RELEASE_INFRASTRUCTURE_COMMON_MANIFEST:-$RELEASE_STATE_ROOT/infrastructure-v2-common.json}"
+RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST="${RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST:-$RELEASE_STATE_ROOT/infrastructure-v2-managed-local.json}"
 NFTABLES_CONFIG_PATH="${NFTABLES_CONFIG_PATH:-/etc/sysconfig/nftables.conf}"
 NFTABLES_SYSTEMD_DROPIN_ROOT="${NFTABLES_SYSTEMD_DROPIN_ROOT:-/etc/systemd/system/nftables.service.d}"
 NFTABLES_SYSTEMD_DROPIN_TARGET="${NFTABLES_SYSTEMD_DROPIN_TARGET:-$NFTABLES_SYSTEMD_DROPIN_ROOT/trex-webui-native-boundary.conf}"
@@ -1484,6 +1491,7 @@ check_layout() {
   DAEMON_SUPERVISOR_TARGET="$(trex_canonical_path "$DAEMON_SUPERVISOR_TARGET" "daemon supervisor target")" || die "unsafe daemon supervisor target"
   DAEMON_RPC_PROBE_TARGET="$(trex_canonical_path "$DAEMON_RPC_PROBE_TARGET" "daemon RPC probe target")" || die "unsafe daemon RPC probe target"
   DAEMON_NATIVE_BOUNDARY_TARGET="$(trex_canonical_path "$DAEMON_NATIVE_BOUNDARY_TARGET" "daemon native boundary target")" || die "unsafe daemon native boundary target"
+  RECOVERY_V2_ROOT="$(trex_canonical_path "$RECOVERY_V2_ROOT" "recovery ABI v2 root")" || die "unsafe recovery ABI v2 root"
   RELEASE_RECONCILER_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_TARGET" "release reconciler target")" || die "unsafe release reconciler target"
   RELEASE_BOOTSTRAP_TARGET="$(trex_canonical_path "$RELEASE_BOOTSTRAP_TARGET" "release infrastructure bootstrap target")" || die "unsafe release infrastructure bootstrap target"
   TREX_OVERVIEW_VALIDATOR_TARGET="$(trex_canonical_path "$TREX_OVERVIEW_VALIDATOR_TARGET" "TRex overview validator target")" || die "unsafe TRex overview validator target"
@@ -1497,6 +1505,12 @@ check_layout() {
   RELEASE_RECONCILER_API_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_API_DROPIN_TARGET" "release reconciler API drop-in target")" || die "unsafe release reconciler API drop-in target"
   RELEASE_RECONCILER_DAEMON_DROPIN_ROOT="$(trex_canonical_path "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT" "release reconciler daemon drop-in root")" || die "unsafe release reconciler daemon drop-in root"
   RELEASE_RECONCILER_DAEMON_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" "release reconciler daemon drop-in target")" || die "unsafe release reconciler daemon drop-in target"
+  RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT="$(trex_canonical_path "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT" "recovery ABI v1 reconciler bridge drop-in root")" || die "unsafe recovery ABI v1 reconciler bridge drop-in root"
+  RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET" "recovery ABI v1 reconciler bridge drop-in target")" || die "unsafe recovery ABI v1 reconciler bridge drop-in target"
+  RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT="$(trex_canonical_path "$RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT" "recovery ABI v1 retry bridge drop-in root")" || die "unsafe recovery ABI v1 retry bridge drop-in root"
+  RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET" "recovery ABI v1 retry bridge drop-in target")" || die "unsafe recovery ABI v1 retry bridge drop-in target"
+  RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT="$(trex_canonical_path "$RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT" "recovery ABI v1 acknowledgement bridge drop-in root")" || die "unsafe recovery ABI v1 acknowledgement bridge drop-in root"
+  RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET="$(trex_canonical_path "$RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET" "recovery ABI v1 acknowledgement bridge drop-in target")" || die "unsafe recovery ABI v1 acknowledgement bridge drop-in target"
   RELEASE_ROLLBACK_DAEMON_PROBE_TARGET="$(trex_canonical_path "$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET" "stable rollback daemon probe target")" || die "unsafe stable rollback daemon probe target"
   RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET="$(trex_canonical_path "$RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET" "stable rollback native boundary target")" || die "unsafe stable rollback native boundary target"
   RELEASE_STATE_ROOT="$(trex_canonical_path "$RELEASE_STATE_ROOT" "release infrastructure state root")" || die "unsafe release infrastructure state root"
@@ -1569,10 +1583,12 @@ check_layout() {
   trex_path_is_within "$DAEMON_SUPERVISOR_TARGET" "$DAEMON_LIBEXEC_ROOT" || die "daemon supervisor target escaped its libexec root"
   trex_path_is_within "$DAEMON_RPC_PROBE_TARGET" "$DAEMON_LIBEXEC_ROOT" || die "daemon RPC probe target escaped its libexec root"
   trex_path_is_within "$DAEMON_NATIVE_BOUNDARY_TARGET" "$DAEMON_LIBEXEC_ROOT" || die "daemon native boundary target escaped its libexec root"
-  trex_path_is_within "$RELEASE_RECONCILER_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
-    die "release reconciler target escaped its libexec root"
-  trex_path_is_within "$RELEASE_BOOTSTRAP_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
-    die "release infrastructure bootstrap target escaped its libexec root"
+  trex_path_is_within "$RECOVERY_V2_ROOT" "$DAEMON_LIBEXEC_ROOT" || \
+    die "recovery ABI v2 root escaped its libexec root"
+  trex_path_is_within "$RELEASE_RECONCILER_TARGET" "$RECOVERY_V2_ROOT" || \
+    die "release reconciler target escaped the recovery ABI v2 root"
+  trex_path_is_within "$RELEASE_BOOTSTRAP_TARGET" "$RECOVERY_V2_ROOT" || \
+    die "release infrastructure bootstrap target escaped the recovery ABI v2 root"
   trex_path_is_within "$TREX_OVERVIEW_VALIDATOR_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
     die "TRex overview validator target escaped its libexec root"
   trex_path_is_within "$TREX_PERSISTED_STATE_VALIDATOR_TARGET" "$DAEMON_LIBEXEC_ROOT" || \
@@ -1594,6 +1610,7 @@ check_layout() {
   trex_assert_managed_path "$BACKUP_ROOT" "static backup root" "/var/www/trex-webui" || die "unsafe static backup root"
   trex_assert_managed_path "$VENV_LIVE_PATH" "Python virtual environment" "/opt/trex-webui" || die "unsafe Python virtual environment"
   trex_assert_managed_path "$DAEMON_LIBEXEC_ROOT" "daemon libexec root" "/usr/libexec/trex-webui" || die "unsafe daemon libexec root"
+  trex_assert_managed_path "$RECOVERY_V2_ROOT" "recovery ABI v2 root" "/usr/libexec/trex-webui" || die "unsafe recovery ABI v2 root"
   trex_assert_managed_path "$NFTABLES_SYSTEMD_DROPIN_ROOT" "nftables systemd drop-in root" "/etc/systemd/system" || die "unsafe nftables systemd drop-in root"
   trex_assert_managed_path \
     "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" \
@@ -1609,6 +1626,27 @@ check_layout() {
   trex_assert_managed_path "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT" \
     "release reconciler daemon drop-in root" "/etc/systemd/system" || \
     die "unsafe release reconciler daemon drop-in root"
+  trex_path_is_within \
+    "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET" \
+    "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT" || \
+    die "recovery ABI v1 reconciler bridge drop-in escaped its root"
+  trex_assert_managed_path "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT" \
+    "recovery ABI v1 reconciler bridge drop-in root" "/etc/systemd/system" || \
+    die "unsafe recovery ABI v1 reconciler bridge drop-in root"
+  trex_path_is_within \
+    "$RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET" \
+    "$RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT" || \
+    die "recovery ABI v1 retry bridge drop-in escaped its root"
+  trex_assert_managed_path "$RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT" \
+    "recovery ABI v1 retry bridge drop-in root" "/etc/systemd/system" || \
+    die "unsafe recovery ABI v1 retry bridge drop-in root"
+  trex_path_is_within \
+    "$RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET" \
+    "$RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT" || \
+    die "recovery ABI v1 acknowledgement bridge drop-in escaped its root"
+  trex_assert_managed_path "$RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT" \
+    "recovery ABI v1 acknowledgement bridge drop-in root" "/etc/systemd/system" || \
+    die "unsafe recovery ABI v1 acknowledgement bridge drop-in root"
   trex_path_is_within "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" "$RELEASE_STATE_ROOT" || \
     die "common release infrastructure manifest escaped its state root"
   trex_path_is_within "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" "$RELEASE_STATE_ROOT" || \
@@ -1635,24 +1673,31 @@ check_layout() {
   [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-api.service" ]] || die "missing deploy/systemd/trex-webui-api.service"
   if [[ "$VERSIONED_RELEASE" -eq 1 ]]; then
     [[ "$DAEMON_LIBEXEC_ROOT" == "/usr/libexec/trex-webui" && \
+      "$RECOVERY_V2_ROOT" == "/usr/libexec/trex-webui/recovery-v2" && \
       "$RELEASE_STATE_ROOT" == "/var/lib/trex-webui-deploy" && \
-      "$RELEASE_RECONCILER_TARGET" == "/usr/libexec/trex-webui/release_transaction.py" && \
-      "$RELEASE_BOOTSTRAP_TARGET" == "/usr/libexec/trex-webui/bootstrap_release_infrastructure.py" && \
+      "$RELEASE_RECONCILER_TARGET" == "/usr/libexec/trex-webui/recovery-v2/release_transaction.py" && \
+      "$RELEASE_BOOTSTRAP_TARGET" == "/usr/libexec/trex-webui/recovery-v2/bootstrap_release_infrastructure.py" && \
       "$TREX_OVERVIEW_VALIDATOR_TARGET" == "/usr/libexec/trex-webui/trex_overview_contract.py" && \
       "$TREX_PERSISTED_STATE_VALIDATOR_TARGET" == "/usr/libexec/trex-webui/trex_persisted_state_contract.py" && \
       "$RELEASE_ROLLBACK_DAEMON_PROBE_TARGET" == "/usr/libexec/trex-webui/release_daemon_rpc_probe.py" && \
       "$RELEASE_ROLLBACK_NATIVE_BOUNDARY_TARGET" == "/usr/libexec/trex-webui/release_native_boundary.sh" && \
-      "$RELEASE_RECONCILER_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-reconcile.service" && \
-      "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-retry.service" && \
-      "$RELEASE_RECONCILER_ACK_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-consumer-ack.service" && \
+      "$RELEASE_RECONCILER_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-reconcile-v2.service" && \
+      "$RELEASE_RECONCILER_RETRY_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-retry-v2.service" && \
+      "$RELEASE_RECONCILER_ACK_UNIT_TARGET" == "/etc/systemd/system/trex-webui-release-consumer-ack-v2.service" && \
       "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" == "/etc/systemd/system/nginx.service.d" && \
-      "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" == "/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile.conf" && \
+      "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" == "/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile-v2.conf" && \
       "$RELEASE_RECONCILER_API_DROPIN_ROOT" == "/etc/systemd/system/trex-webui-api.service.d" && \
-      "$RELEASE_RECONCILER_API_DROPIN_TARGET" == "/etc/systemd/system/trex-webui-api.service.d/trex-webui-release-reconcile.conf" && \
+      "$RELEASE_RECONCILER_API_DROPIN_TARGET" == "/etc/systemd/system/trex-webui-api.service.d/trex-webui-release-reconcile-v2.conf" && \
       "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT" == "/etc/systemd/system/trex-daemon-server.service.d" && \
-      "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" == "/etc/systemd/system/trex-daemon-server.service.d/trex-webui-release-reconcile.conf" && \
-      "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-common.json" && \
-      "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-managed-local.json" ]] || \
+      "$RELEASE_RECONCILER_DAEMON_DROPIN_TARGET" == "/etc/systemd/system/trex-daemon-server.service.d/trex-webui-release-reconcile-v2.conf" && \
+      "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT" == "/etc/systemd/system/trex-webui-release-reconcile.service.d" && \
+      "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET" == "/etc/systemd/system/trex-webui-release-reconcile.service.d/trex-webui-recovery-v2-bridge.conf" && \
+      "$RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT" == "/etc/systemd/system/trex-webui-release-retry.service.d" && \
+      "$RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET" == "/etc/systemd/system/trex-webui-release-retry.service.d/trex-webui-recovery-v2-bridge.conf" && \
+      "$RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT" == "/etc/systemd/system/trex-webui-release-consumer-ack.service.d" && \
+      "$RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET" == "/etc/systemd/system/trex-webui-release-consumer-ack.service.d/trex-webui-recovery-v2-bridge.conf" && \
+      "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-v2-common.json" && \
+      "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-v2-managed-local.json" ]] || \
       die "versioned release requires the exact fixed release infrastructure targets"
     [[ -x "$PROJECT_ROOT/deploy/bootstrap_release_infrastructure.py" ]] || \
       die "missing executable release infrastructure bootstrap"
@@ -1660,18 +1705,26 @@ check_layout() {
       die "missing executable strict TRex overview validator"
     [[ -x "$PROJECT_ROOT/deploy/trex_persisted_state_contract.py" ]] || \
       die "missing executable persisted state validator"
-    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service" ]] || \
-      die "missing release reconciler systemd unit"
-    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry.service" ]] || \
-      die "missing release retry systemd unit"
-    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack.service" ]] || \
-      die "missing release consumer acknowledgement systemd unit"
-    [[ -f "$PROJECT_ROOT/deploy/systemd/nginx-trex-webui-release-reconcile.conf" ]] || \
-      die "missing release reconciler Nginx dependency drop-in"
+    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.service" ]] || \
+      die "missing recovery ABI v2 reconciler systemd unit"
+    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v2.service" ]] || \
+      die "missing recovery ABI v2 retry systemd unit"
+    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v2.service" ]] || \
+      die "missing recovery ABI v2 consumer acknowledgement systemd unit"
+    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.conf" ]] || \
+      die "missing recovery ABI v2 consumer dependency drop-in"
+    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf" ]] || \
+      die "missing recovery ABI v1 reconciler bridge drop-in"
+    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf" ]] || \
+      die "missing recovery ABI v1 retry bridge drop-in"
+    [[ -f "$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf" ]] || \
+      die "missing recovery ABI v1 acknowledgement bridge drop-in"
     [[ -x "$PROJECT_ROOT/deploy/release_transaction.py" ]] || \
       die "release transaction reconciler must be executable"
   elif [[ -e "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" || \
-    -L "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" ]]; then
+    -L "$RELEASE_RECONCILER_NGINX_DROPIN_TARGET" || \
+    -e "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT/trex-webui-release-reconcile.conf" || \
+    -L "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT/trex-webui-release-reconcile.conf" ]]; then
     die "legacy checkout install cannot replace a versioned deployment; use a verified archive upgrade"
   fi
   [[ "$(grep -Fxc '# @@TREX_WEBUI_DAEMON_MODE_ENV@@' "$PROJECT_ROOT/deploy/systemd/trex-webui-api.service")" -eq 1 ]] || \
@@ -2024,8 +2077,8 @@ render_daemon_unit() {
     -e "s|$boundary_placeholder|$escaped_boundary_target|g" \
     "$PROJECT_ROOT/deploy/systemd/trex-daemon-server.service" | \
     awk -v versioned_release="$VERSIONED_RELEASE" '
-      versioned_release != "1" && $0 == "Requires=trex-webui-release-reconcile.service" { next }
-      versioned_release != "1" { gsub(/ trex-webui-release-reconcile\.service/, "") }
+      versioned_release != "1" && $0 == "Requires=trex-webui-release-reconcile-v2.service" { next }
+      versioned_release != "1" { gsub(/ trex-webui-release-reconcile-v2\.service/, "") }
       { print }
     '
 }
@@ -2410,8 +2463,8 @@ install_configs() {
       -v daemon_scripts="$TREX_DAEMON_SCRIPTS_DIR" \
       -v daemon_bin="$TREX_DAEMON_BIN" \
       -v profile_roots="$TREX_DAEMON_SCRIPTS_DIR/stl:$render_project_root/profiles:$SERVICE_STATE_PROFILE_ROOT" '
-      versioned_release != "1" && $0 == "Requires=trex-webui-release-reconcile.service" { next }
-      versioned_release != "1" { gsub(/ trex-webui-release-reconcile\.service/, "") }
+      versioned_release != "1" && $0 == "Requires=trex-webui-release-reconcile-v2.service" { next }
+      versioned_release != "1" { gsub(/ trex-webui-release-reconcile-v2\.service/, "") }
       local_daemon == "1" && index($0, "Environment=TREX_WEBUI_PROFILE_ROOTS=") == 1 {
         next
       }
@@ -2491,22 +2544,48 @@ install_release_reconciler() {
   local source_state_validator="$PROJECT_ROOT/deploy/trex_persisted_state_contract.py"
   local source_daemon_probe="$PROJECT_ROOT/deploy/daemon_rpc_probe.py"
   local source_native_boundary="$PROJECT_ROOT/deploy/trex_native_boundary.sh"
-  local source_unit="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service"
-  local source_retry_unit="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry.service"
-  local source_ack_unit="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack.service"
-  local source_dropin="$PROJECT_ROOT/deploy/systemd/nginx-trex-webui-release-reconcile.conf"
-  log "Publishing or exact-verifying the immutable release recovery ABI"
+  local source_unit="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.service"
+  local source_retry_unit="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v2.service"
+  local source_ack_unit="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v2.service"
+  local source_dropin="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.conf"
+  local source_reconciler_bridge="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf"
+  local source_retry_bridge="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf"
+  local source_ack_bridge="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf"
+  log "Publishing or exact-verifying the immutable release recovery ABI v2"
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    printf '+ exact-verify the complete common fixed ABI; publish API/Nginx dependency drop-ins only after every prerequisite is durable\n'
+    printf '+ exact-verify the complete common fixed ABI v2; durably publish provider prerequisites, then quarantine any installed ABI v1 units with bridges, then publish API/Nginx v2 dependencies and the manifest last\n'
     if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
-      printf '+ exact-verify the managed-local fixed ABI; publish its daemon dependency drop-in last\n'
+      printf '+ exact-verify the managed-local fixed ABI v2; publish its daemon dependency drop-in only after rollback helpers are durable\n'
     fi
     return
   fi
+  if [[ ! -e "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" && \
+    ! -L "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" ]]; then
+    local legacy_path
+    for legacy_path in \
+      "$RELEASE_STATE_ROOT/infrastructure-common.json" \
+      "$RELEASE_STATE_ROOT/infrastructure-managed-local.json" \
+      "$DAEMON_LIBEXEC_ROOT/bootstrap_release_infrastructure.py" \
+      "$DAEMON_LIBEXEC_ROOT/release_transaction.py" \
+      "${RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT%.d}" \
+      "${RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT%.d}" \
+      "${RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT%.d}" \
+      "$RELEASE_RECONCILER_API_DROPIN_ROOT/trex-webui-release-reconcile.conf" \
+      "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT/trex-webui-release-reconcile.conf" \
+      "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT/trex-webui-release-reconcile.conf"; do
+      if [[ -e "$legacy_path" || -L "$legacy_path" ]]; then
+        die "recovery ABI v1 must be migrated from a terminal journal by deploy/upgrade.sh before install.sh may publish ABI v2"
+      fi
+    done
+  fi
   install -d -o root -g root -m 0755 \
     "$DAEMON_LIBEXEC_ROOT" \
+    "$RECOVERY_V2_ROOT" \
     "$RELEASE_RECONCILER_NGINX_DROPIN_ROOT" \
-    "$RELEASE_RECONCILER_API_DROPIN_ROOT"
+    "$RELEASE_RECONCILER_API_DROPIN_ROOT" \
+    "$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT" \
+    "$RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT" \
+    "$RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT"
   install -d -o root -g root -m 0700 "$RELEASE_STATE_ROOT"
   local common_artifacts=(
     --artifact "$source_bootstrap::$RELEASE_BOOTSTRAP_TARGET::0755"
@@ -2516,13 +2595,16 @@ install_release_reconciler() {
     --artifact "$source_unit::$RELEASE_RECONCILER_UNIT_TARGET::0644"
     --artifact "$source_retry_unit::$RELEASE_RECONCILER_RETRY_UNIT_TARGET::0644"
     --artifact "$source_ack_unit::$RELEASE_RECONCILER_ACK_UNIT_TARGET::0644"
+    --consumer-dropin "$source_reconciler_bridge::$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET::0644"
+    --consumer-dropin "$source_retry_bridge::$RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET::0644"
+    --consumer-dropin "$source_ack_bridge::$RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET::0644"
     --consumer-dropin "$source_dropin::$RELEASE_RECONCILER_API_DROPIN_TARGET::0644"
     --consumer-dropin "$source_dropin::$RELEASE_RECONCILER_NGINX_DROPIN_TARGET::0644"
   )
   /usr/bin/python3 "$source_bootstrap" \
     --manifest "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" \
     "${common_artifacts[@]}" || \
-    die "fixed common release infrastructure differs from the armed ABI"
+    die "fixed common release infrastructure differs from the armed recovery ABI v2"
   if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
     install -d -o root -g root -m 0755 "$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT"
     local managed_artifacts=(
@@ -2533,10 +2615,10 @@ install_release_reconciler() {
     /usr/bin/python3 "$source_bootstrap" \
       --manifest "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" \
       "${managed_artifacts[@]}" || \
-      die "fixed managed-local release infrastructure differs from the armed ABI"
+      die "fixed managed-local release infrastructure differs from the armed recovery ABI v2"
   fi
   sync --file-system "$RELEASE_STATE_ROOT" || \
-    die "unable to persist the fixed release infrastructure state"
+    die "unable to persist the fixed recovery ABI v2 infrastructure state"
 }
 
 install_packages() {
@@ -2623,7 +2705,11 @@ configure_selinux() {
         [[ "$expected_context" == *":httpd_sys_content_t:"* ]] || \
           die "persisted SELinux policy does not select the versioned frontend tree"
       fi
-      run restorecon -RF "$release_path/apps/web/dist"
+      # The staged runtime may inherit a temporary SELinux label before it is
+      # atomically published as .venv. Relabel the complete release tree so
+      # systemd can execute the runtime; the exact fcontext rule keeps only the
+      # frontend subtree readable by Nginx.
+      run restorecon -RF "$release_path"
     done
     run sync --file-system "$release_layout"
   else
@@ -2721,11 +2807,11 @@ reload_services() {
 
   if [[ "$RUN_ENABLE" -eq 1 ]]; then
     if [[ "$VERSIONED_RELEASE" -eq 1 ]]; then
-      run systemctl enable trex-webui-release-reconcile.service
+      run systemctl enable trex-webui-release-reconcile-v2.service
       run sync --file-system /etc/systemd/system
       if [[ "$DRY_RUN" -eq 0 ]]; then
-        systemctl is-enabled --quiet trex-webui-release-reconcile.service || \
-          die "boot-time release reconciliation enablement did not persist"
+        systemctl is-enabled --quiet trex-webui-release-reconcile-v2.service || \
+          die "boot-time recovery ABI v2 reconciliation enablement did not persist"
       fi
     fi
     if [[ "$DEFER_CONSUMER_ENABLE" -eq 1 ]]; then
@@ -2741,6 +2827,15 @@ reload_services() {
       fi
       run systemctl enable nginx
     fi
+  fi
+
+  if [[ "$VERSIONED_RELEASE" -eq 1 ]]; then
+    # Run the canonical v2 authority once against the just-loaded graph even
+    # when consumer restarts are intentionally deferred. During an outer
+    # archive transaction the non-blocking deployment guard reports the
+    # trusted in-progress deployment as success; otherwise this proves the
+    # durable selector journal before any consumer start.
+    run systemctl start trex-webui-release-reconcile-v2.service
   fi
 
   if [[ "$RUN_RESTART" -eq 1 ]]; then

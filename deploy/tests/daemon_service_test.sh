@@ -6,9 +6,17 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DAEMON_UNIT="$PROJECT_ROOT/deploy/systemd/trex-daemon-server.service"
 NFTABLES_DROPIN="$PROJECT_ROOT/deploy/systemd/nftables-trex-webui.conf"
 API_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-api.service"
-RECONCILE_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service"
-RETRY_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry.service"
-ACK_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack.service"
+RECONCILE_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.service"
+RETRY_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v2.service"
+ACK_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v2.service"
+CONSUMER_DROPIN="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.conf"
+V1_RECONCILE_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service"
+V1_RETRY_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry.service"
+V1_ACK_UNIT="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack.service"
+V1_CONSUMER_DROPIN="$PROJECT_ROOT/deploy/systemd/nginx-trex-webui-release-reconcile.conf"
+V1_RECONCILE_BRIDGE="$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf"
+V1_RETRY_BRIDGE="$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf"
+V1_ACK_BRIDGE="$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf"
 PROBE="$PROJECT_ROOT/deploy/daemon_rpc_probe.py"
 SUPERVISOR="$PROJECT_ROOT/deploy/trex_daemon_supervisor.py"
 SUPERVISOR_TEST="$PROJECT_ROOT/deploy/tests/daemon_supervisor_test.py"
@@ -28,6 +36,31 @@ assert_unit_line() {
   grep -Fqx "$line" "$file" || fail "$(basename -- "$file") is missing: $line"
 }
 
+assert_v1_bridge() {
+  local file="$1"
+  local v2_unit="$2"
+  [[ -f "$file" && ! -L "$file" ]] || \
+    fail "recovery ABI v1 bridge is missing or unsafe: $(basename -- "$file")"
+  assert_unit_line "$file" "Requires=$v2_unit"
+  assert_unit_line "$file" "After=$v2_unit"
+  assert_unit_line "$file" "ExecStart="
+  assert_unit_line "$file" "ExecStart=/usr/bin/true"
+  assert_unit_line "$file" "ExecStartPost="
+  assert_unit_line "$file" "Restart=no"
+  [[ "$(grep -Fxc 'ExecStart=' "$file")" -eq 1 ]] || \
+    fail "$(basename -- "$file") does not reset the inherited v1 ExecStart exactly once"
+  [[ "$(grep -Ec '^ExecStart=.+$' "$file")" -eq 1 ]] || \
+    fail "$(basename -- "$file") does not define exactly one inert ExecStart"
+  [[ "$(grep -Fxc 'ExecStartPost=' "$file")" -eq 1 && \
+    "$(grep -Ec '^ExecStartPost=.+$' "$file" || true)" -eq 0 ]] || \
+    fail "$(basename -- "$file") does not fully clear the inherited v1 ExecStartPost"
+  [[ "$(grep -Fxc 'Restart=no' "$file")" -eq 1 ]] || \
+    fail "$(basename -- "$file") does not disable v1 automatic restarts exactly once"
+  if grep -Fq '/usr/libexec/trex-webui/release_transaction.py' "$file"; then
+    fail "$(basename -- "$file") still executes recovery ABI v1"
+  fi
+}
+
 [[ -f "$DAEMON_UNIT" && ! -L "$DAEMON_UNIT" ]] || fail "daemon unit template is missing or unsafe"
 [[ -f "$RECONCILE_UNIT" && ! -L "$RECONCILE_UNIT" ]] || \
   fail "release reconciler unit template is missing or unsafe"
@@ -35,6 +68,16 @@ assert_unit_line() {
   fail "release retry unit template is missing or unsafe"
 [[ -f "$ACK_UNIT" && ! -L "$ACK_UNIT" ]] || \
   fail "release consumer acknowledgement unit template is missing or unsafe"
+[[ -f "$CONSUMER_DROPIN" && ! -L "$CONSUMER_DROPIN" ]] || \
+  fail "release consumer dependency drop-in is missing or unsafe"
+[[ -f "$V1_RECONCILE_UNIT" && ! -L "$V1_RECONCILE_UNIT" ]] || \
+  fail "recovery ABI v1 reconciler migration fixture is missing or unsafe"
+[[ -f "$V1_RETRY_UNIT" && ! -L "$V1_RETRY_UNIT" ]] || \
+  fail "recovery ABI v1 retry migration fixture is missing or unsafe"
+[[ -f "$V1_ACK_UNIT" && ! -L "$V1_ACK_UNIT" ]] || \
+  fail "recovery ABI v1 acknowledgement migration fixture is missing or unsafe"
+[[ -f "$V1_CONSUMER_DROPIN" && ! -L "$V1_CONSUMER_DROPIN" ]] || \
+  fail "recovery ABI v1 consumer migration fixture is missing or unsafe"
 [[ -f "$NFTABLES_DROPIN" && ! -L "$NFTABLES_DROPIN" ]] || \
   fail "nftables integration drop-in is missing or unsafe"
 [[ -f "$PROBE" && ! -L "$PROBE" ]] || fail "strict daemon RPC probe is missing or unsafe"
@@ -87,6 +130,10 @@ assert_unit_line "$DAEMON_UNIT" \
   "ExecStartPre=/usr/bin/chmod 0640 /var/log/trex/trex_daemon_server.log"
 assert_unit_line "$DAEMON_UNIT" "IPAddressAllow=localhost"
 assert_unit_line "$DAEMON_UNIT" "IPAddressDeny=any"
+assert_unit_line "$DAEMON_UNIT" \
+  "After=network-online.target firewalld.service nftables.service trex-webui-release-reconcile-v2.service"
+assert_unit_line "$DAEMON_UNIT" \
+  "Requires=trex-webui-release-reconcile-v2.service"
 assert_unit_line "$NFTABLES_DROPIN" "# Managed by TRex WebUI deploy/install.sh."
 assert_unit_line "$NFTABLES_DROPIN" "ExecStart="
 assert_unit_line "$NFTABLES_DROPIN" \
@@ -101,9 +148,9 @@ if grep -Eq -- '^ConditionPathIsExecutable=' "$DAEMON_UNIT"; then
   fail "daemon unit uses unsupported ConditionPathIsExecutable"
 fi
 assert_unit_line "$API_UNIT" \
-  "After=network-online.target trex-webui-release-reconcile.service"
+  "After=network-online.target trex-webui-release-reconcile-v2.service"
 assert_unit_line "$API_UNIT" \
-  "Requires=trex-webui-release-reconcile.service"
+  "Requires=trex-webui-release-reconcile-v2.service"
 assert_unit_line "$API_UNIT" "Wants=network-online.target"
 assert_unit_line "$API_UNIT" \
   "Environment=TREX_WEBUI_RUNTIME_STATE_PATH=/var/lib/trex-webui/runtime-state.json"
@@ -115,6 +162,40 @@ assert_unit_line "$API_UNIT" \
 if grep -Eq -- '^(After|Wants)=.*trex-daemon-server' "$API_UNIT"; then
   fail "base API unit pulls a local daemon into external deployments"
 fi
+
+# ABI v1 files are intentionally retained byte-for-byte as migration input;
+# bridge drop-ins quarantine their commands behind the canonical ABI v2 units.
+assert_unit_line "$V1_RECONCILE_UNIT" \
+  "ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile"
+assert_unit_line "$V1_RETRY_UNIT" \
+  "ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile"
+assert_unit_line "$V1_ACK_UNIT" \
+  "ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/release_transaction.py ack-consumers"
+assert_unit_line "$V1_CONSUMER_DROPIN" \
+  "Requires=trex-webui-release-reconcile.service"
+assert_v1_bridge \
+  "$V1_RECONCILE_BRIDGE" "trex-webui-release-reconcile-v2.service"
+assert_v1_bridge \
+  "$V1_RETRY_BRIDGE" "trex-webui-release-retry-v2.service"
+assert_v1_bridge \
+  "$V1_ACK_BRIDGE" "trex-webui-release-consumer-ack-v2.service"
+
+assert_unit_line "$CONSUMER_DROPIN" \
+  "Requires=trex-webui-release-reconcile-v2.service"
+assert_unit_line "$CONSUMER_DROPIN" \
+  "After=trex-webui-release-reconcile-v2.service"
+assert_unit_line "$RECONCILE_UNIT" \
+  "ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/recovery-v2/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile"
+assert_unit_line "$RECONCILE_UNIT" \
+  "ExecStartPost=/usr/bin/systemctl start --no-block trex-webui-release-consumer-ack-v2.service"
+assert_unit_line "$RETRY_UNIT" \
+  "ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/recovery-v2/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile"
+assert_unit_line "$RETRY_UNIT" \
+  "ExecStartPost=/usr/bin/systemctl start --no-block trex-webui-release-consumer-ack-v2.service"
+assert_unit_line "$ACK_UNIT" \
+  "ExecStart=/usr/bin/python3.11 /usr/libexec/trex-webui/recovery-v2/release_transaction.py ack-consumers"
+assert_unit_line "$ACK_UNIT" \
+  "Requires=trex-webui-release-reconcile-v2.service"
 assert_unit_line "$LOGROTATE_POLICY" "# Managed by TRex WebUI deploy/install.sh."
 assert_unit_line "$LOGROTATE_POLICY" "    maxsize 1M"
 assert_unit_line "$LOGROTATE_POLICY" "    rotate 14"
@@ -166,13 +247,13 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     sed -e 's#^ExecStart=/usr/bin/python3[.]11 #ExecStart=/usr/bin/python3 #' \
       "$ACK_UNIT" >"$verify_ack_unit" &&
     grep -Fqx \
-      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile' \
+      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/recovery-v2/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile' \
       "$verify_reconcile_unit" &&
     grep -Fqx \
-      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile' \
+      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/recovery-v2/release_transaction.py --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile' \
       "$verify_retry_unit" &&
     grep -Fqx \
-      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/release_transaction.py ack-consumers' \
+      'ExecStart=/usr/bin/python3 /usr/libexec/trex-webui/recovery-v2/release_transaction.py ack-consumers' \
       "$verify_ack_unit" &&
     sed \
       -e 's#^ExecStartPre=/opt/trex-webui/[.]venv/bin/python #ExecStartPre=/usr/bin/python3 #' \

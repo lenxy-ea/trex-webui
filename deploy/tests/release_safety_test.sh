@@ -393,13 +393,27 @@ missing_identity_dry_run_fixture() (
 
 checkout_install_dry_run_fixture() (
   # Keep a host's already-installed API unit from changing checkout-local
-  # dry-run behavior while preserving every production path in the plan.
+  # dry-run behavior. Likewise, quarantine the checkout fixture from either
+  # generation of recovery drop-ins already installed on this real host.
   # shellcheck source=deploy/install.sh
   source "$PROJECT_ROOT/deploy/install.sh"
   local fixture_root="$TEST_ROOT/checkout-install-plan"
+  local fixture_systemd_prefix="trex-webui-release-safety-${BASHPID}"
   mkdir -p "$fixture_root/systemd"
   PROJECT_ROOT="$PACKAGE_PROJECT"
   SYSTEMD_SERVICE_TARGET="$fixture_root/systemd/trex-webui-api.service"
+  RELEASE_RECONCILER_NGINX_DROPIN_ROOT="/etc/systemd/system/${fixture_systemd_prefix}-nginx.service.d"
+  RELEASE_RECONCILER_NGINX_DROPIN_TARGET="$RELEASE_RECONCILER_NGINX_DROPIN_ROOT/trex-webui-release-reconcile-v2.conf"
+  RELEASE_RECONCILER_API_DROPIN_ROOT="/etc/systemd/system/${fixture_systemd_prefix}-api.service.d"
+  RELEASE_RECONCILER_API_DROPIN_TARGET="$RELEASE_RECONCILER_API_DROPIN_ROOT/trex-webui-release-reconcile-v2.conf"
+  RELEASE_RECONCILER_DAEMON_DROPIN_ROOT="/etc/systemd/system/${fixture_systemd_prefix}-daemon.service.d"
+  RELEASE_RECONCILER_DAEMON_DROPIN_TARGET="$RELEASE_RECONCILER_DAEMON_DROPIN_ROOT/trex-webui-release-reconcile-v2.conf"
+  RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT="/etc/systemd/system/${fixture_systemd_prefix}-v1-reconcile.service.d"
+  RELEASE_V1_RECONCILER_BRIDGE_DROPIN_TARGET="$RELEASE_V1_RECONCILER_BRIDGE_DROPIN_ROOT/trex-webui-recovery-v2-bridge.conf"
+  RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT="/etc/systemd/system/${fixture_systemd_prefix}-v1-retry.service.d"
+  RELEASE_V1_RETRY_BRIDGE_DROPIN_TARGET="$RELEASE_V1_RETRY_BRIDGE_DROPIN_ROOT/trex-webui-recovery-v2-bridge.conf"
+  RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT="/etc/systemd/system/${fixture_systemd_prefix}-v1-ack.service.d"
+  RELEASE_V1_ACK_BRIDGE_DROPIN_TARGET="$RELEASE_V1_ACK_BRIDGE_DROPIN_ROOT/trex-webui-recovery-v2-bridge.conf"
   main "$@"
 )
 
@@ -481,11 +495,35 @@ required = {
     "deploy/release_transaction.py": Path(release_transaction_path).read_bytes(),
     "deploy/systemd/trex-daemon-server.service": b"[Service]\nExecStart=/bin/true\n",
     "deploy/systemd/nftables-trex-webui.conf": b"[Service]\nExecStart=/bin/true\n",
+    # ABI v1 fixtures remain explicit because the v2 bootstrap must verify and
+    # quarantine an already-installed immutable recovery authority.
     "deploy/systemd/nginx-trex-webui-release-reconcile.conf": b"[Unit]\nRequires=trex-webui-release-reconcile.service\nAfter=trex-webui-release-reconcile.service\n",
     "deploy/systemd/trex-webui-api.service": b"[Service]\nExecStart=/bin/true\n",
     "deploy/systemd/trex-webui-release-consumer-ack.service": b"[Service]\nExecStart=/bin/true\n",
     "deploy/systemd/trex-webui-release-reconcile.service": b"[Service]\nExecStart=/bin/true\n",
     "deploy/systemd/trex-webui-release-retry.service": b"[Service]\nExecStart=/bin/true\n",
+    # ABI v2 and all three v1 bridge drop-ins are mandatory package members.
+    "deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf": (
+        project_root / "deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf"
+    ).read_bytes(),
+    "deploy/systemd/trex-webui-release-consumer-ack-v2.service": (
+        project_root / "deploy/systemd/trex-webui-release-consumer-ack-v2.service"
+    ).read_bytes(),
+    "deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf": (
+        project_root / "deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf"
+    ).read_bytes(),
+    "deploy/systemd/trex-webui-release-reconcile-v2.conf": (
+        project_root / "deploy/systemd/trex-webui-release-reconcile-v2.conf"
+    ).read_bytes(),
+    "deploy/systemd/trex-webui-release-reconcile-v2.service": (
+        project_root / "deploy/systemd/trex-webui-release-reconcile-v2.service"
+    ).read_bytes(),
+    "deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf": (
+        project_root / "deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf"
+    ).read_bytes(),
+    "deploy/systemd/trex-webui-release-retry-v2.service": (
+        project_root / "deploy/systemd/trex-webui-release-retry-v2.service"
+    ).read_bytes(),
     "deploy/trex_daemon_supervisor.py": b"#!/usr/bin/env python3\n# fixture\n",
     "deploy/trex_native_boundary.sh": b"#!/usr/bin/env bash\n# fixture\n",
     "deploy/trex_overview_contract.py": (
@@ -674,9 +712,18 @@ for release_path in \
   deploy/bootstrap_release_infrastructure.py \
   deploy/package.sh \
   deploy/release_transaction.py \
+  deploy/systemd/trex-daemon-server.service \
   deploy/systemd/nginx-trex-webui-release-reconcile.conf \
+  deploy/systemd/trex-webui-api.service \
+  deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf \
+  deploy/systemd/trex-webui-release-consumer-ack-v2.service \
   deploy/systemd/trex-webui-release-consumer-ack.service \
+  deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf \
+  deploy/systemd/trex-webui-release-reconcile-v2.conf \
+  deploy/systemd/trex-webui-release-reconcile-v2.service \
   deploy/systemd/trex-webui-release-reconcile.service \
+  deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf \
+  deploy/systemd/trex-webui-release-retry-v2.service \
   deploy/systemd/trex-webui-release-retry.service \
   deploy/trex_overview_contract.py \
   deploy/trex_persisted_state_contract.py \
@@ -748,8 +795,15 @@ assert files["deploy/bootstrap_release_infrastructure.py"]["mode"] == "0755"
 assert files["deploy/install.sh"]["mode"] == "0755"
 assert files["deploy/release_transaction.py"]["mode"] == "0755"
 assert files["deploy/systemd/nginx-trex-webui-release-reconcile.conf"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-consumer-ack-v2.service"]["mode"] == "0644"
 assert files["deploy/systemd/trex-webui-release-consumer-ack.service"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-reconcile-v2.conf"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-reconcile-v2.service"]["mode"] == "0644"
 assert files["deploy/systemd/trex-webui-release-reconcile.service"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf"]["mode"] == "0644"
+assert files["deploy/systemd/trex-webui-release-retry-v2.service"]["mode"] == "0644"
 assert files["deploy/systemd/trex-webui-release-retry.service"]["mode"] == "0644"
 assert files["deploy/trex_native_boundary.sh"]["mode"] == "0755"
 assert files["deploy/trex_overview_contract.py"]["mode"] == "0755"
@@ -790,9 +844,18 @@ git -C "$PACKAGE_PROJECT" add \
   deploy/bootstrap_release_infrastructure.py \
   deploy/package.sh \
   deploy/release_transaction.py \
+  deploy/systemd/trex-daemon-server.service \
   deploy/systemd/nginx-trex-webui-release-reconcile.conf \
+  deploy/systemd/trex-webui-api.service \
+  deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf \
+  deploy/systemd/trex-webui-release-consumer-ack-v2.service \
   deploy/systemd/trex-webui-release-consumer-ack.service \
+  deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf \
+  deploy/systemd/trex-webui-release-reconcile-v2.conf \
+  deploy/systemd/trex-webui-release-reconcile-v2.service \
   deploy/systemd/trex-webui-release-reconcile.service \
+  deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf \
+  deploy/systemd/trex-webui-release-retry-v2.service \
   deploy/systemd/trex-webui-release-retry.service \
   deploy/trex_overview_contract.py \
   deploy/trex_persisted_state_contract.py \

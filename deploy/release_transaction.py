@@ -473,6 +473,33 @@ def _systemctl_property(unit: str, name: str) -> str:
     ).stdout.strip()
 
 
+_SYSTEMD_EXEC_RUNTIME_SUFFIX = re.compile(
+    r" ; start_time=\[[^\]\r\n]*\]"
+    r" ; stop_time=\[[^\]\r\n]*\]"
+    r" ; pid=[0-9]+"
+    r" ; code=[^;\r\n}]*"
+    r" ; status=[^;\r\n}]* }$"
+)
+
+
+def _stable_systemd_exec_start(value: str) -> str:
+    """Remove only systemd's per-process fields from an ExecStart identity."""
+
+    if not value.startswith("{ path=") or "\n" in value or "\r" in value:
+        raise ReleaseTransactionError("systemd ExecStart identity is malformed")
+    match = _SYSTEMD_EXEC_RUNTIME_SUFFIX.search(value)
+    identity = f"{value[: match.start()]} }}" if match is not None else value
+    if " ; argv[]=" not in identity or " ; ignore_errors=" not in identity:
+        raise ReleaseTransactionError("systemd ExecStart identity is incomplete")
+    if re.fullmatch(
+        r"\{ path=[^;\r\n]+ ; argv\[\]=[^;\r\n]+ ; "
+        r"ignore_errors=(?:yes|no) }",
+        identity,
+    ) is None:
+        raise ReleaseTransactionError("systemd ExecStart identity is malformed")
+    return identity
+
+
 def _api_health_ready() -> bool:
     status, payload = _loopback_get("/api/health", port=8080)
     if status != 200 or len(payload) > MAX_HOST_ARTIFACT_BYTES:
@@ -513,7 +540,9 @@ def capture_systemd_consumer_baseline(
             **empty,
             "kind": "api",
             "working_directory": _systemctl_property(unit, "WorkingDirectory"),
-            "exec_start": _systemctl_property(unit, "ExecStart"),
+            "exec_start": _stable_systemd_exec_start(
+                _systemctl_property(unit, "ExecStart")
+            ),
             "argv0": argv0,
             "resolved_exec": str(resolved),
         }
@@ -580,10 +609,14 @@ def systemd_consumer_is_ready(
         return False
     kind = baseline["kind"]
     if kind == "api":
+        baseline_exec_start = baseline["exec_start"]
+        if not isinstance(baseline_exec_start, str):
+            return False
         if (
             _systemctl_property(unit, "WorkingDirectory")
             != baseline["working_directory"]
-            or _systemctl_property(unit, "ExecStart") != baseline["exec_start"]
+            or _stable_systemd_exec_start(_systemctl_property(unit, "ExecStart"))
+            != _stable_systemd_exec_start(baseline_exec_start)
             or not _api_health_ready()
         ):
             return False
@@ -4350,6 +4383,16 @@ class ReleaseTransactionEngine:
             try:
                 destination.mkdir(mode=0o755)
                 (destination / "apps" / "web").mkdir(parents=True, mode=0o755)
+                # The privileged upgrade shell deliberately uses a restrictive
+                # umask.  These selector ancestors are execution paths for the
+                # unprivileged API and Nginx, so make their traversal contract
+                # deterministic instead of inheriting that caller umask.
+                for service_ancestor in (
+                    destination,
+                    destination / "apps",
+                    destination / "apps" / "web",
+                ):
+                    service_ancestor.chmod(0o755)
                 shutil.copytree(
                     api_root,
                     destination / "apps" / "api",

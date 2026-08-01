@@ -155,29 +155,105 @@ first migration from an rc.1-style in-place install, the upgrader first snapshot
 the serving API, static tree, profiles, optional `.env`, and exact loaded Python
 runtime as a content-addressed rollback baseline.
 
-When SELinux is enabled, the versioned installer automatically requires
-`semanage`, `matchpathcon`, `restorecon`, and `setsebool`, persists the exact
-`/opt/trex-webui/releases/sha256-<digest>/apps/web/dist` policy as
-`httpd_sys_content_t`, and relabels the physical `current` and `previous`
-frontend trees before Nginx restarts. The API tree and optional `.env` stay
-outside that HTTP-readable type. On AlmaLinux, install
-`policycoreutils-python-utils` before the verified upgrade if `semanage` is not
-already present; missing or mismatched policy fails the upgrade. The exact
-release-path rule and HTTP network-connect boolean are durable host policy and
-remain installed across selector rollback.
+### SELinux activation contract
 
-The root-owned `trex-webui-release-reconcile.service` is required before the
+When SELinux is enabled, the versioned installer automatically requires
+`semanage`, `matchpathcon`, `restorecon`, and `setsebool`. It persists the exact
+`/opt/trex-webui/releases/sha256-<digest>/apps/web/dist` policy as
+`httpd_sys_content_t`. Before every selector activation, it normalizes only the
+release root, `apps`, and `apps/web` traversal ancestors to mode `0755`, then
+runs `restorecon -RF` over the complete physical release tree for the candidate
+and the selected `current` and `previous` targets. This recovers policy-derived
+labels for the API source and Python runtime even when archive extraction or
+virtualenv staging inherited `user_tmp_t`; only the exact frontend subtree
+receives the HTTP-readable type. The API tree and optional `.env` remain outside
+that type.
+
+Directory modes are excluded from the content digest, so this narrow ancestor
+normalization does not change payload identity. The policy store, restored
+xattrs, release tree, and selector ancestors are persisted before the selector
+may switch. On AlmaLinux, install `policycoreutils-python-utils` before the
+verified upgrade if `semanage` is not already present; missing or mismatched
+policy fails the upgrade. The exact release-path rule and HTTP network-connect
+boolean remain durable across selector rollback.
+
+### Recovery ABI v2
+
+Production has one canonical recovery semantics authority:
+`/usr/libexec/trex-webui/recovery-v2/release_transaction.py`. Its immutable
+bootstrap is beside it at
+`/usr/libexec/trex-webui/recovery-v2/bootstrap_release_infrastructure.py`.
+Recovery ABI v2 installs these units:
+
+- `trex-webui-release-reconcile-v2.service` for the ordinary boot and consumer
+  barrier;
+- `trex-webui-release-retry-v2.service` for an independent, unbounded retry
+  when the outer deployment lock is busy;
+- `trex-webui-release-consumer-ack-v2.service` for durable acknowledgement of
+  restored baseline consumers.
+
+The common immutable profile is recorded in
+`/var/lib/trex-webui-deploy/infrastructure-v2-common.json`; a managed-local host
+also has
+`/var/lib/trex-webui-deploy/infrastructure-v2-managed-local.json`. Direct v2
+consumer dependencies are manifest-owned files at:
+
+- `/etc/systemd/system/trex-webui-api.service.d/trex-webui-release-reconcile-v2.conf`;
+- `/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile-v2.conf`;
+- `/etc/systemd/system/trex-daemon-server.service.d/trex-webui-release-reconcile-v2.conf`
+  on managed-local hosts.
+
+Provider runtimes and units are fsynced first, consumer dependencies are
+published only after that durability barrier, and the manifest is published
+last.
+
+An upgrade from recovery ABI v1 never overwrites or deletes the immutable v1
+engine, bootstrap, units, drop-ins, or the
+`/var/lib/trex-webui-deploy/infrastructure-common.json` and
+`/var/lib/trex-webui-deploy/infrastructure-managed-local.json` manifests.
+Before the first v2 publication, the upgrader uses the installed v1 bootstrap
+to exact-verify the complete v1 profile, requires all three v1 recovery units
+to be inactive and job-free, and requires both the installed v1 engine and the
+candidate v2 engine to interpret the same fully retired terminal journal. A
+non-terminal journal, retained rollback authority, selector disagreement, or
+v1 artifact drift stops migration before authority changes.
+
+The terminal interpretation and quiescent-unit checks are repeated immediately
+before `daemon-reload`. After reload, every bridged v1 unit must still be
+inactive, job-free, and have no main PID. This closes the crash-resume window
+between durable v2 publication and systemd manager graph replacement.
+
+After those checks, v2 publishes manifest-owned bridge drop-ins named
+`trex-webui-recovery-v2-bridge.conf` at:
+
+- `/etc/systemd/system/trex-webui-release-reconcile.service.d/`;
+- `/etc/systemd/system/trex-webui-release-retry.service.d/`;
+- `/etc/systemd/system/trex-webui-release-consumer-ack.service.d/`.
+
+Each bridge clears the old `ExecStart` and `ExecStartPost`, substitutes
+`/usr/bin/true`, and adds `Requires=` / `After=` edges to its corresponding v2
+unit. Thus legacy consumer edges remain a compatibility barrier but cannot
+execute v1 recovery semantics. The direct v2 consumer drop-ins are published
+after this cutover. The retained v1 bytes remain auditable, but there is never
+a second live recovery semantics authority. On a clean host the same bridge
+drop-ins are inert because no v1 unit exists, and v2 is installed directly.
+
+The root-owned `trex-webui-release-reconcile-v2.service` is required before the
 API, managed daemon, and Nginx. At boot it obtains the deployment lock and rolls
 back any uncommitted selector transaction; a committed journal is verified and
 retained. During an active upgrade, the outer process already owns that lock, so
 each transient oneshot invocation reports the deployment as active without
 racing the transaction. Because the unit deliberately has no `RemainAfterExit`,
-later consumer starts invoke the reconciler again before they proceed.
+later consumer starts invoke the canonical v2 reconciler again before they
+proceed.
 
 Inspect the committed state and stable consumers:
 
 ```bash
-sudo /usr/libexec/trex-webui/release_transaction.py status
+sudo /usr/libexec/trex-webui/recovery-v2/release_transaction.py status
+systemctl status trex-webui-release-reconcile-v2.service \
+  trex-webui-release-retry-v2.service \
+  trex-webui-release-consumer-ack-v2.service
 readlink /opt/trex-webui/current
 readlink /opt/trex-webui/previous
 systemctl show trex-webui-api.service \
@@ -189,6 +265,15 @@ sudo /opt/trex-webui/current/deploy/verify.sh \
   --service-project-root /opt/trex-webui/current \
   --web-root /opt/trex-webui/current/apps/web/dist \
   --base-url http://127.0.0.1
+```
+
+If an interrupted transaction needs another reconciliation attempt after the
+deployment lock holder has exited, invoke the v2 systemd authority rather than
+an old engine path:
+
+```bash
+sudo systemctl start trex-webui-release-reconcile-v2.service
+sudo /usr/libexec/trex-webui/recovery-v2/release_transaction.py status
 ```
 
 Do not hand-edit `current`, `previous`, the release store, or the journal.

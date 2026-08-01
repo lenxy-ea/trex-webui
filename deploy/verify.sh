@@ -32,10 +32,37 @@ API_ENV_FILE="$TREX_MANAGED_API_ENV_FILE_DEFAULT"
 API_PROC_ROOT="/proc"
 API_UNIT="/etc/systemd/system/trex-webui-api.service"
 NGINX_CONF="/etc/nginx/conf.d/trex-webui.conf"
-RELEASE_RECONCILER="/usr/libexec/trex-webui/release_transaction.py"
-RELEASE_RECONCILER_UNIT="/etc/systemd/system/trex-webui-release-reconcile.service"
-RELEASE_RECONCILER_NGINX_DROPIN="/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile.conf"
+RECOVERY_V2_ROOT="$DAEMON_LIBEXEC_ROOT/recovery-v2"
+RELEASE_BOOTSTRAP="$RECOVERY_V2_ROOT/bootstrap_release_infrastructure.py"
+RELEASE_RECONCILER="$RECOVERY_V2_ROOT/release_transaction.py"
+RELEASE_OVERVIEW_VALIDATOR="$DAEMON_LIBEXEC_ROOT/trex_overview_contract.py"
+RELEASE_STATE_VALIDATOR="$DAEMON_LIBEXEC_ROOT/trex_persisted_state_contract.py"
+RELEASE_ROLLBACK_DAEMON_PROBE="$DAEMON_LIBEXEC_ROOT/release_daemon_rpc_probe.py"
+RELEASE_ROLLBACK_NATIVE_BOUNDARY="$DAEMON_LIBEXEC_ROOT/release_native_boundary.sh"
+RELEASE_RECONCILER_UNIT="/etc/systemd/system/trex-webui-release-reconcile-v2.service"
+RELEASE_RETRY_UNIT="/etc/systemd/system/trex-webui-release-retry-v2.service"
+RELEASE_ACK_UNIT="/etc/systemd/system/trex-webui-release-consumer-ack-v2.service"
+RELEASE_RECONCILER_NGINX_DROPIN="/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile-v2.conf"
+RELEASE_RECONCILER_API_DROPIN="/etc/systemd/system/trex-webui-api.service.d/trex-webui-release-reconcile-v2.conf"
+RELEASE_RECONCILER_DAEMON_DROPIN="/etc/systemd/system/trex-daemon-server.service.d/trex-webui-release-reconcile-v2.conf"
 RELEASE_STATE_ROOT="/var/lib/trex-webui-deploy"
+RELEASE_INFRASTRUCTURE_COMMON_MANIFEST="$RELEASE_STATE_ROOT/infrastructure-v2-common.json"
+RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST="$RELEASE_STATE_ROOT/infrastructure-v2-managed-local.json"
+LEGACY_RELEASE_BOOTSTRAP="$DAEMON_LIBEXEC_ROOT/bootstrap_release_infrastructure.py"
+LEGACY_RELEASE_RECONCILER="$DAEMON_LIBEXEC_ROOT/release_transaction.py"
+LEGACY_RELEASE_RECONCILER_UNIT="/etc/systemd/system/trex-webui-release-reconcile.service"
+LEGACY_RELEASE_RETRY_UNIT="/etc/systemd/system/trex-webui-release-retry.service"
+LEGACY_RELEASE_ACK_UNIT="/etc/systemd/system/trex-webui-release-consumer-ack.service"
+LEGACY_RELEASE_RECONCILER_NGINX_DROPIN="/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile.conf"
+LEGACY_RELEASE_RECONCILER_API_DROPIN="/etc/systemd/system/trex-webui-api.service.d/trex-webui-release-reconcile.conf"
+LEGACY_RELEASE_RECONCILER_DAEMON_DROPIN="/etc/systemd/system/trex-daemon-server.service.d/trex-webui-release-reconcile.conf"
+LEGACY_RELEASE_RECONCILER_BRIDGE="/etc/systemd/system/trex-webui-release-reconcile.service.d/trex-webui-recovery-v2-bridge.conf"
+LEGACY_RELEASE_RETRY_BRIDGE="/etc/systemd/system/trex-webui-release-retry.service.d/trex-webui-recovery-v2-bridge.conf"
+LEGACY_RELEASE_ACK_BRIDGE="/etc/systemd/system/trex-webui-release-consumer-ack.service.d/trex-webui-recovery-v2-bridge.conf"
+LEGACY_RELEASE_INFRASTRUCTURE_COMMON_MANIFEST="$RELEASE_STATE_ROOT/infrastructure-common.json"
+LEGACY_RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST="$RELEASE_STATE_ROOT/infrastructure-managed-local.json"
+LEGACY_RELEASE_INFRASTRUCTURE=0
+LEGACY_RELEASE_MANAGED_INFRASTRUCTURE=0
 VERSIONED_WEB_SELINUX_PATTERN='/opt/trex-webui/releases/sha256-[0-9a-f]{64}/apps/web/dist(/.*)?'
 API_VENV_RELEASE_MARKER_NAME=".trex-webui-venv-release"
 API_VENV_RUNTIME_MARKER_NAME=".trex-webui-venv-runtime"
@@ -609,7 +636,7 @@ assert_release_reconcile_unit_dependency() {
     return
   }
   [[ "$(grep -Ec '^Requires=' "$unit_path")" -eq 1 && \
-    "$(grep -Fxc 'Requires=trex-webui-release-reconcile.service' "$unit_path")" -eq 1 ]] || {
+    "$(grep -Fxc 'Requires=trex-webui-release-reconcile-v2.service' "$unit_path")" -eq 1 ]] || {
     release_reconcile_contract_error \
       "$label must have exactly one release-reconciler Requires directive"
     return
@@ -621,7 +648,7 @@ assert_release_reconcile_unit_dependency() {
   }
   systemd_word_list_has \
     "${after_lines[0]}" \
-    "trex-webui-release-reconcile.service" || {
+    "trex-webui-release-reconcile-v2.service" || {
     release_reconcile_contract_error "$label is not ordered after release reconciliation"
     return
   }
@@ -641,12 +668,12 @@ assert_loaded_release_reconcile_dependency() {
       "unable to inspect loaded $label ordering"
     return
   }
-  systemd_word_list_has "$requires" "trex-webui-release-reconcile.service" || {
+  systemd_word_list_has "$requires" "trex-webui-release-reconcile-v2.service" || {
     release_reconcile_contract_error \
       "loaded $label does not propagate release reconciliation failures"
     return
   }
-  systemd_word_list_has "$after" "trex-webui-release-reconcile.service" || {
+  systemd_word_list_has "$after" "trex-webui-release-reconcile-v2.service" || {
     release_reconcile_contract_error \
       "loaded $label is not ordered after release reconciliation"
     return
@@ -1258,7 +1285,7 @@ assert_selinux_type() {
   local expected_type="$2"
   local label="$3"
   local expected_context actual_context
-  expected_context="$(matchpathcon "$path")" || {
+  expected_context="$(matchpathcon -n -- "$path")" || {
     printf 'error: unable to resolve expected SELinux context for %s: %s\n' \
       "$label" "$path" >&2
     return 1
@@ -1284,7 +1311,7 @@ assert_selinux_not_http_content() {
   local path="$1"
   local label="$2"
   local expected_context actual_context=""
-  expected_context="$(matchpathcon "$path")" || {
+  expected_context="$(matchpathcon -n -- "$path")" || {
     printf 'error: unable to resolve expected SELinux context for %s: %s\n' \
       "$label" "$path" >&2
     return 1
@@ -1305,6 +1332,65 @@ assert_selinux_not_http_content() {
         "$label" "$path" >&2
       return 1
     }
+    [[ "$actual_context" == "$expected_context" ]] || {
+      printf 'error: actual SELinux context for %s does not match persisted policy: expected %s, got %s: %s\n' \
+        "$label" "$expected_context" "$actual_context" "$path" >&2
+      return 1
+    }
+  fi
+}
+
+assert_release_private_selinux() {
+  local release_path="$1"
+  local selector="$2"
+  local artifact python_path venv_path
+  for artifact in \
+    "$release_path" \
+    "$release_path/apps" \
+    "$release_path/apps/web"; do
+    [[ -d "$artifact" && ! -L "$artifact" ]] || {
+      printf 'error: %s release service ancestor is missing or unsafe: %s\n' \
+        "$selector" "$artifact" >&2
+      return 1
+    }
+    assert_selinux_not_http_content "$artifact" \
+      "$selector release service ancestor" || return 1
+  done
+  [[ -d "$release_path/apps/api" && ! -L "$release_path/apps/api" ]] || {
+    printf 'error: %s release API tree is missing or unsafe: %s\n' \
+      "$selector" "$release_path/apps/api" >&2
+    return 1
+  }
+  while IFS= read -r -d '' artifact; do
+    assert_selinux_not_http_content "$artifact" \
+      "$selector release API tree" || return 1
+  done < <(find "$release_path/apps/api" -xdev \
+    \( -type d -o -type f \) -print0)
+  assert_selinux_not_http_content "$release_path/.env" \
+    "$selector release environment file" || return 1
+
+  venv_path="$release_path/.venv"
+  if [[ -e "$venv_path" || -L "$venv_path" ]]; then
+    for artifact in "$venv_path" "$venv_path/bin"; do
+      [[ -d "$artifact" && ! -L "$artifact" ]] || {
+        printf 'error: %s release Python runtime ancestor is missing or unsafe: %s\n' \
+          "$selector" "$artifact" >&2
+        return 1
+      }
+      assert_selinux_not_http_content "$artifact" \
+        "$selector release Python runtime ancestor" || return 1
+    done
+    python_path="$venv_path/bin/python"
+    [[ -e "$python_path" || -L "$python_path" ]] || {
+      printf 'error: %s release Python runtime is missing: %s\n' \
+        "$selector" "$python_path" >&2
+      return 1
+    }
+    # Inspect the link inode, not only its executable target. A staged virtualenv
+    # can otherwise retain user_tmp_t on this path even though /usr/bin/python
+    # has the expected executable label.
+    assert_selinux_not_http_content "$python_path" \
+      "$selector release Python runtime" || return 1
   fi
 }
 
@@ -1380,21 +1466,244 @@ check_versioned_release_selinux() {
         "$selector release frontend" || \
         die "$selector release frontend SELinux label is not deployable"
     done < <(find "$static_path" -xdev \( -type d -o -type f \) -print0)
-    while IFS= read -r -d '' artifact; do
-      assert_selinux_not_http_content "$artifact" \
-        "$selector API tree" || \
-        die "$selector release API SELinux boundary is unsafe"
-    done < <(find "$release_path/apps/api" -xdev \
-      \( -type d -o -type f \) -print0)
-    assert_selinux_not_http_content "$release_path/.env" \
-      "$selector environment file" || \
-      die "$selector release environment SELinux boundary is unsafe"
+    assert_release_private_selinux "$release_path" "$selector" || \
+      die "$selector release private SELinux boundary is unsafe"
   done
   pass "versioned frontend SELinux policy is persistent, exact, and applied"
 }
 
+assert_release_artifact_matches() {
+  local source_path="$1"
+  local installed_path="$2"
+  local expected_mode="$3"
+  local label="$4"
+  [[ -f "$source_path" && ! -L "$source_path" ]] || \
+    die "$label candidate source is missing or unsafe: $source_path"
+  [[ -f "$installed_path" && ! -L "$installed_path" ]] || \
+    die "$label installed artifact is missing or unsafe: $installed_path"
+  [[ "$(stat -c '%u:%g %a %h' "$installed_path")" == "0:0 $expected_mode 1" ]] || \
+    die "$label installed artifact must be root:root 0$expected_mode with one link"
+  trex_assert_root_controlled_authority_path \
+    "$installed_path" "$label installed artifact" || \
+    die "$label installed authority is unsafe"
+  cmp -s "$source_path" "$installed_path" || \
+    die "$label installed artifact does not match the candidate bundle"
+}
+
+verify_release_infrastructure_manifests() {
+  [[ "$EUID" -eq 0 ]] || \
+    die "root is required to verify immutable release infrastructure manifests"
+  local common_expected=(
+    --expected "$RELEASE_BOOTSTRAP::0755::prerequisite"
+    --expected "$RELEASE_RECONCILER::0755::prerequisite"
+    --expected "$RELEASE_OVERVIEW_VALIDATOR::0755::prerequisite"
+    --expected "$RELEASE_STATE_VALIDATOR::0755::prerequisite"
+    --expected "$RELEASE_RECONCILER_UNIT::0644::prerequisite"
+    --expected "$RELEASE_RETRY_UNIT::0644::prerequisite"
+    --expected "$RELEASE_ACK_UNIT::0644::prerequisite"
+    --expected "$LEGACY_RELEASE_RECONCILER_BRIDGE::0644::consumer-dropin"
+    --expected "$LEGACY_RELEASE_RETRY_BRIDGE::0644::consumer-dropin"
+    --expected "$LEGACY_RELEASE_ACK_BRIDGE::0644::consumer-dropin"
+    --expected "$RELEASE_RECONCILER_API_DROPIN::0644::consumer-dropin"
+    --expected "$RELEASE_RECONCILER_NGINX_DROPIN::0644::consumer-dropin"
+  )
+  /usr/bin/python3 "$RELEASE_BOOTSTRAP" \
+    --manifest "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" \
+    --verify-installed "${common_expected[@]}" || \
+    die "installed common recovery ABI v2 failed exact manifest verification"
+
+  if [[ "$CHECK_DAEMON" -eq 1 || \
+    -e "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" || \
+    -L "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" ]]; then
+    local managed_expected=(
+      --expected "$RELEASE_ROLLBACK_DAEMON_PROBE::0755::prerequisite"
+      --expected "$RELEASE_ROLLBACK_NATIVE_BOUNDARY::0755::prerequisite"
+      --expected "$RELEASE_RECONCILER_DAEMON_DROPIN::0644::consumer-dropin"
+    )
+    /usr/bin/python3 "$RELEASE_BOOTSTRAP" \
+      --manifest "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" \
+      --verify-installed "${managed_expected[@]}" || \
+      die "installed managed-local recovery ABI v2 failed exact manifest verification"
+  fi
+
+  LEGACY_RELEASE_INFRASTRUCTURE=0
+  if [[ -e "$LEGACY_RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" || \
+    -L "$LEGACY_RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" ]]; then
+    LEGACY_RELEASE_INFRASTRUCTURE=1
+    [[ -f "$LEGACY_RELEASE_BOOTSTRAP" && \
+      ! -L "$LEGACY_RELEASE_BOOTSTRAP" && \
+      "$(stat -c '%u:%g %a %h' "$LEGACY_RELEASE_BOOTSTRAP")" == "0:0 755 1" ]] || \
+      die "immutable recovery ABI v1 bootstrap is missing or unsafe"
+    trex_assert_root_controlled_authority_path \
+      "$LEGACY_RELEASE_BOOTSTRAP" "recovery ABI v1 bootstrap" || \
+      die "immutable recovery ABI v1 bootstrap authority is unsafe"
+    local legacy_common_expected=(
+      --expected "$LEGACY_RELEASE_BOOTSTRAP::0755::prerequisite"
+      --expected "$LEGACY_RELEASE_RECONCILER::0755::prerequisite"
+      --expected "$RELEASE_OVERVIEW_VALIDATOR::0755::prerequisite"
+      --expected "$RELEASE_STATE_VALIDATOR::0755::prerequisite"
+      --expected "$LEGACY_RELEASE_RECONCILER_UNIT::0644::prerequisite"
+      --expected "$LEGACY_RELEASE_RETRY_UNIT::0644::prerequisite"
+      --expected "$LEGACY_RELEASE_ACK_UNIT::0644::prerequisite"
+      --expected "$LEGACY_RELEASE_RECONCILER_API_DROPIN::0644::consumer-dropin"
+      --expected "$LEGACY_RELEASE_RECONCILER_NGINX_DROPIN::0644::consumer-dropin"
+    )
+    /usr/bin/python3 "$LEGACY_RELEASE_BOOTSTRAP" \
+      --manifest "$LEGACY_RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" \
+      --verify-installed "${legacy_common_expected[@]}" || \
+      die "immutable recovery ABI v1 common profile was not preserved exactly"
+  fi
+
+  LEGACY_RELEASE_MANAGED_INFRASTRUCTURE=0
+  if [[ -e "$LEGACY_RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" || \
+    -L "$LEGACY_RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" ]]; then
+    [[ "$LEGACY_RELEASE_INFRASTRUCTURE" -eq 1 ]] || \
+      die "recovery ABI v1 managed-local manifest exists without its common authority"
+    LEGACY_RELEASE_MANAGED_INFRASTRUCTURE=1
+    local legacy_managed_expected=(
+      --expected "$RELEASE_ROLLBACK_DAEMON_PROBE::0755::prerequisite"
+      --expected "$RELEASE_ROLLBACK_NATIVE_BOUNDARY::0755::prerequisite"
+      --expected "$LEGACY_RELEASE_RECONCILER_DAEMON_DROPIN::0644::consumer-dropin"
+    )
+    /usr/bin/python3 "$LEGACY_RELEASE_BOOTSTRAP" \
+      --manifest "$LEGACY_RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" \
+      --verify-installed "${legacy_managed_expected[@]}" || \
+      die "immutable recovery ABI v1 managed-local profile was not preserved exactly"
+  fi
+}
+
+assert_loaded_release_consumer_dropins() {
+  local unit_name="$1"
+  local label="$2"
+  local v2_dropin="$3"
+  local legacy_dropin="$4"
+  local require_legacy="${5:-$LEGACY_RELEASE_INFRASTRUCTURE}"
+  local dropin_value path
+  local dropins=()
+  dropin_value="$(systemctl show "$unit_name" --property=DropInPaths --value)" || \
+    die "unable to inspect loaded $label release drop-ins"
+  read -r -a dropins <<<"$dropin_value"
+  [[ " ${dropins[*]} " == *" $v2_dropin "* ]] || \
+    die "loaded $label is missing its direct recovery ABI v2 dependency"
+  if [[ "$require_legacy" -eq 1 ]]; then
+    [[ " ${dropins[*]} " == *" $legacy_dropin "* ]] || \
+      die "loaded $label discarded its immutable recovery ABI v1 dependency"
+    [[ "${#dropins[@]}" -eq 2 ]] || \
+      die "loaded $label has unexpected release dependency drop-ins"
+  else
+    [[ "${#dropins[@]}" -eq 1 ]] || \
+      die "loaded $label has unexpected release dependency drop-ins"
+  fi
+  for path in "${dropins[@]}"; do
+    [[ "$path" == "$v2_dropin" || \
+      ( "$require_legacy" -eq 1 && "$path" == "$legacy_dropin" ) ]] || \
+      die "loaded $label has unmanaged release dependency authority: $path"
+  done
+}
+
+assert_loaded_recovery_v2_unit() {
+  local unit_name="$1"
+  local unit_path="$2"
+  local expected_argv="$3"
+  local label="$4"
+  local load_state fragment need_reload dropins start_value restart
+  local start_exec="" start_argv=""
+  load_state="$(systemctl show "$unit_name" --property=LoadState --value)" || \
+    die "unable to inspect loaded $label LoadState"
+  fragment="$(systemctl show "$unit_name" --property=FragmentPath --value)" || \
+    die "unable to inspect loaded $label FragmentPath"
+  need_reload="$(systemctl show "$unit_name" --property=NeedDaemonReload --value)" || \
+    die "unable to inspect loaded $label reload authority"
+  dropins="$(systemctl show "$unit_name" --property=DropInPaths --value)" || \
+    die "unable to inspect loaded $label drop-in authority"
+  start_value="$(systemctl show "$unit_name" --property=ExecStart --value)" || \
+    die "unable to inspect loaded $label ExecStart"
+  restart="$(systemctl show "$unit_name" --property=Restart --value)" || \
+    die "unable to inspect loaded $label restart policy"
+  [[ "$load_state" == "loaded" && "$fragment" == "$unit_path" && \
+    "$need_reload" == "no" && -z "$dropins" && "$restart" == "on-failure" ]] || \
+    die "loaded $label differs from its fixed recovery ABI v2 unit authority"
+  parse_loaded_exec_value "$start_value" start_exec start_argv || \
+    die "loaded $label ExecStart is not parseable"
+  [[ "$start_exec" == "/usr/bin/python3.11" && \
+    "$start_argv" == "$expected_argv" ]] || \
+    die "loaded $label does not execute the exact recovery ABI v2 engine command"
+}
+
+assert_loaded_legacy_bridge_unit() {
+  local unit_name="$1"
+  local unit_path="$2"
+  local bridge_path="$3"
+  local v2_unit="$4"
+  local label="$5"
+  local load_state fragment need_reload dropins start_value start_post restart
+  local requires after active_state sub_state main_pid job
+  local start_path_count start_exec="" start_argv=""
+  load_state="$(systemctl show "$unit_name" --property=LoadState --value)" || \
+    die "unable to inspect loaded $label LoadState"
+  fragment="$(systemctl show "$unit_name" --property=FragmentPath --value)" || \
+    die "unable to inspect loaded $label FragmentPath"
+  need_reload="$(systemctl show "$unit_name" --property=NeedDaemonReload --value)" || \
+    die "unable to inspect loaded $label reload authority"
+  dropins="$(systemctl show "$unit_name" --property=DropInPaths --value)" || \
+    die "unable to inspect loaded $label drop-in authority"
+  start_value="$(systemctl show "$unit_name" --property=ExecStart --value)" || \
+    die "unable to inspect loaded $label ExecStart"
+  start_post="$(systemctl show "$unit_name" --property=ExecStartPost --value)" || \
+    die "unable to inspect loaded $label ExecStartPost"
+  restart="$(systemctl show "$unit_name" --property=Restart --value)" || \
+    die "unable to inspect loaded $label restart policy"
+  requires="$(systemctl show "$unit_name" --property=Requires --value)" || \
+    die "unable to inspect loaded $label Requires authority"
+  after="$(systemctl show "$unit_name" --property=After --value)" || \
+    die "unable to inspect loaded $label ordering authority"
+  active_state="$(systemctl show "$unit_name" --property=ActiveState --value)" || \
+    die "unable to inspect loaded $label active state"
+  sub_state="$(systemctl show "$unit_name" --property=SubState --value)" || \
+    die "unable to inspect loaded $label substate"
+  main_pid="$(systemctl show "$unit_name" --property=MainPID --value)" || \
+    die "unable to inspect loaded $label MainPID"
+  job="$(systemctl show "$unit_name" --property=Job --value)" || \
+    die "unable to inspect loaded $label job"
+  [[ "$load_state" == "loaded" && "$fragment" == "$unit_path" && \
+    "$need_reload" == "no" && "$dropins" == "$bridge_path" && \
+    -z "$start_post" && "$restart" == "no" && \
+    "$active_state" == "inactive" && "$sub_state" == "dead" && \
+    "$main_pid" == "0" && -z "$job" ]] || \
+    die "loaded $label is not exactly quarantined by its recovery ABI v2 bridge"
+  parse_loaded_exec_value "$start_value" start_exec start_argv || \
+    die "loaded $label ExecStart is not parseable"
+  start_path_count="$(grep -o 'path=' <<<"$start_value" | wc -l)"
+  [[ "$start_path_count" -eq 1 && \
+    "$start_exec" == "/usr/bin/true" && "$start_argv" == "/usr/bin/true" && \
+    "$start_value" != *"$LEGACY_RELEASE_RECONCILER"* && \
+    "$start_value" != *"$RELEASE_RECONCILER"* ]] || \
+    die "loaded $label retains executable recovery semantics"
+  systemd_word_list_has "$requires" "$v2_unit" || \
+    die "loaded $label does not propagate its recovery ABI v2 bridge failure"
+  systemd_word_list_has "$after" "$v2_unit" || \
+    die "loaded $label is not ordered after its recovery ABI v2 bridge target"
+}
+
 check_versioned_release_consumers() {
   [[ "$SERVICE_PROJECT_ROOT" == "/opt/trex-webui/current" ]] || return 0
+  [[ "$DAEMON_LIBEXEC_ROOT" == "/usr/libexec/trex-webui" && \
+    "$RECOVERY_V2_ROOT" == "/usr/libexec/trex-webui/recovery-v2" && \
+    "$RELEASE_BOOTSTRAP" == "/usr/libexec/trex-webui/recovery-v2/bootstrap_release_infrastructure.py" && \
+    "$RELEASE_RECONCILER" == "/usr/libexec/trex-webui/recovery-v2/release_transaction.py" && \
+    "$RELEASE_RECONCILER_UNIT" == "/etc/systemd/system/trex-webui-release-reconcile-v2.service" && \
+    "$RELEASE_RETRY_UNIT" == "/etc/systemd/system/trex-webui-release-retry-v2.service" && \
+    "$RELEASE_ACK_UNIT" == "/etc/systemd/system/trex-webui-release-consumer-ack-v2.service" && \
+    "$RELEASE_RECONCILER_API_DROPIN" == "/etc/systemd/system/trex-webui-api.service.d/trex-webui-release-reconcile-v2.conf" && \
+    "$RELEASE_RECONCILER_NGINX_DROPIN" == "/etc/systemd/system/nginx.service.d/trex-webui-release-reconcile-v2.conf" && \
+    "$RELEASE_RECONCILER_DAEMON_DROPIN" == "/etc/systemd/system/trex-daemon-server.service.d/trex-webui-release-reconcile-v2.conf" && \
+    "$LEGACY_RELEASE_RECONCILER_BRIDGE" == "/etc/systemd/system/trex-webui-release-reconcile.service.d/trex-webui-recovery-v2-bridge.conf" && \
+    "$LEGACY_RELEASE_RETRY_BRIDGE" == "/etc/systemd/system/trex-webui-release-retry.service.d/trex-webui-recovery-v2-bridge.conf" && \
+    "$LEGACY_RELEASE_ACK_BRIDGE" == "/etc/systemd/system/trex-webui-release-consumer-ack.service.d/trex-webui-recovery-v2-bridge.conf" && \
+    "$RELEASE_STATE_ROOT" == "/var/lib/trex-webui-deploy" && \
+    "$RELEASE_INFRASTRUCTURE_COMMON_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-v2-common.json" && \
+    "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" == "/var/lib/trex-webui-deploy/infrastructure-v2-managed-local.json" ]] || \
+    die "versioned verification requires the exact fixed recovery ABI v2 targets"
   local previous=""
   previous="$(readlink -- "/opt/trex-webui/previous" 2>/dev/null || true)"
   if [[ -n "$previous" ]]; then
@@ -1414,29 +1723,78 @@ check_versioned_release_consumers() {
   [[ "$(grep -Fxc '    root /opt/trex-webui/current/apps/web/dist;' "$NGINX_CONF")" -eq 1 ]] || \
     die "Nginx does not consume the atomic current release selector"
 
-  [[ -f "$RELEASE_RECONCILER" && ! -L "$RELEASE_RECONCILER" ]] || \
-    die "installed release reconciler is missing or unsafe"
-  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER")" == "0:0 755 1" ]] || \
-    die "installed release reconciler has unsafe ownership or mode"
-  [[ -f "$RELEASE_RECONCILER_UNIT" && ! -L "$RELEASE_RECONCILER_UNIT" ]] || \
-    die "installed release reconciler unit is missing or unsafe"
-  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_UNIT")" == "0:0 644 1" ]] || \
-    die "installed release reconciler unit has unsafe ownership or mode"
-  cmp -s "$PROJECT_ROOT/deploy/release_transaction.py" "$RELEASE_RECONCILER" || \
-    die "installed release reconciler does not match the candidate bundle"
-  cmp -s \
-    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile.service" \
-    "$RELEASE_RECONCILER_UNIT" || \
-    die "installed release reconciler unit does not match the candidate bundle"
-  [[ -f "$RELEASE_RECONCILER_NGINX_DROPIN" && \
-    ! -L "$RELEASE_RECONCILER_NGINX_DROPIN" ]] || \
-    die "Nginx release reconciliation dependency is missing or unsafe"
-  [[ "$(stat -c '%u:%g %a %h' "$RELEASE_RECONCILER_NGINX_DROPIN")" == "0:0 644 1" ]] || \
-    die "Nginx release reconciliation dependency has unsafe ownership or mode"
-  cmp -s \
-    "$PROJECT_ROOT/deploy/systemd/nginx-trex-webui-release-reconcile.conf" \
-    "$RELEASE_RECONCILER_NGINX_DROPIN" || \
-    die "Nginx release reconciliation dependency does not match the candidate bundle"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/bootstrap_release_infrastructure.py" \
+    "$RELEASE_BOOTSTRAP" 755 "recovery ABI v2 bootstrap"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/release_transaction.py" \
+    "$RELEASE_RECONCILER" 755 "recovery ABI v2 engine"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/trex_overview_contract.py" \
+    "$RELEASE_OVERVIEW_VALIDATOR" 755 "recovery ABI v2 overview validator"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/trex_persisted_state_contract.py" \
+    "$RELEASE_STATE_VALIDATOR" 755 "recovery ABI v2 persisted-state validator"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.service" \
+    "$RELEASE_RECONCILER_UNIT" 644 "recovery ABI v2 reconciler unit"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v2.service" \
+    "$RELEASE_RETRY_UNIT" 644 "recovery ABI v2 retry unit"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v2.service" \
+    "$RELEASE_ACK_UNIT" 644 "recovery ABI v2 acknowledgement unit"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.conf" \
+    "$RELEASE_RECONCILER_API_DROPIN" 644 "API recovery ABI v2 dependency"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.conf" \
+    "$RELEASE_RECONCILER_NGINX_DROPIN" 644 "Nginx recovery ABI v2 dependency"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v1-bridge-v2.conf" \
+    "$LEGACY_RELEASE_RECONCILER_BRIDGE" 644 "recovery ABI v1 reconciler bridge"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-retry-v1-bridge-v2.conf" \
+    "$LEGACY_RELEASE_RETRY_BRIDGE" 644 "recovery ABI v1 retry bridge"
+  assert_release_artifact_matches \
+    "$PROJECT_ROOT/deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf" \
+    "$LEGACY_RELEASE_ACK_BRIDGE" 644 "recovery ABI v1 acknowledgement bridge"
+  if [[ "$CHECK_DAEMON" -eq 1 || \
+    -e "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" || \
+    -L "$RELEASE_INFRASTRUCTURE_MANAGED_MANIFEST" ]]; then
+    assert_release_artifact_matches \
+      "$PROJECT_ROOT/deploy/daemon_rpc_probe.py" \
+      "$RELEASE_ROLLBACK_DAEMON_PROBE" 755 \
+      "recovery ABI v2 rollback daemon probe"
+    assert_release_artifact_matches \
+      "$PROJECT_ROOT/deploy/trex_native_boundary.sh" \
+      "$RELEASE_ROLLBACK_NATIVE_BOUNDARY" 755 \
+      "recovery ABI v2 rollback native boundary"
+    assert_release_artifact_matches \
+      "$PROJECT_ROOT/deploy/systemd/trex-webui-release-reconcile-v2.conf" \
+      "$RELEASE_RECONCILER_DAEMON_DROPIN" 644 \
+      "daemon recovery ABI v2 dependency"
+  fi
+  verify_release_infrastructure_manifests
+  if [[ "$LEGACY_RELEASE_INFRASTRUCTURE" -eq 0 ]]; then
+    local legacy_artifact
+    for legacy_artifact in \
+      "$LEGACY_RELEASE_BOOTSTRAP" \
+      "$LEGACY_RELEASE_RECONCILER" \
+      "$LEGACY_RELEASE_RECONCILER_UNIT" \
+      "$LEGACY_RELEASE_RETRY_UNIT" \
+      "$LEGACY_RELEASE_ACK_UNIT" \
+      "$LEGACY_RELEASE_RECONCILER_API_DROPIN" \
+      "$LEGACY_RELEASE_RECONCILER_NGINX_DROPIN" \
+      "$LEGACY_RELEASE_RECONCILER_DAEMON_DROPIN"; do
+      [[ ! -e "$legacy_artifact" && ! -L "$legacy_artifact" ]] || \
+        die "unmanifested recovery ABI v1 artifact remains installed: $legacy_artifact"
+    done
+  elif [[ "$LEGACY_RELEASE_MANAGED_INFRASTRUCTURE" -eq 0 ]]; then
+    [[ ! -e "$LEGACY_RELEASE_RECONCILER_DAEMON_DROPIN" && \
+      ! -L "$LEGACY_RELEASE_RECONCILER_DAEMON_DROPIN" ]] || \
+      die "unmanifested managed-local recovery ABI v1 drop-in remains installed"
+  fi
   [[ -d "$RELEASE_STATE_ROOT" && ! -L "$RELEASE_STATE_ROOT" ]] || \
     die "root-only release transaction state directory is missing or unsafe"
   [[ "$(stat -c '%u:%g %a' "$RELEASE_STATE_ROOT")" == "0:0 700" ]] || \
@@ -1474,10 +1832,55 @@ check_systemd() {
       die "managed API MainPID is not pinned to the exact local TRex authority"
   fi
   if [[ "$SERVICE_PROJECT_ROOT" == "/opt/trex-webui/current" ]]; then
+    assert_loaded_recovery_v2_unit \
+      trex-webui-release-reconcile-v2.service \
+      "$RELEASE_RECONCILER_UNIT" \
+      "/usr/bin/python3.11 $RELEASE_RECONCILER --deployment-lock /run/lock/trex-webui/deploy.lock --supervise-errors reconcile" \
+      "recovery ABI v2 reconciler"
+    assert_loaded_recovery_v2_unit \
+      trex-webui-release-retry-v2.service \
+      "$RELEASE_RETRY_UNIT" \
+      "/usr/bin/python3.11 $RELEASE_RECONCILER --deployment-lock /run/lock/trex-webui/deploy.lock --retry-on-lock-busy reconcile" \
+      "recovery ABI v2 retry service"
+    assert_loaded_recovery_v2_unit \
+      trex-webui-release-consumer-ack-v2.service \
+      "$RELEASE_ACK_UNIT" \
+      "/usr/bin/python3.11 $RELEASE_RECONCILER ack-consumers" \
+      "recovery ABI v2 acknowledgement service"
+    if [[ "$LEGACY_RELEASE_INFRASTRUCTURE" -eq 1 ]]; then
+      assert_loaded_legacy_bridge_unit \
+        trex-webui-release-reconcile.service \
+        "$LEGACY_RELEASE_RECONCILER_UNIT" \
+        "$LEGACY_RELEASE_RECONCILER_BRIDGE" \
+        trex-webui-release-reconcile-v2.service \
+        "recovery ABI v1 reconciler"
+      assert_loaded_legacy_bridge_unit \
+        trex-webui-release-retry.service \
+        "$LEGACY_RELEASE_RETRY_UNIT" \
+        "$LEGACY_RELEASE_RETRY_BRIDGE" \
+        trex-webui-release-retry-v2.service \
+        "recovery ABI v1 retry service"
+      assert_loaded_legacy_bridge_unit \
+        trex-webui-release-consumer-ack.service \
+        "$LEGACY_RELEASE_ACK_UNIT" \
+        "$LEGACY_RELEASE_ACK_BRIDGE" \
+        trex-webui-release-consumer-ack-v2.service \
+        "recovery ABI v1 acknowledgement service"
+    fi
+    assert_loaded_release_consumer_dropins \
+      trex-webui-api.service \
+      "API unit" \
+      "$RELEASE_RECONCILER_API_DROPIN" \
+      "$LEGACY_RELEASE_RECONCILER_API_DROPIN"
     assert_loaded_release_reconcile_dependency \
       nginx.service \
       "Nginx unit" || \
       die "Nginx release reconciliation dependency is not loaded"
+    assert_loaded_release_consumer_dropins \
+      nginx.service \
+      "Nginx unit" \
+      "$RELEASE_RECONCILER_NGINX_DROPIN" \
+      "$LEGACY_RELEASE_RECONCILER_NGINX_DROPIN"
     if [[ "$CHECK_DAEMON" -eq 1 ]]; then
       [[ -f "$DAEMON_UNIT" && ! -L "$DAEMON_UNIT" ]] || \
         die "versioned daemon unit is missing or unsafe: $DAEMON_UNIT"
@@ -1495,6 +1898,12 @@ check_systemd() {
         trex-daemon-server.service \
         "daemon unit" || \
         die "daemon release reconciliation dependency is not loaded"
+      assert_loaded_release_consumer_dropins \
+        trex-daemon-server.service \
+        "daemon unit" \
+        "$RELEASE_RECONCILER_DAEMON_DROPIN" \
+        "$LEGACY_RELEASE_RECONCILER_DAEMON_DROPIN" \
+        "$LEGACY_RELEASE_MANAGED_INFRASTRUCTURE"
     fi
   fi
   systemctl is-active --quiet nginx.service || systemctl is-active --quiet nginx || die "nginx service is not active"

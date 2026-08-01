@@ -514,10 +514,21 @@ the former `current` as `previous`, installs the stable API/Nginx consumers,
 starts services, requires direct readiness and `deploy/verify.sh`, and only then
 marks the journal `committed`. A normal pre-commit failure invokes the same
 reconciler immediately. `SIGKILL`, power loss, or reboot leaves the durable
-journal for `trex-webui-release-reconcile.service`, which runs before API,
+journal for `trex-webui-release-reconcile-v2.service`, which runs before API,
 managed daemon, and Nginx and restores the exact pre-transaction selectors. A
 durably committed phase is never implicitly rolled back; reconciliation verifies
 it and completes bounded retention cleanup.
+
+Recovery ABI v2 lives under `/usr/libexec/trex-webui/recovery-v2` and has its
+own units, consumer drop-ins, and immutable manifests. A host with ABI v1 is
+migrated only after its v1 manifests verify exactly, all v1 recovery units are
+inactive and job-free, and both engines interpret the same retired terminal
+journal. Manifest-owned bridge drop-ins then clear every v1 command and place an
+inert `/usr/bin/true` barrier behind the corresponding v2 unit. The v1 files are
+preserved for auditability, but they never remain a second semantic authority.
+The terminal/quiescent checks run again immediately before `daemon-reload`, and
+the loaded bridge graph is rejected if any v1 unit still has an active job or
+main PID.
 
 Archive activation and rollback are explicit maintenance windows, not a
 zero-downtime promise. Nginx and the API are fenced while their shared release
@@ -536,7 +547,7 @@ hardware state.
 After a committed versioned upgrade, inspect the exact retained selectors:
 
 ```bash
-sudo /usr/libexec/trex-webui/release_transaction.py status
+sudo /usr/libexec/trex-webui/recovery-v2/release_transaction.py status
 readlink /opt/trex-webui/current
 readlink /opt/trex-webui/previous
 ```
@@ -993,14 +1004,15 @@ Path ownership for the standard deployment is:
 | Path | API access | Owner/mode expectation |
 | --- | --- | --- |
 | `/opt/trex-webui` | selector/release authority | `root:root`, not group/world writable |
-| `/opt/trex-webui/releases/sha256-*` | read/execute | verified root-owned release tree; directory name equals its payload digest; only `apps/web/dist` receives the versioned `httpd_sys_content_t` policy |
+| `/opt/trex-webui/releases/sha256-*` | read/execute | verified root-owned release tree with traversable `0755` release/`apps` ancestors; the complete tree is restored to persisted SELinux policy before startup, while only `apps/web/dist` receives the versioned `httpd_sys_content_t` policy |
 | `/opt/trex-webui/current` | read/execute | root-owned relative symlink to `releases/sha256-*`; stable API/Nginx consumer |
 | `/opt/trex-webui/previous` | inactive N-1 | absent on first release or a root-owned relative symlink to a distinct complete release |
 | `/opt/trex-webui/current/.env` (optional) | read | release-attached `root:trex-webui` `0640` regular file; prefer `/etc/trex-webui/trex-webui.env` |
 | `/opt/trex-webui/current/.venv` and `.venv.runtime-*` | read/execute | candidate-owned trusted runtime/release markers, not group/world writable |
 | `/opt/trex-core` | read/execute | `root:root`, not group/world writable |
 | `/var/lib/trex-webui-deploy` | no API access | `root:root` `0700`; release journal/lock are regular `0600` single-link files |
-| `/usr/libexec/trex-webui/release_transaction.py` | no API access | `root:root` `0755`, regular non-symlink boot reconciler |
+| `/usr/libexec/trex-webui/recovery-v2/release_transaction.py` | no API access | `root:root` `0755`, regular non-symlink canonical boot reconciler |
+| `/usr/libexec/trex-webui/release_transaction.py` (ABI v1, migrated hosts only) | no API access | immutable audit/migration artifact; its systemd units are quarantined by v2-owned inert bridge drop-ins |
 | `/var/lib/trex-webui` | read/write | `trex-webui:trex-webui`, `0750` |
 | `/var/lib/trex-webui/trex_cfg.yaml` | read/write/replace | `trex-webui:trex-webui`, `0640` |
 | `/var/lib/trex-webui/runtime-state.json` | read/write/replace | `trex-webui:trex-webui`, `0640` after first publication |
@@ -1135,7 +1147,7 @@ Template-level validation commands are:
 ```bash
 systemd-analyze verify deploy/systemd/trex-daemon-server.service
 systemd-analyze verify deploy/systemd/trex-webui-api.service
-systemd-analyze verify deploy/systemd/trex-webui-release-reconcile.service
+systemd-analyze verify deploy/systemd/trex-webui-release-reconcile-v2.service
 systemd-analyze security --offline=yes \
   deploy/systemd/trex-webui-api.service
 sudo nginx -t

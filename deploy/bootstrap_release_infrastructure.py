@@ -15,7 +15,7 @@ from pathlib import Path
 SHA256_HEX = set("0123456789abcdef")
 
 
-SCHEMA = "trex-webui-release-infrastructure/v1"
+SCHEMA = "trex-webui-release-infrastructure/v2"
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
 
@@ -449,7 +449,7 @@ def main() -> int:
         return 0
     # Publication order is an activation barrier: no consumer may acquire a
     # Requires= edge until the reconciler runtime, validators, helpers, and
-    # units it needs are all individually fsynced.  v1 bytes are immutable
+    # units it needs are all individually fsynced.  v2 bytes are immutable
     # once the manifest exists; a future ABI must use a new path/schema.
     activation_barrier_crossed = False
     for index, record in enumerate(publication_order):

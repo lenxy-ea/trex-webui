@@ -37,6 +37,12 @@ published releases.
 - SELinux-enabled versioned installs persist and verify an exact HTTP content
   policy for release frontend trees without labeling API source or `.env` as
   Nginx-readable content.
+- Versioned releases normalize traversal permissions and restore the persisted
+  SELinux context across the complete release and Python runtime before any
+  systemd consumer can execute it.
+- Recovery ABI v2 is published at a generation-specific path; an exact,
+  terminal-only migration quarantines immutable ABI v1 units behind inert
+  bridge drop-ins so two recovery engines can never own selector semantics.
 
 ### Changed
 
@@ -46,6 +52,9 @@ published releases.
 - Run Reports, Dashboard chart proportions, close guards, and dense desktop
   workflows were refined for clearer operational scanning and safer actions.
 - The package version is pinned to `0.1.0-rc.2` across both npm workspaces.
+- Systemd consumer readiness compares stable executable identity rather than
+  transient process IDs and start timestamps, so a verified rollback can be
+  durably acknowledged after consumers restart.
 
 ### Known limitations
 
