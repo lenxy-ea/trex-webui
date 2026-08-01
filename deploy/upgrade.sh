@@ -2069,18 +2069,16 @@ extract_and_verify_archive() {
   if [[ -z "$ARCHIVE" ]]; then
     return 0
   fi
-  if [[ "$DRY_RUN" -eq 1 ]]; then
-    printf '+ tar --extract --gzip --no-same-owner --same-permissions --file <private-staged-archive> --directory <marker-owned-temp-dir>\n'
-    printf '+ python3.11 %q verify-tree <marker-owned-temp-dir>/%q\n' "$SCRIPT_DIR/archive_safety.py" "$ARCHIVE_TOP"
-    return 0
-  fi
-
   [[ -n "$STAGING_ROOT" && -d "$STAGING_ROOT" && ! -L "$STAGING_ROOT" ]] || \
     die "archive staging root is missing or unsafe"
   [[ -f "$ARCHIVE_STAGED_PATH" && ! -L "$ARCHIVE_STAGED_PATH" ]] || \
     die "staged release archive is missing or unsafe"
-  log "Extracting the verified private archive copy"
-  run tar --extract --gzip --no-same-owner --same-permissions \
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "Extracting the verified private archive copy for dry-run validation"
+  else
+    log "Extracting the verified private archive copy"
+  fi
+  tar --extract --gzip --no-same-owner --same-permissions \
     --file "$ARCHIVE_STAGED_PATH" --directory "$STAGING_ROOT"
   ARCHIVE_SOURCE_ROOT="$STAGING_ROOT/$ARCHIVE_TOP"
   [[ -d "$ARCHIVE_SOURCE_ROOT" ]] || die "extracted package root not found: $ARCHIVE_SOURCE_ROOT"

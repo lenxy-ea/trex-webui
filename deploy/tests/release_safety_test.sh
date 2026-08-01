@@ -1012,6 +1012,27 @@ archive_snapshot_swap_fixture() (
 archive_snapshot_swap_fixture || \
   fail "archive replacement after validation changed the extracted release payload"
 
+archive_dry_run_extract_fixture() (
+  # A production dry-run must inspect candidate-owned recovery and systemd
+  # files after archive validation, so it needs a real private extraction even
+  # though it never mutates the install root.
+  # shellcheck source=deploy/upgrade.sh
+  source "$PROJECT_ROOT/deploy/upgrade.sh"
+  ARCHIVE="$VALID_ARCHIVE"
+  DRY_RUN=1
+  SYNC_METHOD=portable
+
+  stage_archive
+  check_archive
+  extract_and_verify_archive
+
+  [[ -f "$ARCHIVE_SOURCE_ROOT/deploy/upgrade.sh" ]] || \
+    fail "archive dry-run did not retain a verified candidate source tree"
+)
+
+archive_dry_run_extract_fixture || \
+  fail "archive dry-run did not extract and verify its private candidate snapshot"
+
 TREE_ARCHIVE="$TEST_ROOT/tree-identity.tar.gz"
 make_fixture_archive "$TREE_ARCHIVE" valid
 TREE_EXTRACT="$TEST_ROOT/tree-extract"
