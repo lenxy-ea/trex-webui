@@ -99,6 +99,16 @@ def write_json(path: Path, payload: object) -> None:
     )
 
 
+def test_project_module_loader_does_not_write_bytecode(tmp_path: Path) -> None:
+    module_path = tmp_path / "validator.py"
+    module_path.write_text("VALUE = 17\n", encoding="utf-8")
+
+    loaded = evidence.load_project_module("release_validator_no_pyc", module_path)
+
+    assert loaded.VALUE == 17
+    assert not (tmp_path / "__pycache__").exists()
+
+
 def mutation_evidence(
     nonce: str,
     operation: str,

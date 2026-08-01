@@ -38,6 +38,9 @@ class StlTrafficFacadeMixin:
     ) -> TrexCallResult:
         return _traffic_authority(self).reap_expired_hard_stops(now)
 
+    def retire_traffic_after_trex_termination(self) -> TrexCallResult:
+        return _traffic_authority(self).retire_after_trex_termination()
+
     def replace_traffic_plan(
         self,
         expected_revision: int,

@@ -110,7 +110,12 @@ def load_release_contract_module() -> Any:
                 f"cannot load release provenance validator: {module_path}"
             )
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_dont_write_bytecode
     except ArchiveSafetyError:
         raise
     except Exception as exc:
@@ -541,8 +546,13 @@ def compute_packaging_source_identity(source_root: Path) -> dict[str, object]:
         if spec is None or spec.loader is None:
             raise ArchiveSafetyError(f"cannot load source identity implementation: {script_path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        identity = module.compute_source_identity(source_root)
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+            identity = module.compute_source_identity(source_root)
+        finally:
+            sys.dont_write_bytecode = previous_dont_write_bytecode
         git = identity.get("git") if isinstance(identity, dict) else None
         if isinstance(git, dict):
             # Release identity is bound to the commit and source contents,

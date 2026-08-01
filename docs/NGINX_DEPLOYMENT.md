@@ -206,6 +206,13 @@ fail-closed blocker. External-daemon mode has no trusted generation source, so
 ownership is intentionally limited to one API process and is not recovered
 after an API restart.
 
+An operator-confirmed `POST /api/system/daemon/trex/stop` remains available
+when an expired hard-stop lease or a daemon-generation mismatch blocks normal
+STL control. It terminates the whole TRex workload through daemon
+`force_trex_kill`; only a boolean daemon result authorizes the backend to
+retire the old durable traffic session and pending traffic WAL as stopped.
+This is an explicit recovery action, not cross-generation traffic adoption.
+
 A capture start persists `preparing` before acquisition, Service Mode, or
 recorder RPC. Its exact recorder baseline, port-ownership snapshot, intended
 acquire/service changes, and each intent/confirmation substage survive an API

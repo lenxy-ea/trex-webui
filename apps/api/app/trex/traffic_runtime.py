@@ -705,6 +705,133 @@ class TrafficRuntimeAuthority:
                 },
             )
 
+    def retire_after_trex_termination(self) -> TrexCallResult:
+        """Close durable traffic after the daemon proves no TRex process remains."""
+
+        with runtime_mutation_fence(hard_stop=True), self._lock:
+            try:
+                before = self.store.load()
+            except RuntimeStateError as exc:
+                return _failure("traffic_runtime_state_invalid", str(exc))
+            session_before = before.traffic_session
+            intent_before = before.traffic_mutation_intent
+            if session_before is None and intent_before is None:
+                self._owned_session_id = None
+                return TrexCallResult(
+                    True,
+                    data={
+                        "retired": False,
+                        "session_id": None,
+                        "ports": [],
+                        "mutation_intent_cleared": False,
+                    },
+                )
+
+            now = utc_now_iso()
+            expected_session_id = (
+                session_before.id if session_before is not None else None
+            )
+            expected_intent_nonce = (
+                intent_before.nonce if intent_before is not None else None
+            )
+            retired_ports = sorted(
+                {
+                    port
+                    for group in (
+                        session_before.groups
+                        if session_before is not None
+                        else []
+                    )
+                    for port in group.ports
+                }
+                | set(intent_before.ports if intent_before is not None else [])
+            )
+
+            def retire(
+                document: RuntimeStateDocument,
+            ) -> RuntimeStateDocument:
+                current_session_id = (
+                    document.traffic_session.id
+                    if document.traffic_session is not None
+                    else None
+                )
+                current_intent_nonce = (
+                    document.traffic_mutation_intent.nonce
+                    if document.traffic_mutation_intent is not None
+                    else None
+                )
+                if (
+                    current_session_id != expected_session_id
+                    or current_intent_nonce != expected_intent_nonce
+                ):
+                    raise TrafficSessionIdConflict(
+                        "traffic runtime changed after TRex process termination"
+                    )
+                session = document.traffic_session
+                if session is not None:
+                    changed = False
+                    for group in session.groups:
+                        stopped_states = {
+                            port: "stopped"
+                            for port in group.ports
+                        }
+                        if (
+                            group.state != "stopped"
+                            or group.port_states != stopped_states
+                            or group.hard_stop_at is not None
+                        ):
+                            group.state = "stopped"
+                            group.port_states = stopped_states
+                            group.hard_stop_at = None
+                            group.updated_at = now
+                            changed = True
+                        if (
+                            session.evidence_version == 1
+                            and group.cleanup_evidence is None
+                        ):
+                            group.ended_at = now
+                            group.cleanup_evidence = TrafficCleanupEvidenceState(
+                                completion="observed",
+                                completed_at=now,
+                                final_port_states=stopped_states,
+                            )
+                            changed = True
+                    reconciliation = (
+                        "retired after the TRex daemon confirmed process termination"
+                    )
+                    if (
+                        session.state != "stopped"
+                        or session.ended_at is None
+                        or session.reconciliation != reconciliation
+                    ):
+                        changed = True
+                    session.state = "stopped"
+                    session.updated_at = now
+                    session.ended_at = session.ended_at or now
+                    session.reconciliation = reconciliation
+                    if changed:
+                        session.revision += 1
+                    document.traffic_session = session
+                document.traffic_mutation_intent = None
+                return document
+
+            try:
+                self.store.update(retire)
+            except TrafficSessionIdConflict as exc:
+                return _failure("traffic_session_id_conflict", str(exc))
+            except RuntimeStateError as exc:
+                return _failure("traffic_runtime_state_invalid", str(exc))
+            self._owned_session_id = None
+            return TrexCallResult(
+                True,
+                data={
+                    "retired": True,
+                    "session_id": expected_session_id,
+                    "ports": retired_ports,
+                    "mutation_intent_cleared": intent_before is not None,
+                },
+            )
+
     def _stop_expired_leases_over_pending_mutation(
         self,
         *,

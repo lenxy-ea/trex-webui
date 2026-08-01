@@ -43,11 +43,14 @@ from app.trex.api_contracts import (
 from app.trex.config_model import TrexConfig
 from app.trex.dependencies import (
     disconnect_stl_service,
+    disconnect_stl_service_for_trex_termination,
     get_stats_sampler,
     get_stl_service,
+    retire_traffic_after_trex_termination,
     retire_disconnected_stl_service,
     start_traffic_hard_stop_reaper,
     stop_traffic_hard_stop_reaper,
+    trex_termination_transaction,
 )
 from app.trex.runtime import (
     DAEMON_COMMAND_TIMEOUT_MAX_SECONDS,
@@ -1255,10 +1258,27 @@ def daemon_trex_start(request: DaemonTrexStartRequest) -> dict[str, object]:
 
 @app.post("/api/system/daemon/trex/stop")
 def daemon_trex_stop(request: Optional[DaemonTrexStopRequest] = None) -> dict[str, object]:
-    return RuntimeManager(
-        get_environment(),
-        lifecycle_disconnect=disconnect_stl_service,
-    ).daemon_trex_stop(confirmation=request.confirmation if request else None)
+    with trex_termination_transaction():
+        payload = RuntimeManager(
+            get_environment(),
+            lifecycle_disconnect=disconnect_stl_service_for_trex_termination,
+        ).daemon_trex_stop(confirmation=request.confirmation if request else None)
+        payload["traffic_retirement"] = None
+        if not payload.get("ok"):
+            return payload
+        retirement = retire_traffic_after_trex_termination()
+        payload["traffic_retirement"] = public_result_payload(retirement)
+        if not retirement.ok:
+            payload["ok"] = False
+            payload["blocker"] = (
+                retirement.blocker
+                or "daemon_stop_traffic_retirement_failed"
+            )
+            payload["error"] = (
+                "TRex process termination succeeded, but durable traffic "
+                f"retirement failed: {retirement.error or retirement.blocker}"
+            )
+        return payload
 
 
 @app.post("/api/config/render")

@@ -299,6 +299,38 @@ def test_service_replacement_stops_old_reaper_and_starts_one_for_new_service(
         dependencies.stop_traffic_hard_stop_reaper()
 
 
+def test_explicit_trex_termination_bypasses_hard_stop_disconnect_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class PriorityBlockedService(RecordingHardStopService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.disconnect_calls = 0
+
+        def _hard_stop_rpc_priority_failure(self) -> TrexCallResult:
+            return TrexCallResult(
+                False,
+                blocker="traffic_hard_stop_priority",
+                error="supervisor has priority",
+            )
+
+        def disconnect(self) -> TrexCallResult:
+            self.disconnect_calls += 1
+            return TrexCallResult(True, data={"disconnected": True})
+
+    service = PriorityBlockedService()
+    monkeypatch.setattr(dependencies, "_service", service)
+    monkeypatch.setattr(dependencies, "_stats_sampler", None)
+
+    ordinary = dependencies.disconnect_stl_service()
+    terminating = dependencies.disconnect_stl_service_for_trex_termination()
+
+    assert ordinary.ok is False
+    assert ordinary.blocker == "traffic_hard_stop_priority"
+    assert terminating.ok is True
+    assert service.disconnect_calls == 1
+
+
 def test_blocked_reaper_prevents_service_replacement_without_losing_reference(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

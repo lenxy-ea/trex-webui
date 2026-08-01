@@ -142,7 +142,12 @@ def load_project_module(module_name: str, path: Path) -> Any:
         if spec is None or spec.loader is None:
             raise ReleaseEvidenceError(f"cannot load release validator: {path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_dont_write_bytecode
         return module
     except ReleaseEvidenceError:
         raise

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
+from typing import Iterator
 
 from app.core.settings import TrexEnvironment, get_environment
 from app.trex.stats_sampler import TrexStatsSampler
@@ -206,21 +208,22 @@ def stop_traffic_hard_stop_reaper() -> None:
         _detach_reaper_for_service_change()
 
 
-def disconnect_stl_service() -> TrexCallResult:
+def _disconnect_stl_service(*, terminating_trex: bool) -> TrexCallResult:
     global _stats_sampler
     with _service_replacement_lock:
         with _service_lock:
             service = _service
-        priority_guard = (
-            getattr(service, "_hard_stop_rpc_priority_failure", None)
-            if service is not None
-            else None
-        )
-        if callable(priority_guard):
-            priority_failure = priority_guard()
-            if priority_failure is not None:
-                return priority_failure
-        with runtime_mutation_fence():
+        if not terminating_trex:
+            priority_guard = (
+                getattr(service, "_hard_stop_rpc_priority_failure", None)
+                if service is not None
+                else None
+            )
+            if callable(priority_guard):
+                priority_failure = priority_guard()
+                if priority_failure is not None:
+                    return priority_failure
+        with runtime_mutation_fence(hard_stop=terminating_trex):
             with _service_lock:
                 sampler_closed = _stats_sampler is not None
                 if _stats_sampler is not None:
@@ -239,6 +242,32 @@ def disconnect_stl_service() -> TrexCallResult:
                 if result.ok and isinstance(result.data, dict):
                     result.data["stats_sampler_closed"] = sampler_closed
                 return result
+
+
+def disconnect_stl_service() -> TrexCallResult:
+    return _disconnect_stl_service(terminating_trex=False)
+
+
+def disconnect_stl_service_for_trex_termination() -> TrexCallResult:
+    """Close the cached STL client without delaying an explicit process stop."""
+
+    return _disconnect_stl_service(terminating_trex=True)
+
+
+@contextmanager
+def trex_termination_transaction() -> Iterator[None]:
+    """Fence disconnect, process termination, and durable retirement as one action."""
+
+    with _service_replacement_lock, runtime_mutation_fence(hard_stop=True):
+        yield
+
+
+def retire_traffic_after_trex_termination() -> TrexCallResult:
+    """Retire durable traffic only after the daemon confirmed process termination."""
+
+    service = get_stl_service()
+    with runtime_mutation_fence(hard_stop=True):
+        return service.retire_traffic_after_trex_termination()
 
 
 def retire_disconnected_stl_service() -> None:

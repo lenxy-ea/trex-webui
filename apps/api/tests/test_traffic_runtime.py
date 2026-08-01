@@ -1366,6 +1366,50 @@ def test_reaper_never_stops_after_authority_generation_changes(
     ]
 
 
+def test_confirmed_daemon_termination_retires_cross_generation_session_without_rpc(
+    tmp_path: Path,
+) -> None:
+    env = environment(tmp_path, supervisor="systemd")
+    client = FakeTrafficClient()
+    clock = MutableUtcClock(datetime(2026, 7, 31, tzinfo=timezone.utc))
+    runtime = authority(env, client, clock=clock)
+    revision = runtime.snapshot().data["plan_revision"]
+    started = runtime.start_group(
+        "pair-0",
+        revision,
+        None,
+        hard_stop_at=clock.deadline(60),
+    )
+    session_id = started.data["session"]["id"]
+    env.daemon_generation_path.write_text(
+        "22222222-2222-4222-8222-222222222222\n",
+        encoding="ascii",
+    )
+    client.calls.clear()
+
+    retired = runtime.retire_after_trex_termination()
+
+    assert retired.ok is True
+    assert retired.data == {
+        "retired": True,
+        "session_id": session_id,
+        "ports": [0, 1],
+        "mutation_intent_cleared": False,
+    }
+    assert client.calls == []
+    persisted = RuntimeStateStore(env.runtime_state_path).load()
+    assert persisted.traffic_mutation_intent is None
+    assert persisted.traffic_session is not None
+    assert persisted.traffic_session.state == "stopped"
+    assert persisted.traffic_session.revision == 2
+    assert persisted.traffic_session.groups[0].hard_stop_at is None
+    assert persisted.traffic_session.groups[0].cleanup_evidence is not None
+    assert (
+        persisted.traffic_session.groups[0].cleanup_evidence.completion
+        == "observed"
+    )
+
+
 def test_reaper_session_cas_refuses_replaced_session_without_stop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

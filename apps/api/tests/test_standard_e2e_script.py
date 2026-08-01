@@ -1311,6 +1311,8 @@ def test_source_identity_uses_verified_release_payload_without_git(tmp_path: Pat
     assert identity["provenance"]["kind"] == "verified-release-payload"
     assert identity["provenance"]["payload_digest"] == manifest["payload_identity"]["digest"]
     assert identity["provenance"]["payload_file_count"] == manifest["payload_identity"]["file_count"]
+    assert not list((tmp_path / "deploy" / "__pycache__").glob("archive_safety*.pyc"))
+    assert not list((tmp_path / "scripts" / "__pycache__").glob("release_contract*.pyc"))
 
 
 def test_release_source_identity_excludes_trusted_versioned_runtime(tmp_path: Path, monkeypatch) -> None:

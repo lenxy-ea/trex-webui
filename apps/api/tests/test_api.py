@@ -4711,8 +4711,12 @@ def test_daemon_trex_cancel_reservation_endpoint_uses_daemon_rpc_method(
 
 def test_daemon_trex_stop_endpoint_requires_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "app.main.disconnect_stl_service",
+        "app.main.disconnect_stl_service_for_trex_termination",
         lambda: (_ for _ in ()).throw(AssertionError("missing confirmation must not disconnect STL")),
+    )
+    monkeypatch.setattr(
+        "app.main.retire_traffic_after_trex_termination",
+        lambda: (_ for _ in ()).throw(AssertionError("missing confirmation must not retire traffic")),
     )
 
     def rpc_caller(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
@@ -4729,8 +4733,13 @@ def test_daemon_trex_stop_endpoint_requires_confirmation(monkeypatch: pytest.Mon
 def test_daemon_trex_stop_endpoint_uses_force_trex_kill_after_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
     monkeypatch.setattr(
-        "app.main.disconnect_stl_service",
+        "app.main.disconnect_stl_service_for_trex_termination",
         lambda: events.append("disconnect_stl") or TrexCallResult(True, data={"disconnected": True}),
+    )
+    monkeypatch.setattr(
+        "app.main.retire_traffic_after_trex_termination",
+        lambda: events.append("retire_traffic")
+        or TrexCallResult(True, data={"retired": True}),
     )
 
     def rpc_caller(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
@@ -4744,56 +4753,50 @@ def test_daemon_trex_stop_endpoint_uses_force_trex_kill_after_confirmation(monke
 
     assert payload["ok"] is True
     assert payload["stopped"] is True
-    assert events == ["disconnect_stl", "force_trex_kill"]
+    assert payload["traffic_retirement"]["ok"] is True
+    assert events == ["disconnect_stl", "force_trex_kill", "retire_traffic"]
 
 
-@pytest.mark.parametrize(
-    "blocker",
-    [
-        "traffic_hard_stop_priority",
-        "traffic_hard_stop_window_insufficient",
-    ],
-)
-def test_daemon_trex_stop_redacts_hard_stop_scheduler_evidence(
-    blocker: str,
+def test_daemon_trex_stop_uses_termination_lifecycle_during_hard_stop_priority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    events: list[str] = []
     monkeypatch.setattr(
-        "app.main.disconnect_stl_service",
-        lambda: TrexCallResult(
-            False,
-            data={
-                "rpc_count": 8,
-                "remaining_seconds": 12.0,
-                "required_seconds": 25.0,
-            },
-            blocker=blocker,
-            error="TRex RPC is deferred for the hard-stop supervisor",
-        ),
+        "app.main.disconnect_stl_service_for_trex_termination",
+        lambda: events.append("priority_disconnect")
+        or TrexCallResult(True, data={"disconnected": True}),
     )
     monkeypatch.setattr(
+        "app.main.retire_traffic_after_trex_termination",
+        lambda: events.append("retire_traffic")
+        or TrexCallResult(True, data={"retired": True}),
+    )
+
+    def rpc_caller(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
+        events.append(str(payload["method"]))
+        return {"jsonrpc": "2.0", "id": payload["id"], "result": True}
+
+    monkeypatch.setattr(
         "app.trex.runtime.httpx_rpc_caller",
-        lambda url, payload, timeout: (_ for _ in ()).throw(
-            AssertionError(
-                "force_trex_kill must not run after lifecycle blocker"
-            )
-        ),
+        rpc_caller,
     )
 
     payload = daemon_trex_stop(
         DaemonTrexStopRequest(confirmation="stop-trex")
     )
 
-    assert payload["ok"] is False
-    assert payload["blocker"] == blocker
-    assert payload["stl_disconnect"]["data"] is None
-    assert payload["stl_disconnect"]["blocker"] == blocker
+    assert payload["ok"] is True
+    assert events == ["priority_disconnect", "force_trex_kill", "retire_traffic"]
 
 
 def test_daemon_trex_stop_endpoint_reports_false_result_as_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "app.main.disconnect_stl_service",
+        "app.main.disconnect_stl_service_for_trex_termination",
         lambda: TrexCallResult(True, data={"disconnected": False}),
+    )
+    monkeypatch.setattr(
+        "app.main.retire_traffic_after_trex_termination",
+        lambda: TrexCallResult(True, data={"retired": False}),
     )
 
     def rpc_caller(url: str, payload: dict[str, object], timeout: float) -> dict[str, object]:
@@ -4807,13 +4810,14 @@ def test_daemon_trex_stop_endpoint_reports_false_result_as_not_running(monkeypat
     assert payload["ok"] is True
     assert payload["stopped"] is False
     assert payload["blocker"] is None
+    assert payload["traffic_retirement"]["ok"] is True
 
 
 def test_daemon_trex_stop_endpoint_preserves_cleanup_failure_without_force_kill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "app.main.disconnect_stl_service",
+        "app.main.disconnect_stl_service_for_trex_termination",
         lambda: TrexCallResult(
             False,
             data={"phase": "capture_remove", "remaining_capture_ids": [9]},
@@ -4825,6 +4829,12 @@ def test_daemon_trex_stop_endpoint_preserves_cleanup_failure_without_force_kill(
         "app.trex.runtime.httpx_rpc_caller",
         lambda url, payload, timeout: (_ for _ in ()).throw(
             AssertionError("force_trex_kill must not run after cleanup failure")
+        ),
+    )
+    monkeypatch.setattr(
+        "app.main.retire_traffic_after_trex_termination",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("traffic must not retire after lifecycle failure")
         ),
     )
 

@@ -306,7 +306,12 @@ def load_archive_safety_module(project_root: Path) -> Any:
         if spec is None or spec.loader is None:
             raise EvidenceIdentityError(f"unable to load release payload verifier: {module_path}")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        previous_dont_write_bytecode = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_dont_write_bytecode
     except EvidenceIdentityError:
         raise
     except Exception as exc:
