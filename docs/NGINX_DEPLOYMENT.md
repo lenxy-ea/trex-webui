@@ -145,13 +145,24 @@ making `/etc` writable to the API.
 
 ## Install
 
-From a normal checkout on a new host, build the WebUI and create the pinned
-Python 3.11 runtime in one step. This default is the same-host managed-daemon
-mode:
+Published production installs should use the attested release-first workflow in
+[INSTALLATION.md](INSTALLATION.md). It does not require Node.js on the target
+and activates one content-addressed API/frontend/runtime selector.
+
+`deploy/trex-webui` is the concise operator layer over the hardened installers.
+From a normal checkout on a development host, it can aggregate the complete
+read-only preflight and then explicitly select the checkout path:
 
 ```bash
-deploy/install.sh --install-nginx --install-python-deps
+sudo deploy/trex-webui doctor --operation install
+sudo deploy/trex-webui install --checkout
 ```
+
+The high-level command installs locked Python dependencies, installs Nginx when
+missing, and runs deployment verification by default. The low-level equivalent
+remains `deploy/install.sh --install-nginx --install-python-deps --verify` and
+is the mutation authority used by both high-level and release workflows. This
+default is the same-host managed-daemon mode.
 
 Managed-local mode requires `/usr/sbin/nft`, `nftables.service`, and the
 root-owned, non-group-writable `/etc/sysconfig/nftables.conf` from the
@@ -296,20 +307,21 @@ unit authority the fallback is the complete project `.venv`. Missing markers,
 an unsafe runtime, another project root, or any authority conflict fails closed.
 
 The installed Nginx configuration returns HTTP 403 to non-loopback clients by
-default. Before opening the firewall, allowlist the exact management subnet:
+default. Prefer installing the exact management subnet through the same
+transaction as configuration and release activation:
 
 ```bash
-printf '%s\n' 'allow 192.0.2.0/24;' | \
-  sudo tee /etc/nginx/trex-webui/access.d/management.conf >/dev/null
-sudo chown root:nginx /etc/nginx/trex-webui/access.d/management.conf
-sudo chmod 0640 /etc/nginx/trex-webui/access.d/management.conf
-sudo nginx -t
-sudo systemctl reload nginx
+sudo deploy/trex-webui install --checkout \
+  --trex-config /var/lib/trex-webui-bootstrap/trex_cfg.yaml \
+  --allow-cidr 192.0.2.0/24
 ```
 
 Replace `192.0.2.0/24` with the real, narrowly scoped management subnet. The
-base server supplies the final `deny all`; access include files should contain
-only reviewed `allow` directives.
+base server supplies the final `deny all`. The source YAML must be staged below
+a root-owned, non-writable path. Both files are published atomically and are
+restored on any later install, restart, or verify failure. Omitting
+`--allow-cidr` retains an existing policy and leaves a new host loopback-only;
+`0.0.0.0/0`, multicast, unspecified, and non-canonical networks are rejected.
 
 For SELinux enforcing hosts and firewalld-managed hosts:
 
@@ -344,20 +356,21 @@ command before resuming traffic.
 Preview an install or upgrade without changing the host:
 
 ```bash
-deploy/install.sh --dry-run
+sudo deploy/trex-webui doctor --operation install
+sudo deploy/trex-webui install --checkout --dry-run
 ```
 
 Run an install or upgrade and verify the deployed entrypoints afterward:
 
 ```bash
-deploy/install.sh --verify
+sudo deploy/trex-webui install --checkout
 ```
 
 Add the real TRex overview check when the hardware/control plane is expected to
 be online:
 
 ```bash
-deploy/install.sh --verify --verify-trex
+sudo deploy/trex-webui install --checkout --verify-trex
 ```
 
 For a development checkout only, an operator may hand the already-updated tree
@@ -605,7 +618,7 @@ their own wrapper under the selected tree.
 For a dry run from the extracted package:
 
 ```bash
-deploy/install.sh --skip-build --install-python-deps --dry-run
+deploy/trex-webui install --checkout --dry-run
 ```
 
 When the target host already has nginx and a working `.venv`, the smaller upgrade
@@ -618,7 +631,7 @@ deploy/upgrade.sh --skip-build --skip-python-deps
 Verify an installed package without changing the host:
 
 ```bash
-sudo deploy/verify.sh --base-url http://127.0.0.1
+sudo /opt/trex-webui/current/deploy/trex-webui verify
 ```
 
 or through the project wrapper from a full checkout:
@@ -768,10 +781,19 @@ selection, and install commands before changing a host.
 Useful options:
 
 ```bash
+deploy/trex-webui doctor --operation install --format json
+deploy/trex-webui install --archive trex-webui-*.tar.gz --sha256 <64-hex-digest>
+deploy/trex-webui install --checkout --trex-config /reviewed/trex_cfg.yaml --allow-cidr 192.0.2.0/24
+deploy/trex-webui upgrade --archive trex-webui-*.tar.gz --sha256 <64-hex-digest> --dry-run
+/opt/trex-webui/current/deploy/trex-webui status --format json
+/opt/trex-webui/current/deploy/trex-webui verify --trex
+/opt/trex-webui/current/deploy/trex-webui rollback --dry-run
 deploy/install.sh --skip-build
 deploy/install.sh --skip-restart
 deploy/install.sh --skip-enable
 deploy/install.sh --install-python-deps
+deploy/install.sh --trex-config /reviewed/trex_cfg.yaml
+deploy/install.sh --allow-cidr 192.0.2.0/24
 deploy/install.sh --external-daemon
 deploy/install.sh --allow-daemon-runtime-restart
 deploy/install.sh --project-root /opt/trex-webui

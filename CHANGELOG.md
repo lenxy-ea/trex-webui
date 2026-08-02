@@ -8,6 +8,35 @@ published releases.
 
 ## [Unreleased]
 
+### Added
+
+- A read-only deployment doctor that aggregates host, dependency, SELinux,
+  TRex, configuration, management-network, release-selector, transaction, and
+  live traffic/capture/Quick Validation checks with text or versioned JSON
+  output.
+- One high-level `deploy/trex-webui` surface for release-first install, upgrade,
+  status, verification, and guarded N-1 rollback while retaining the existing
+  fail-closed Shell transaction engines as the mutation authority.
+- Transactional import of an explicit reviewed TRex YAML and a canonical narrow
+  management CIDR, including exact rollback on later deployment failure.
+
+### Changed
+
+- Production documentation now starts with the attested archive workflow,
+  invokes downloaded bootstrap assets through Bash, and uses physical selected
+  paths for direct deployment verification.
+- Archive installs default to locked Python dependency installation and
+  post-activation verification through the high-level entrypoint; Node.js is
+  not required on the target host.
+
+### Security
+
+- Management access remains deny-by-default, rejects open-Internet,
+  unspecified, multicast, and non-canonical networks, and never overwrites an
+  existing allowlist unless the operator supplies `--allow-cidr`.
+- Imported TRex configurations must be regular, non-symlink, bounded files
+  below root-owned, non-group/world-writable path authority.
+
 ## [0.1.0-rc.2] - 2026-08-01
 
 ### Added

@@ -128,7 +128,43 @@ project-owned contracts and never talks directly to STL, Scapy, or daemon
 ports. In the supported same-host deployment, the unprivileged API and the
 root-owned persistent TRex supervisor are separate services.
 
-## Quick start
+## Production quick start
+
+Production uses an attested, prebuilt release archive. The target host does not
+need Node.js or npm, and API/Nginx always consume the same content-addressed
+`current` release selector.
+
+```bash
+TAG="v0.1.0-rc.2" # choose the published release
+VERSION="${TAG#v}"
+RELEASE_DIR="$(mktemp -d -t trex-webui-release.XXXXXXXX)"
+
+gh release download "$TAG" --repo lenxy-ea/trex-webui --dir "$RELEASE_DIR"
+export GH_TOKEN="$(gh auth token)"
+
+sudo --preserve-env=GH_TOKEN \
+  bash "$RELEASE_DIR/trex-webui-${VERSION}.verified-upgrade.sh" \
+  --tag "$TAG" \
+  --metadata "$RELEASE_DIR/trex-webui-${VERSION}.release.json" \
+  -- --install-nginx --install-python-deps --verify
+```
+
+The downloaded bootstrap is invoked through `bash` because GitHub release
+downloads do not preserve its executable bit. Before adding real hardware and
+LAN access, prepare a reviewed TRex YAML and a narrow management CIDR; the
+[installation guide](docs/INSTALLATION.md) provides the complete copy-safe
+command, read-only doctor, secure defaults, structured results, upgrade,
+verification, and rollback workflow.
+
+After installation, one high-level entrypoint covers routine operations:
+
+```bash
+sudo /opt/trex-webui/current/deploy/trex-webui status
+sudo /opt/trex-webui/current/deploy/trex-webui doctor --operation upgrade
+sudo /opt/trex-webui/current/deploy/trex-webui verify --trex
+```
+
+## Development quick start
 
 ### Prerequisites
 
@@ -205,39 +241,25 @@ It is not hardware-certified and must never be deployed unchanged. Follow
 [examples/README.md](examples/README.md) to replace and verify every PCI
 address, MAC/IP value, NUMA socket, port pair, and core assignment.
 
-## Production deployment
+## Deployment and operations
 
-The validated deployment is a same-host managed TRex daemon behind Nginx on the
-trusted management network:
+The validated production topology is a same-host managed TRex daemon behind
+Nginx on a trusted management network. A remote or independently managed daemon
+must be selected explicitly with `--external-daemon`; its lifecycle, firewall,
+logs, and recovery remain operator-owned.
 
-```bash
-sudo deploy/install.sh --install-nginx --install-python-deps --verify
-```
+Nginx denies non-loopback clients until a narrow allowlist is explicitly
+installed. `deploy/trex-webui` accepts `--allow-cidr` and `--trex-config`,
+validates both before mutation, and publishes them through the same rollback
+transaction as the release. `0.0.0.0/0`, non-canonical networks, symbolic-link
+configs, unsafe ownership, and broad implicit access are rejected.
 
-An independently managed or remote daemon must be selected explicitly:
-
-```bash
-sudo deploy/install.sh --external-daemon \
-  --install-nginx --install-python-deps --verify
-```
-
-Append `--verify-trex` only when the control plane is expected to be online.
-The installed Nginx policy returns HTTP 403 to non-loopback clients until the
-operator adds a narrow management-network allowlist. That is the expected
-secure default.
-
-Read [docs/NGINX_DEPLOYMENT.md](docs/NGINX_DEPLOYMENT.md) before installing.
-It covers dry runs, exact allowlists, TLS and external authentication,
-systemd/nftables boundaries, packaging, verification, upgrades, and rollback
-limitations.
-
-The checkout installer above is appropriate for initial provisioning and
-development. Published production upgrades should follow the
-[exact-tag release runbook](docs/RELEASE.md): its verified bootstrap installs a
-content-addressed release, makes API and Nginx consume the stable
-`/opt/trex-webui/current` selector, retains the complete immediate predecessor
-serving bundle at `previous`, and reconciles any uncommitted selector transaction
-before services start.
+- [Installation and day-two operations](docs/INSTALLATION.md) — release-first
+  install, doctor, status, verify, upgrade, rollback, JSON output, and recovery.
+- [Deployment internals](docs/NGINX_DEPLOYMENT.md) — systemd, nftables, SELinux,
+  Nginx, archive, selector, and failure semantics.
+- [Exact-tag release runbook](docs/RELEASE.md) — qualification, attestations,
+  immutable assets, and verified bootstrap.
 
 ## Security boundary
 
