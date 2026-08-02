@@ -1,0 +1,1217 @@
+#!/usr/bin/env python3
+"""Operator-facing deployment entrypoint for TRex WebUI.
+
+The low-level shell installers remain the mutation authority.  This command
+owns operator input, read-only host diagnosis, and concise result rendering.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import json
+import os
+import platform
+import re
+import shutil
+import stat
+import subprocess
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Iterable, List, Mapping, Optional, Sequence
+from urllib.error import URLError
+from urllib.request import Request, urlopen
+
+
+SCHEMA_VERSION = 1
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PATH_SAFETY = PROJECT_ROOT / "deploy" / "path_safety.sh"
+INSTALL_ROOT = Path("/opt/trex-webui")
+CURRENT_SELECTOR = INSTALL_ROOT / "current"
+PREVIOUS_SELECTOR = INSTALL_ROOT / "previous"
+RELEASE_STATE = Path("/var/lib/trex-webui-deploy/transaction.json")
+SERVICE_CONFIG = Path("/var/lib/trex-webui/trex_cfg.yaml")
+LEGACY_CONFIG = Path("/etc/trex_cfg.yaml")
+MANAGEMENT_ALLOWLIST = Path("/etc/nginx/trex-webui/access.d/management.conf")
+DAEMON_SAFE_RESTART_PROBE = Path("/usr/libexec/trex-webui/daemon_rpc_probe.py")
+TERMINAL_RELEASE_PHASES = {"committed", "rolled_back"}
+
+
+@dataclass(frozen=True)
+class Check:
+    check_id: str
+    status: str
+    title: str
+    detail: str
+    remedy: Optional[str] = None
+
+    def payload(self) -> Mapping[str, str]:
+        value = asdict(self)
+        return {key: item for key, item in value.items() if item is not None}
+
+
+def check(
+    checks: List[Check],
+    check_id: str,
+    status: str,
+    title: str,
+    detail: str,
+    remedy: Optional[str] = None,
+) -> None:
+    checks.append(Check(check_id, status, title, detail, remedy))
+
+
+def command_result(command: Sequence[str], timeout: int = 8) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            list(command),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return subprocess.CompletedProcess(list(command), 127, "", str(exc))
+
+
+def os_release(path: Path = Path("/etc/os-release")) -> Mapping[str, str]:
+    values = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value.strip().strip('"')
+    return values
+
+
+def add_platform_checks(checks: List[Check]) -> None:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        check(checks, "host.arch", "pass", "CPU architecture", machine)
+    else:
+        check(
+            checks,
+            "host.arch",
+            "block",
+            "CPU architecture",
+            f"{machine or 'unknown'} is not release-certified",
+            "Use an x86_64 AlmaLinux 9 host.",
+        )
+
+    release = os_release()
+    os_id = release.get("ID", "unknown").lower()
+    version = release.get("VERSION_ID", "unknown")
+    family = set(release.get("ID_LIKE", "").lower().split())
+    label = f"{os_id} {version}"
+    if os_id == "almalinux" and version.startswith("9"):
+        check(checks, "host.os", "pass", "Host operating system", label)
+    elif version.startswith("9") and ({os_id} | family) & {"rhel", "centos", "fedora"}:
+        check(
+            checks,
+            "host.os",
+            "warn",
+            "Host operating system",
+            f"{label} is RHEL-compatible but not release-certified",
+            "Use AlmaLinux 9.8 for the validated production baseline.",
+        )
+    else:
+        check(
+            checks,
+            "host.os",
+            "block",
+            "Host operating system",
+            f"{label} is outside the supported installer baseline",
+            "Use AlmaLinux 9.x or a reviewed RHEL-compatible 9.x host.",
+        )
+
+    if Path("/run/systemd/system").is_dir() and shutil.which("systemctl"):
+        check(checks, "host.systemd", "pass", "Service manager", "systemd is available")
+    else:
+        check(
+            checks,
+            "host.systemd",
+            "block",
+            "Service manager",
+            "a running systemd instance was not detected",
+            "Managed deployment requires a systemd host.",
+        )
+
+    try:
+        available = shutil.disk_usage("/opt" if Path("/opt").is_dir() else "/").free
+    except OSError as exc:
+        check(checks, "host.disk", "block", "Release storage", str(exc))
+    else:
+        gib = available / (1024**3)
+        if available < 512 * 1024**2:
+            check(
+                checks,
+                "host.disk",
+                "block",
+                "Release storage",
+                f"only {gib:.1f} GiB is free",
+                "Free at least 512 MiB under the /opt filesystem.",
+            )
+        elif available < 2 * 1024**3:
+            check(
+                checks,
+                "host.disk",
+                "warn",
+                "Release storage",
+                f"{gib:.1f} GiB is free; upgrade retention may be tight",
+                "Keep at least 2 GiB free for current, previous, and staged runtimes.",
+            )
+        else:
+            check(checks, "host.disk", "pass", "Release storage", f"{gib:.1f} GiB free")
+
+
+def add_command_checks(checks: List[Check], mode: str) -> None:
+    commands = {
+        "python3.11": "Install CPython 3.11 before deployment.",
+        "curl": "Install curl before deployment.",
+        "sha256sum": "Install coreutils before deployment.",
+        "tar": "Install tar before deployment.",
+        "gzip": "Install gzip before deployment.",
+        "systemctl": "Install and boot with systemd.",
+        "ss": "Install iproute before deployment.",
+        "getent": "Install glibc-common before deployment.",
+        "runuser": "Install util-linux before deployment.",
+    }
+    if mode == "managed-local":
+        commands["nft"] = "Install nftables before managed-local deployment."
+    for name, remedy in commands.items():
+        path = shutil.which(name)
+        if path:
+            check(checks, f"command.{name}", "pass", name, path)
+        else:
+            check(checks, f"command.{name}", "block", name, "command not found", remedy)
+
+    nginx = shutil.which("nginx")
+    if nginx:
+        check(checks, "command.nginx", "pass", "Nginx", nginx)
+    elif shutil.which("dnf"):
+        check(
+            checks,
+            "command.nginx",
+            "warn",
+            "Nginx",
+            "not installed; the installer can install it with dnf",
+            "Use the high-level install command or pass --install-nginx to the low-level installer.",
+        )
+    else:
+        check(
+            checks,
+            "command.nginx",
+            "block",
+            "Nginx",
+            "neither nginx nor the supported dnf installer was found",
+            "Install Nginx on a supported RHEL-compatible host.",
+        )
+
+
+def selinux_mode() -> str:
+    getenforce = shutil.which("getenforce")
+    if getenforce:
+        result = command_result([getenforce])
+        if result.returncode == 0:
+            return result.stdout.strip().lower()
+    enforce = Path("/sys/fs/selinux/enforce")
+    try:
+        return "enforcing" if enforce.read_text(encoding="ascii").strip() == "1" else "permissive"
+    except OSError:
+        return "disabled"
+
+
+def add_selinux_checks(checks: List[Check]) -> None:
+    mode = selinux_mode()
+    check(checks, "host.selinux", "pass", "SELinux mode", mode)
+    if mode != "enforcing":
+        return
+    for name in ("semanage", "matchpathcon", "restorecon", "setsebool"):
+        path = shutil.which(name)
+        if path:
+            check(checks, f"selinux.{name}", "pass", f"SELinux tool {name}", path)
+        else:
+            check(
+                checks,
+                f"selinux.{name}",
+                "block",
+                f"SELinux tool {name}",
+                "required by versioned release activation",
+                "Install policycoreutils and policycoreutils-python-utils.",
+            )
+
+
+def plain_file_error(path: Path, require_root_authority: bool = False) -> Optional[str]:
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        return str(exc)
+    if not stat.S_ISREG(metadata.st_mode) or path.is_symlink():
+        return "not a regular non-symlink file"
+    if not os.access(path, os.R_OK):
+        return "not readable by the current operator"
+    if not 0 < metadata.st_size <= 1024 * 1024:
+        return "size must be between 1 byte and 1 MiB"
+    if not require_root_authority:
+        return None
+    authority = Path(os.path.realpath(str(path)))
+    while authority != Path("/"):
+        try:
+            item = authority.stat()
+        except OSError as exc:
+            return str(exc)
+        if item.st_uid != 0:
+            return f"path authority is not root-owned: {authority}"
+        if item.st_mode & 0o022:
+            return f"path authority is group/world writable: {authority}"
+        authority = authority.parent
+    return None
+
+
+def add_trex_checks(checks: List[Check], mode: str, trex_root: Path) -> None:
+    if mode == "external-daemon":
+        check(
+            checks,
+            "trex.authority",
+            "warn",
+            "TRex lifecycle authority",
+            "external daemon selected; its persistence, firewall, and logs are operator-owned",
+            "Confirm the external daemon endpoint before installation.",
+        )
+        return
+
+    resolved_root = Path(os.path.realpath(str(trex_root)))
+    scripts = resolved_root / "scripts"
+    daemon = scripts / "trex_daemon_server"
+    if not resolved_root.is_dir():
+        check(
+            checks,
+            "trex.root",
+            "block",
+            "TRex installation",
+            f"directory not found: {resolved_root}",
+            "Install TRex v3.08 and pass its installation root with --trex-root.",
+        )
+        return
+    check(checks, "trex.root", "pass", "TRex installation", str(resolved_root))
+    if not scripts.is_dir():
+        check(
+            checks,
+            "trex.scripts",
+            "block",
+            "TRex scripts directory",
+            f"directory not found: {scripts}",
+            "Select the TRex distribution root containing scripts/.",
+        )
+        return
+    if not daemon.is_file() or daemon.is_symlink() or not os.access(daemon, os.X_OK):
+        check(
+            checks,
+            "trex.daemon",
+            "block",
+            "TRex daemon executable",
+            f"missing, linked, or non-executable: {daemon}",
+            "Restore the vendor scripts/trex_daemon_server executable.",
+        )
+        return
+    check(checks, "trex.daemon", "pass", "TRex daemon executable", str(daemon))
+
+    if not PATH_SAFETY.is_file() or not shutil.which("bash"):
+        check(
+            checks,
+            "trex.path_authority",
+            "block",
+            "TRex path authority",
+            "deployment path validator is unavailable",
+        )
+        return
+    result = command_result(
+        [
+            "bash",
+            "-c",
+            'source "$1"; trex_assert_software_path "$2" "TRex scripts directory"',
+            "trex-webui-doctor",
+            str(PATH_SAFETY),
+            str(scripts),
+        ],
+        timeout=30,
+    )
+    if result.returncode == 0:
+        check(
+            checks,
+            "trex.path_authority",
+            "pass",
+            "TRex path authority",
+            "root ownership and non-writable software-tree policy passed",
+        )
+    else:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        check(
+            checks,
+            "trex.path_authority",
+            "block",
+            "TRex path authority",
+            detail[-1] if detail else "software-tree validation failed",
+            "Make the TRex tree and its ancestors root-owned and not group/world writable.",
+        )
+
+
+def selected_config(explicit: Optional[Path]) -> Optional[Path]:
+    if explicit is not None:
+        return explicit
+    if SERVICE_CONFIG.exists() or SERVICE_CONFIG.is_symlink():
+        return SERVICE_CONFIG
+    if LEGACY_CONFIG.exists() or LEGACY_CONFIG.is_symlink():
+        return LEGACY_CONFIG
+    return None
+
+
+def add_config_check(checks: List[Check], explicit: Optional[Path]) -> None:
+    config = selected_config(explicit)
+    if config is None:
+        check(
+            checks,
+            "trex.config",
+            "warn",
+            "TRex configuration",
+            "no service, legacy, or explicit configuration was found",
+            "Pass a reviewed configuration with --trex-config before starting TRex.",
+        )
+        return
+    same_as_service = Path(os.path.realpath(str(config))) == SERVICE_CONFIG
+    error = plain_file_error(
+        config,
+        require_root_authority=explicit is not None and not same_as_service,
+    )
+    if error is None:
+        source = "explicit import" if explicit is not None else "existing authority"
+        check(checks, "trex.config", "pass", "TRex configuration", f"{source}: {config}")
+    else:
+        check(
+            checks,
+            "trex.config",
+            "block",
+            "TRex configuration",
+            f"{config}: {error}",
+            "Stage the reviewed file below a root-owned non-writable directory, for example with sudo install.",
+        )
+
+
+def add_network_check(checks: List[Check], cidr_text: Optional[str]) -> None:
+    if cidr_text is None:
+        if MANAGEMENT_ALLOWLIST.exists() or MANAGEMENT_ALLOWLIST.is_symlink():
+            error = plain_file_error(MANAGEMENT_ALLOWLIST)
+            if error is not None:
+                check(
+                    checks,
+                    "network.management_cidr",
+                    "block",
+                    "Management network",
+                    f"existing allowlist is unsafe: {MANAGEMENT_ALLOWLIST}: {error}",
+                    "Restore a root-controlled regular management.conf or pass --allow-cidr to replace it transactionally.",
+                )
+                return
+            check(
+                checks,
+                "network.management_cidr",
+                "pass",
+                "Management network",
+                f"existing Nginx allowlist will be retained: {MANAGEMENT_ALLOWLIST}",
+            )
+            return
+        check(
+            checks,
+            "network.management_cidr",
+            "pass",
+            "Management network",
+            "loopback-only access will remain in effect",
+        )
+        return
+    try:
+        network = ipaddress.ip_network(cidr_text, strict=True)
+    except ValueError as exc:
+        check(
+            checks,
+            "network.management_cidr",
+            "block",
+            "Management network",
+            str(exc),
+            "Use a canonical network such as 192.0.2.0/24.",
+        )
+        return
+    if network.is_unspecified or network.is_multicast or network.prefixlen == 0:
+        check(
+            checks,
+            "network.management_cidr",
+            "block",
+            "Management network",
+            f"{network} is not a narrow management allowlist",
+            "Select the exact trusted management subnet.",
+        )
+        return
+    broad = (network.version == 4 and network.prefixlen < 16) or (
+        network.version == 6 and network.prefixlen < 48
+    )
+    if broad:
+        check(
+            checks,
+            "network.management_cidr",
+            "warn",
+            "Management network",
+            f"{network} is unusually broad",
+            "Prefer the narrowest routed management subnet, normally /24 or smaller.",
+        )
+    else:
+        check(checks, "network.management_cidr", "pass", "Management network", str(network))
+
+
+def add_release_state_checks(checks: List[Check], operation: str) -> None:
+    if CURRENT_SELECTOR.is_symlink():
+        resolved = Path(os.path.realpath(str(CURRENT_SELECTOR)))
+        expected_parent = INSTALL_ROOT / "releases"
+        if (
+            resolved.parent == expected_parent
+            and re.fullmatch(r"sha256-[0-9a-f]{64}", resolved.name)
+            and resolved.is_dir()
+        ):
+            check(checks, "release.current", "pass", "Current release", str(resolved))
+        else:
+            check(
+                checks,
+                "release.current",
+                "block",
+                "Current release",
+                f"selector resolves outside the release store: {resolved}",
+            )
+    elif CURRENT_SELECTOR.exists():
+        check(
+            checks,
+            "release.current",
+            "block",
+            "Current release",
+            f"expected a symbolic-link selector: {CURRENT_SELECTOR}",
+        )
+    else:
+        status = "block" if operation == "rollback" else "pass"
+        remedy = "Install a versioned release before requesting rollback." if operation == "rollback" else None
+        check(checks, "release.current", status, "Current release", "no versioned release selected", remedy)
+
+    if operation == "rollback":
+        previous = selector_target(PREVIOUS_SELECTOR)
+        if previous is not None and previous.is_dir():
+            check(
+                checks,
+                "release.previous",
+                "pass",
+                "Previous release",
+                str(previous),
+            )
+        else:
+            check(
+                checks,
+                "release.previous",
+                "block",
+                "Previous release",
+                "no retained N-1 selector is available",
+                "Complete a versioned upgrade before requesting rollback.",
+            )
+
+    if not RELEASE_STATE.exists():
+        check(checks, "release.transaction", "pass", "Release transaction", "no journal exists")
+        return
+    if RELEASE_STATE.is_symlink() or not RELEASE_STATE.is_file():
+        check(
+            checks,
+            "release.transaction",
+            "block",
+            "Release transaction",
+            f"unsafe journal path: {RELEASE_STATE}",
+        )
+        return
+    try:
+        payload = json.loads(RELEASE_STATE.read_text(encoding="utf-8"))
+        transaction = payload.get("transaction") or payload
+        phase = transaction.get("phase")
+    except (OSError, ValueError, AttributeError) as exc:
+        check(checks, "release.transaction", "block", "Release transaction", str(exc))
+        return
+    if phase in TERMINAL_RELEASE_PHASES:
+        check(checks, "release.transaction", "pass", "Release transaction", f"terminal phase: {phase}")
+    else:
+        check(
+            checks,
+            "release.transaction",
+            "block",
+            "Release transaction",
+            f"recovery is required for phase: {phase or 'unknown'}",
+            "Run trex-webui status and the installed recovery-v2 reconciler before deployment.",
+        )
+
+
+def managed_daemon_safe_restart() -> bool:
+    if DAEMON_SAFE_RESTART_PROBE.is_symlink() or not DAEMON_SAFE_RESTART_PROBE.is_file():
+        return False
+    result = command_result(
+        [
+            sys.executable,
+            str(DAEMON_SAFE_RESTART_PROBE),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8090",
+            "--timeout",
+            "5",
+            "safe-restart",
+        ],
+        timeout=8,
+    )
+    return result.returncode == 0
+
+
+def add_runtime_quiescence_checks(
+    checks: List[Check], operation: str, mode: str
+) -> None:
+    if selector_target(CURRENT_SELECTOR) is None:
+        check(
+            checks,
+            "runtime.quiescence",
+            "pass",
+            "Runtime quiescence",
+            "no installed versioned release is active",
+        )
+        return
+    if operation == "install":
+        return
+    base_url = "http://127.0.0.1"
+    health = http_json(base_url + "/api/health")
+    if not health or health.get("status") != "ok":
+        check(
+            checks,
+            "runtime.api",
+            "block",
+            "Installed API readiness",
+            "the current API did not return a healthy response",
+            "Repair or reconcile the current deployment before changing releases.",
+        )
+        return
+    check(checks, "runtime.api", "pass", "Installed API readiness", "healthy")
+
+    runtime = http_json(base_url + "/api/trex/traffic/runtime")
+    runtime_data = runtime.get("data", {}) if runtime else {}
+    session = runtime_data.get("session") if isinstance(runtime_data, dict) else None
+    session_state = session.get("state") if isinstance(session, dict) else None
+    mutation = runtime_data.get("mutation_intent") if isinstance(runtime_data, dict) else None
+    if mutation or session_state not in {None, "stopped"}:
+        check(
+            checks,
+            "runtime.traffic",
+            "block",
+            "Traffic authority",
+            f"session={session_state or 'unknown'}, mutation_pending={bool(mutation)}",
+            "Stop traffic and finish or reconcile every pending mutation.",
+        )
+    else:
+        check(
+            checks,
+            "runtime.traffic",
+            "pass",
+            "Traffic authority",
+            f"session={session_state or 'none'}, no mutation pending",
+        )
+
+    offline_safe = mode == "managed-local" and managed_daemon_safe_restart()
+    capture = None if offline_safe else http_json(base_url + "/api/trex/capture/status")
+    capture_data = capture.get("data", {}) if capture else {}
+    captures = capture_data.get("captures") if isinstance(capture_data, dict) else None
+    service_mode = capture_data.get("service_mode") if isinstance(capture_data, dict) else None
+    managed = service_mode.get("managed_capture_ids") if isinstance(service_mode, dict) else None
+    if offline_safe:
+        check(
+            checks,
+            "runtime.capture",
+            "pass",
+            "Capture authority",
+            "TRex is offline and the installed daemon probe proves Idle(1) and unreserved; no active recorder can exist",
+        )
+    elif not capture or capture.get("ok") is not True:
+        check(
+            checks,
+            "runtime.capture",
+            "block",
+            "Capture authority",
+            "capture state could not be proven",
+            "Restore the TRex control plane and verify capture cleanup.",
+        )
+    elif captures or managed:
+        check(
+            checks,
+            "runtime.capture",
+            "block",
+            "Capture authority",
+            f"recorders={len(captures or [])}, managed_ids={len(managed or [])}",
+            "Stop captures and restore service mode before deployment.",
+        )
+    else:
+        check(checks, "runtime.capture", "pass", "Capture authority", "no active recorders")
+
+    validation = http_json(base_url + "/api/trex/quick-validation")
+    validation_data = validation.get("data", {}) if validation else {}
+    active = validation_data.get("active") if isinstance(validation_data, dict) else None
+    recovering = (
+        validation_data.get("recovery_required") if isinstance(validation_data, dict) else None
+    )
+    if not validation or validation.get("ok") is not True:
+        check(
+            checks,
+            "runtime.quick_validation",
+            "block",
+            "Quick Validation authority",
+            "state could not be proven",
+        )
+    elif active or recovering:
+        check(
+            checks,
+            "runtime.quick_validation",
+            "block",
+            "Quick Validation authority",
+            f"active={bool(active)}, recovery_required={bool(recovering)}",
+            "Wait for completion or finish recovery before deployment.",
+        )
+    else:
+        check(
+            checks,
+            "runtime.quick_validation",
+            "pass",
+            "Quick Validation authority",
+            "inactive and recovery-free",
+        )
+
+
+def collect_doctor(args: argparse.Namespace) -> List[Check]:
+    checks: List[Check] = []
+    add_platform_checks(checks)
+    add_command_checks(checks, args.mode)
+    add_selinux_checks(checks)
+    add_trex_checks(checks, args.mode, args.trex_root)
+    add_config_check(checks, args.trex_config)
+    add_network_check(checks, args.allow_cidr)
+    add_release_state_checks(checks, args.operation)
+    runtime_operation = args.operation
+    if runtime_operation == "install" and selector_target(CURRENT_SELECTOR) is not None:
+        runtime_operation = "upgrade"
+    add_runtime_quiescence_checks(checks, runtime_operation, args.mode)
+    return checks
+
+
+def summary(checks: Iterable[Check]) -> Mapping[str, int]:
+    result = {"pass": 0, "warn": 0, "block": 0}
+    for item in checks:
+        result[item.status] += 1
+    return result
+
+
+def render_doctor(args: argparse.Namespace, checks: List[Check]) -> None:
+    payload = doctor_payload(args, checks)
+    counts = payload["summary"]
+    status = payload["status"]
+    assert isinstance(counts, dict)
+    if args.output_format == "json":
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    print(f"TRex WebUI doctor: {str(status).upper()} ({args.mode}, {args.operation})")
+    for item in checks:
+        print(f"[{item.status.upper():5}] {item.title}: {item.detail}")
+        if item.remedy:
+            print(f"        Fix: {item.remedy}")
+    print(
+        "Summary: "
+        f"{counts['pass']} passed, {counts['warn']} warnings, {counts['block']} blockers"
+    )
+
+
+def doctor_payload(args: argparse.Namespace, checks: List[Check]) -> Mapping[str, object]:
+    counts = summary(checks)
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "command": "doctor",
+        "operation": args.operation,
+        "mode": args.mode,
+        "status": "blocked" if counts["block"] else "ready",
+        "summary": counts,
+        "checks": [item.payload() for item in checks],
+    }
+
+
+def selector_target(selector: Path) -> Optional[Path]:
+    if not selector.is_symlink():
+        return None
+    resolved = Path(os.path.realpath(str(selector)))
+    if resolved.parent != INSTALL_ROOT / "releases":
+        return None
+    if not re.fullmatch(r"sha256-[0-9a-f]{64}", resolved.name):
+        return None
+    return resolved
+
+
+def service_state(name: str) -> str:
+    if not shutil.which("systemctl"):
+        return "unavailable"
+    result = command_result(["systemctl", "is-active", name])
+    value = result.stdout.strip()
+    return value or ("inactive" if result.returncode else "active")
+
+
+def http_json(url: str) -> Optional[Mapping[str, object]]:
+    try:
+        request = Request(url, headers={"Accept": "application/json"})
+        with urlopen(request, timeout=4) as response:
+            value = json.load(response)
+    except (OSError, URLError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def release_manifest(release: Optional[Path]) -> Mapping[str, object]:
+    if release is None:
+        return {}
+    path = release / "RELEASE_MANIFEST.json"
+    if path.is_symlink() or not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def transaction_phase() -> str:
+    if not RELEASE_STATE.is_file() or RELEASE_STATE.is_symlink():
+        return "absent"
+    try:
+        value = json.loads(RELEASE_STATE.read_text(encoding="utf-8"))
+        transaction = value.get("transaction") or value
+        phase = transaction.get("phase")
+    except (OSError, ValueError, AttributeError):
+        return "unreadable"
+    return str(phase or "unknown")
+
+
+def build_status_payload(base_url: str) -> Mapping[str, object]:
+    current = selector_target(CURRENT_SELECTOR)
+    previous = selector_target(PREVIOUS_SELECTOR)
+    manifest = release_manifest(current)
+    payload_identity = manifest.get("payload_identity", {})
+    if not isinstance(payload_identity, dict):
+        payload_identity = {}
+    health = http_json(base_url.rstrip("/") + "/api/health")
+    runtime = http_json(base_url.rstrip("/") + "/api/trex/traffic/runtime")
+    capture = http_json(base_url.rstrip("/") + "/api/trex/capture/status")
+    runtime_data = runtime.get("data", {}) if runtime else {}
+    capture_data = capture.get("data", {}) if capture else {}
+    session = runtime_data.get("session", {}) if isinstance(runtime_data, dict) else {}
+    recorders = capture_data.get("captures", []) if isinstance(capture_data, dict) else []
+    if not isinstance(recorders, list):
+        recorders = []
+    services = {
+        name: service_state(name)
+        for name in ("trex-webui-api.service", "trex-daemon-server.service", "nginx.service")
+    }
+    phase = transaction_phase()
+    healthy = bool(health and health.get("status") == "ok")
+    stable_transaction = phase in TERMINAL_RELEASE_PHASES or phase == "absent"
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "command": "status",
+        "status": "ready" if healthy and stable_transaction else "degraded",
+        "release": {
+            "current": str(current) if current else None,
+            "previous": str(previous) if previous else None,
+            "version": manifest.get("version"),
+            "commit": manifest.get("git_commit"),
+            "payload_sha256": payload_identity.get("digest"),
+            "transaction_phase": phase,
+        },
+        "services": services,
+        "api": {"healthy": healthy, "base_url": base_url},
+        "runtime": {
+            "session_state": session.get("state") if isinstance(session, dict) else None,
+            "mutation_pending": bool(runtime_data.get("mutation_intent"))
+            if isinstance(runtime_data, dict)
+            else None,
+            "groups": len(runtime_data.get("groups", []))
+            if isinstance(runtime_data, dict) and isinstance(runtime_data.get("groups"), list)
+            else None,
+            "capture_recorders": len(recorders),
+        },
+    }
+
+
+def render_status(payload: Mapping[str, object], output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    release = payload["release"]
+    services = payload["services"]
+    runtime = payload["runtime"]
+    assert isinstance(release, dict)
+    assert isinstance(services, dict)
+    assert isinstance(runtime, dict)
+    print(f"TRex WebUI status: {str(payload['status']).upper()}")
+    print(f"Current:  {release.get('current') or '-'}")
+    print(f"Previous: {release.get('previous') or '-'}")
+    print(
+        "Release:  "
+        f"{release.get('version') or 'unknown'} / {release.get('commit') or 'unknown'} "
+        f"({release.get('transaction_phase')})"
+    )
+    print("Services: " + ", ".join(f"{name}={state}" for name, state in services.items()))
+    print(
+        "Runtime:  "
+        f"session={runtime.get('session_state') or 'unknown'}, "
+        f"groups={runtime.get('groups')}, recorders={runtime.get('capture_recorders')}, "
+        f"mutation_pending={runtime.get('mutation_pending')}"
+    )
+
+
+def doctor_for_mutation(args: argparse.Namespace, operation: str) -> List[Check]:
+    doctor_args = argparse.Namespace(
+        operation=operation,
+        mode=args.mode,
+        trex_root=args.trex_root,
+        trex_config=args.trex_config,
+        allow_cidr=args.allow_cidr,
+        output_format="text",
+    )
+    return collect_doctor(doctor_args)
+
+
+def absolute_existing_file(path: Path, label: str) -> Path:
+    resolved = Path(os.path.realpath(str(path)))
+    if path.is_symlink() or not resolved.is_file():
+        raise ValueError(f"{label} must be a regular non-symlink file: {path}")
+    return resolved
+
+
+def mutation_environment(args: argparse.Namespace) -> Mapping[str, str]:
+    environment = os.environ.copy()
+    scripts = Path(os.path.realpath(str(args.trex_root))) / "scripts"
+    environment["TREX_DAEMON_SCRIPTS_DIR"] = str(scripts)
+    environment["TREX_DAEMON_BIN"] = str(scripts / "trex_daemon_server")
+    return environment
+
+
+def common_low_level_arguments(args: argparse.Namespace) -> List[str]:
+    result = []
+    if args.dry_run:
+        result.append("--dry-run")
+    if args.mode == "external-daemon":
+        result.append("--external-daemon")
+    if args.allow_daemon_runtime_restart:
+        result.append("--allow-daemon-runtime-restart")
+    if args.trex_config is not None:
+        result.extend(("--trex-config", str(Path(os.path.realpath(str(args.trex_config))))))
+    if args.allow_cidr is not None:
+        result.extend(("--allow-cidr", args.allow_cidr))
+    if args.open_firewall:
+        result.append("--firewalld")
+    if shutil.which("nginx") is None:
+        result.append("--install-nginx")
+    result.extend(("--install-python-deps", "--verify", "--verify-base-url", args.base_url))
+    if args.verify_trex:
+        result.append("--verify-trex")
+    return result
+
+
+def mutation_command(args: argparse.Namespace) -> List[str]:
+    if args.archive is not None:
+        archive = absolute_existing_file(args.archive, "release archive")
+        command = [str(PROJECT_ROOT / "deploy" / "upgrade.sh"), "--archive", str(archive)]
+        if args.sha256 is not None:
+            if re.fullmatch(r"[0-9a-fA-F]{64}", args.sha256) is None:
+                raise ValueError("--sha256 must contain exactly 64 hexadecimal characters")
+            command.extend(("--sha256", args.sha256.lower()))
+        command.extend(common_low_level_arguments(args))
+        return command
+    if args.sha256 is not None:
+        raise ValueError("--sha256 requires --archive")
+    entry = "install.sh" if args.command == "install" else "upgrade.sh"
+    command = [str(PROJECT_ROOT / "deploy" / entry)]
+    command.extend(common_low_level_arguments(args))
+    return command
+
+
+def run_operator_command(
+    args: argparse.Namespace,
+    command: Sequence[str],
+    environment: Optional[Mapping[str, str]] = None,
+    preflight: Optional[Mapping[str, int]] = None,
+) -> int:
+    if not args.dry_run and os.geteuid() != 0:
+        print("error: deployment mutation requires root; rerun with sudo or use --dry-run", file=sys.stderr)
+        return 2
+    plan = {
+        "schema_version": SCHEMA_VERSION,
+        "command": args.command,
+        "mode": getattr(args, "mode", None),
+        "dry_run": args.dry_run,
+        "argv": list(command),
+    }
+    if preflight is not None:
+        plan["preflight"] = dict(preflight)
+    if args.output_format == "text":
+        if preflight is not None:
+            print(
+                "Preflight: "
+                f"{preflight['pass']} passed, {preflight['warn']} warnings, "
+                f"{preflight['block']} blockers",
+                flush=True,
+            )
+        print(
+            f"TRex WebUI {args.command}: "
+            f"{'DRY RUN' if args.dry_run else 'executing validated plan'}",
+            flush=True,
+        )
+        print("Engine: " + " ".join(command), flush=True)
+        result = subprocess.run(list(command), check=False, env=environment)
+        if result.returncode == 0:
+            print(f"TRex WebUI {args.command}: COMPLETE")
+        else:
+            print(
+                f"TRex WebUI {args.command}: FAILED (exit {result.returncode})",
+                file=sys.stderr,
+            )
+        return result.returncode
+
+    result = subprocess.run(
+        list(command), check=False, capture_output=True, text=True, env=environment
+    )
+    plan.update(
+        {
+            "status": "complete" if result.returncode == 0 else "failed",
+            "exit_code": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    )
+    if result.returncode != 0:
+        detail = [line for line in result.stderr.splitlines() if line.strip()]
+        plan["error"] = {
+            "kind": "engine_failed",
+            "message": detail[-1] if detail else f"deployment engine exited with {result.returncode}",
+        }
+    print(json.dumps(plan, indent=2, sort_keys=True))
+    return result.returncode
+
+
+def run_mutation(args: argparse.Namespace) -> int:
+    checks = doctor_for_mutation(args, args.command)
+    counts = summary(checks)
+    if counts["block"]:
+        doctor_args = argparse.Namespace(
+            operation=args.command,
+            mode=args.mode,
+            output_format=args.output_format,
+        )
+        if args.output_format == "json":
+            print(
+                json.dumps(
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "command": args.command,
+                        "status": "blocked",
+                        "exit_code": 2,
+                        "preflight": doctor_payload(doctor_args, checks),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 2
+        render_doctor(
+            doctor_args,
+            checks,
+        )
+        return 2
+    try:
+        command = mutation_command(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return run_operator_command(
+        args, command, mutation_environment(args), preflight=counts
+    )
+
+
+def verify_command(args: argparse.Namespace) -> List[str]:
+    current = selector_target(CURRENT_SELECTOR)
+    if current is None:
+        command = [str(PROJECT_ROOT / "deploy" / "verify.sh")]
+    else:
+        command = [
+            str(current / "deploy" / "verify.sh"),
+            "--project-root",
+            str(current),
+            "--service-project-root",
+            str(CURRENT_SELECTOR),
+            "--web-root",
+            str(current / "apps" / "web" / "dist"),
+        ]
+    command.extend(("--base-url", args.base_url))
+    if args.external_daemon:
+        command.append("--skip-daemon")
+    if args.trex:
+        command.append("--trex")
+    return command
+
+
+def run_verify(args: argparse.Namespace) -> int:
+    args.dry_run = False
+    return run_operator_command(args, verify_command(args))
+
+
+def run_rollback(args: argparse.Namespace) -> int:
+    current = selector_target(CURRENT_SELECTOR)
+    if current is None:
+        print("error: no valid current release selector is available", file=sys.stderr)
+        return 2
+    doctor_args = argparse.Namespace(
+        mode="managed-local",
+        trex_root=args.trex_root,
+        trex_config=None,
+        allow_cidr=None,
+    )
+    checks = doctor_for_mutation(doctor_args, "rollback")
+    if summary(checks)["block"]:
+        render_doctor(
+            argparse.Namespace(
+                operation="rollback",
+                mode="managed-local",
+                output_format=args.output_format,
+            ),
+            checks,
+        )
+        return 2
+    command = [
+        str(current / "deploy" / "upgrade.sh"),
+        "--rollback-previous",
+        "--verify-base-url",
+        args.base_url,
+    ]
+    if args.dry_run:
+        command.append("--dry-run")
+    if args.trex:
+        command.append("--verify-trex")
+    return run_operator_command(args, command, mutation_environment(doctor_args))
+
+
+def add_output_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--base-url", default="http://127.0.0.1")
+    parser.add_argument(
+        "--format", dest="output_format", choices=("text", "json"), default="text"
+    )
+
+
+def add_mutation_arguments(parser: argparse.ArgumentParser) -> None:
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--archive", type=Path, help="verified release archive")
+    source.add_argument(
+        "--checkout",
+        action="store_true",
+        help="development-only install from the current checkout",
+    )
+    parser.add_argument("--sha256", help="trusted 64-character archive digest")
+    parser.add_argument(
+        "--mode", choices=("managed-local", "external-daemon"), default="managed-local"
+    )
+    parser.add_argument("--trex-root", type=Path, default=Path("/opt/trex-core"))
+    parser.add_argument("--trex-config", type=Path)
+    parser.add_argument("--allow-cidr")
+    parser.add_argument(
+        "--open-firewall",
+        action="store_true",
+        help="open HTTP in firewalld; Nginx CIDR policy remains authoritative",
+    )
+    parser.add_argument("--allow-daemon-runtime-restart", action="store_true")
+    parser.add_argument("--verify-trex", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    add_output_arguments(parser)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="trex-webui",
+        description="Plan, diagnose, install, and maintain TRex WebUI.",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    doctor = subparsers.add_parser(
+        "doctor", help="inspect the target host without changing it"
+    )
+    doctor.add_argument(
+        "--operation", choices=("install", "upgrade", "rollback"), default="install"
+    )
+    doctor.add_argument(
+        "--mode", choices=("managed-local", "external-daemon"), default="managed-local"
+    )
+    doctor.add_argument("--trex-root", type=Path, default=Path("/opt/trex-core"))
+    doctor.add_argument("--trex-config", type=Path)
+    doctor.add_argument("--allow-cidr")
+    doctor.add_argument(
+        "--format", dest="output_format", choices=("text", "json"), default="text"
+    )
+    install = subparsers.add_parser(
+        "install", help="install a release after a complete read-only preflight"
+    )
+    add_mutation_arguments(install)
+    upgrade = subparsers.add_parser(
+        "upgrade", help="upgrade through the existing transaction-safe engine"
+    )
+    add_mutation_arguments(upgrade)
+    status_parser = subparsers.add_parser(
+        "status", help="summarize release, service, API, traffic, and capture state"
+    )
+    add_output_arguments(status_parser)
+    verify = subparsers.add_parser(
+        "verify", help="verify the selected release without internal path arguments"
+    )
+    verify.add_argument("--trex", action="store_true")
+    verify.add_argument("--external-daemon", action="store_true")
+    add_output_arguments(verify)
+    rollback = subparsers.add_parser(
+        "rollback", help="reactivate the retained N-1 release through the guarded engine"
+    )
+    rollback.add_argument("--trex-root", type=Path, default=Path("/opt/trex-core"))
+    rollback.add_argument("--trex", action="store_true")
+    rollback.add_argument("--dry-run", action="store_true")
+    add_output_arguments(rollback)
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "doctor":
+        checks = collect_doctor(args)
+        render_doctor(args, checks)
+        return 2 if summary(checks)["block"] else 0
+    if args.command in {"install", "upgrade"}:
+        if args.sha256 is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", args.sha256):
+            print("error: --sha256 must be exactly 64 hexadecimal characters", file=sys.stderr)
+            return 2
+        return run_mutation(args)
+    if args.command == "status":
+        payload = build_status_payload(args.base_url)
+        render_status(payload, args.output_format)
+        return 0 if payload["status"] == "ready" else 1
+    if args.command == "verify":
+        return run_verify(args)
+    if args.command == "rollback":
+        return run_rollback(args)
+    raise AssertionError(f"unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    sys.exit(main())

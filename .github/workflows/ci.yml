@@ -35,6 +35,7 @@ jobs:
 
       - name: Deployment transaction safety tests
         run: |
+          .venv/bin/python -m pytest -q deploy/tests/installer_cli_test.py
           sudo env "PATH=$PATH" .venv/bin/python -m pytest -q deploy/tests/release_transaction_test.py
           sudo env "PATH=$PATH" deploy/tests/daemon_service_test.sh
           sudo env "PATH=$PATH" deploy/tests/managed_environment_test.sh

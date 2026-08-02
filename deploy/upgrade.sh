@@ -14,6 +14,7 @@ ARCHIVE_EXPECTED_SHA256=""
 ARCHIVE_STAGED_PATH=""
 ARCHIVE_TOP=""
 ARCHIVE_SOURCE_ROOT=""
+ARCHIVE_PAYLOAD_DIGEST=""
 INSTALL_ROOT=""
 WEB_ROOT="/var/www/trex-webui/dist"
 STATIC_BACKUP_ROOT="/var/www/trex-webui/backups"
@@ -32,6 +33,8 @@ RUN_SELINUX=0
 RUN_FIREWALLD=0
 MANAGE_LOCAL_DAEMON=1
 ALLOW_DAEMON_RUNTIME_RESTART=0
+TREX_CONFIG_IMPORT=""
+MANAGEMENT_CIDR=""
 ARCHIVE_DAEMON_OVERRIDE_CONSUMED=0
 ARCHIVE_DAEMON_MUTATION_EXPECTED=0
 ARCHIVE_DAEMON_WAS_ACTIVE_FOR_PREFLIGHT=0
@@ -67,6 +70,8 @@ TREX_DAEMON_SCRIPTS_DIR="${TREX_DAEMON_SCRIPTS_DIR:-/opt/trex-core/scripts}"
 TREX_DAEMON_BIN="${TREX_DAEMON_BIN:-$TREX_DAEMON_SCRIPTS_DIR/trex_daemon_server}"
 SERVICE_ENV_FILE="$TREX_MANAGED_API_ENV_FILE_DEFAULT"
 SERVICE_RUNTIME_STATE_PATH="/var/lib/trex-webui/runtime-state.json"
+SERVICE_CONFIG_PATH="/var/lib/trex-webui/trex_cfg.yaml"
+NGINX_MANAGEMENT_ALLOWLIST_TARGET="/etc/nginx/trex-webui/access.d/management.conf"
 RELEASE_STATE_ROOT="${RELEASE_STATE_ROOT:-}"
 RELEASE_RECOVERY_PYTHON="/usr/bin/python3.11"
 RECOVERY_V2_ROOT="${RECOVERY_V2_ROOT:-$DAEMON_LIBEXEC_ROOT/recovery-v2}"
@@ -221,6 +226,8 @@ Options:
   --external-daemon          Do not install, enable, restart, or verify a local daemon
   --allow-daemon-runtime-restart
                               Permit maintenance that interrupts running/reserved/unknown daemon state
+  --trex-config PATH           Atomically import a reviewed root-owned TRex configuration
+  --allow-cidr CIDR            Atomically allow one explicit management subnet through Nginx
   --selinux                  Pass through to deploy/install.sh
   --firewalld                Pass through to deploy/install.sh
   --sync-method METHOD       Archive sync method: auto, rsync, or portable. Default: auto
@@ -1488,6 +1495,18 @@ parse_args() {
         ALLOW_DAEMON_RUNTIME_RESTART=1
         shift
         ;;
+      --trex-config)
+        [[ -z "$TREX_CONFIG_IMPORT" ]] || die "--trex-config may be specified only once"
+        TREX_CONFIG_IMPORT="${2:-}"
+        [[ -n "$TREX_CONFIG_IMPORT" ]] || die "--trex-config requires a value"
+        shift 2
+        ;;
+      --allow-cidr)
+        [[ -z "$MANAGEMENT_CIDR" ]] || die "--allow-cidr may be specified only once"
+        MANAGEMENT_CIDR="${2:-}"
+        [[ -n "$MANAGEMENT_CIDR" ]] || die "--allow-cidr requires a value"
+        shift 2
+        ;;
       --selinux)
         RUN_SELINUX=1
         shift
@@ -1533,8 +1552,9 @@ parse_args() {
     [[ "$RUN_RESTART" -eq 1 ]] || \
       die "--rollback-previous requires service restart and readiness verification"
     [[ "$INSTALL_NGINX" -eq 0 && "$INSTALL_PYTHON_DEPS" -eq 0 && \
-      "$RUN_SELINUX" -eq 0 && "$RUN_FIREWALLD" -eq 0 ]] || \
-      die "--rollback-previous cannot install packages, dependencies, or host policy"
+      "$RUN_SELINUX" -eq 0 && "$RUN_FIREWALLD" -eq 0 && \
+      -z "$TREX_CONFIG_IMPORT" && -z "$MANAGEMENT_CIDR" ]] || \
+      die "--rollback-previous cannot install packages, dependencies, configuration, or host policy"
     [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]] || \
       die "--rollback-previous requires the installer-managed local daemon"
   fi
@@ -2086,7 +2106,81 @@ extract_and_verify_archive() {
   local digest
   digest="$(python3.11 "$SCRIPT_DIR/archive_safety.py" verify-tree "$ARCHIVE_SOURCE_ROOT")" || \
     die "extracted release payload failed identity verification"
+  ARCHIVE_PAYLOAD_DIGEST="$digest"
   log "Verified extracted release payload SHA-256 $digest"
+}
+
+archive_operator_inputs_match_current() {
+  if [[ -n "$TREX_CONFIG_IMPORT" ]]; then
+    [[ -f "$TREX_CONFIG_IMPORT" && ! -L "$TREX_CONFIG_IMPORT" && \
+      -f "$SERVICE_CONFIG_PATH" && ! -L "$SERVICE_CONFIG_PATH" ]] || return 1
+    [[ "$(realpath -e -- "$TREX_CONFIG_IMPORT")" == \
+      "$(realpath -e -- "$SERVICE_CONFIG_PATH")" ]] || return 1
+  fi
+  if [[ -n "$MANAGEMENT_CIDR" ]]; then
+    [[ -f "$NGINX_MANAGEMENT_ALLOWLIST_TARGET" && \
+      ! -L "$NGINX_MANAGEMENT_ALLOWLIST_TARGET" ]] || return 1
+    [[ "$(<"$NGINX_MANAGEMENT_ALLOWLIST_TARGET")" == \
+      "allow $MANAGEMENT_CIDR;" ]] || return 1
+  fi
+  [[ "$INSTALL_NGINX" -eq 0 && "$RUN_SELINUX" -eq 0 && \
+    "$RUN_FIREWALLD" -eq 0 ]]
+}
+
+archive_is_verified_current_noop() {
+  [[ -n "$ARCHIVE" && -n "$ARCHIVE_PAYLOAD_DIGEST" ]] || return 1
+  [[ -L "$INSTALL_ROOT/current" ]] || return 1
+  [[ "$(readlink -- "$INSTALL_ROOT/current")" == \
+    "releases/sha256-$ARCHIVE_PAYLOAD_DIGEST" ]] || return 1
+  archive_operator_inputs_match_current
+}
+
+verify_current_archive_noop() {
+  local selected reconciled release_command="reconcile"
+  selected="$(realpath -- "$INSTALL_ROOT/current")" || \
+    die "unable to resolve the current release for idempotent verification"
+  [[ "$selected" == "$INSTALL_ROOT/releases/sha256-$ARCHIVE_PAYLOAD_DIGEST" && \
+    -d "$selected" && ! -L "$selected" ]] || \
+    die "current selector changed before idempotent verification"
+  [[ -f "$RELEASE_RECONCILER_TARGET" && ! -L "$RELEASE_RECONCILER_TARGET" ]] || \
+    die "installed release reconciler is missing or unsafe"
+  [[ "$DRY_RUN" -eq 1 ]] && release_command="status"
+  reconciled="$("$RELEASE_RECOVERY_PYTHON" "$RELEASE_RECONCILER_TARGET" \
+    --install-root "$INSTALL_ROOT" \
+    --state-root "$RELEASE_STATE_ROOT" \
+    "$release_command")" || die "current release failed exact reconciliation"
+  python3.11 - "$reconciled" "$ARCHIVE_PAYLOAD_DIGEST" <<'PY' || \
+    die "current release reconciliation did not retain the requested payload"
+import json
+import sys
+
+payload = json.loads(sys.argv[1])
+expected = sys.argv[2]
+transaction = payload.get("transaction") or payload
+if "current" in payload and payload.get("current") != expected:
+    raise SystemExit("current selector digest mismatch")
+if transaction.get("phase") != "committed" or transaction.get("candidate") != expected:
+    raise SystemExit("current transaction is not the matching committed archive")
+PY
+  [[ "$(readlink -- "$INSTALL_ROOT/current")" == \
+    "releases/sha256-$ARCHIVE_PAYLOAD_DIGEST" ]] || \
+    die "current selector changed during idempotent reconciliation"
+
+  if [[ "$RUN_VERIFY" -eq 1 ]]; then
+    local verify_args=(
+      "$selected/deploy/verify.sh"
+      --project-root "$selected"
+      --service-project-root "$INSTALL_ROOT/current"
+      --web-root "$selected/apps/web/dist"
+      --base-url "$VERIFY_BASE_URL"
+    )
+    [[ "$MANAGE_LOCAL_DAEMON" -eq 0 ]] && verify_args+=(--skip-daemon)
+    [[ "$VERIFY_TREX" -eq 1 ]] && verify_args+=(--trex)
+    log "Requested archive is already current; verifying the committed deployment"
+    run "${verify_args[@]}"
+  else
+    log "Requested archive is already the exact committed current release; no mutation required"
+  fi
 }
 
 install_args() {
@@ -2130,6 +2224,12 @@ install_args() {
   fi
   if [[ "$ALLOW_DAEMON_RUNTIME_RESTART" -eq 1 ]]; then
     args+=("--allow-daemon-runtime-restart")
+  fi
+  if [[ -n "$TREX_CONFIG_IMPORT" ]]; then
+    args+=("--trex-config" "$TREX_CONFIG_IMPORT")
+  fi
+  if [[ -n "$MANAGEMENT_CIDR" ]]; then
+    args+=("--allow-cidr" "$MANAGEMENT_CIDR")
   fi
   if [[ -n "$ARCHIVE" && "$MANAGE_LOCAL_DAEMON" -eq 1 && "$RUN_RESTART" -eq 1 ]]; then
     args+=("--expected-daemon-restart" "$ARCHIVE_DAEMON_MUTATION_EXPECTED")
@@ -2943,7 +3043,12 @@ validate_previous_release_runtime_evidence() {
   local runtime_payload="$1"
   local capture_payload="$2"
   local quick_validation_payload="$3"
-  python3.11 - "$runtime_payload" "$capture_payload" "$quick_validation_payload" <<'PY'
+  local runtime_mode="${4:-strict}"
+  python3.11 - \
+    "$runtime_payload" \
+    "$capture_payload" \
+    "$quick_validation_payload" \
+    "$runtime_mode" <<'PY'
 from __future__ import annotations
 
 import json
@@ -2954,28 +3059,43 @@ def fail(message: str) -> None:
     raise SystemExit(f"N-1 rollback runtime preflight failed: {message}")
 
 
-def payload(index: int, label: str) -> dict[str, object]:
+def envelope(index: int, label: str) -> tuple[dict[str, object], dict[str, object]]:
     try:
         value = json.loads(sys.argv[index])
     except (json.JSONDecodeError, UnicodeError) as exc:
         fail(f"{label} evidence is not valid JSON: {exc}")
-    if not isinstance(value, dict) or value.get("ok") is not True:
-        fail(f"{label} evidence did not report ok")
+    if not isinstance(value, dict):
+        fail(f"{label} evidence is not an object")
     data = value.get("data")
     if not isinstance(data, dict):
         fail(f"{label} evidence omitted its canonical data object")
-    return data
+    return value, data
 
 
-runtime = payload(1, "traffic runtime")
-if runtime.get("live_state_sampled") is not True:
-    fail("traffic runtime did not sample live state")
+managed_idle_allowed = sys.argv[4] == "managed-local"
+runtime_envelope, runtime = envelope(1, "traffic runtime")
+if runtime_envelope.get("ok") is not True:
+    fail("traffic runtime evidence did not report ok")
 if runtime.get("mutation_intent") is not None:
     fail("traffic mutation recovery is still pending")
 session = runtime.get("session")
 if session is not None:
     if not isinstance(session, dict) or session.get("state") != "stopped":
         fail("canonical traffic session is active or unknown")
+live_state_sampled = runtime.get("live_state_sampled")
+if live_state_sampled not in {True, False}:
+    fail("traffic runtime omitted its typed live-sampling result")
+offline = live_state_sampled is False
+if offline:
+    if not managed_idle_allowed:
+        fail("traffic runtime did not sample live state")
+    if runtime_envelope.get("blocker") is not None or runtime_envelope.get("error") is not None:
+        fail("offline traffic runtime contains an unexpected envelope error")
+    reconciliation = runtime.get("reconciliation")
+    if not isinstance(reconciliation, str) or not reconciliation.startswith(
+        "live TRex port state unavailable:"
+    ):
+        fail("offline traffic runtime omitted its native-RPC failure evidence")
 records = runtime.get("port_states")
 if not isinstance(records, list):
     fail("traffic runtime omitted typed port state evidence")
@@ -2987,8 +3107,9 @@ for record in records:
     if isinstance(port, bool) or not isinstance(port, int) or port < 0 or port in seen:
         fail("traffic runtime contains an invalid or duplicate port identity")
     seen.add(port)
-    if record.get("state") != "stopped":
-        fail(f"port {port} is active or unknown")
+    expected_state = "unknown" if offline else "stopped"
+    if record.get("state") != expected_state:
+        fail(f"port {port} does not match the canonical {expected_state} state")
     if record.get("ownership") != "none":
         fail(f"port {port} ownership is not released")
 available = runtime.get("available_ports")
@@ -2998,34 +3119,50 @@ if (
     or len(available) != len(set(available))
     or set(available) != seen
 ):
-    fail("available ports do not exactly match stopped, unowned live evidence")
+    fail("available ports do not exactly match typed, unowned runtime evidence")
 
-capture = payload(2, "capture")
-captures = capture.get("captures")
-if not isinstance(captures, list) or captures:
-    fail("managed or external capture recorders are still active")
-usage = capture.get("port_usage")
-if not isinstance(usage, list):
-    fail("capture port usage evidence is missing or invalid")
-for record in usage:
-    if not isinstance(record, dict):
-        fail("capture port usage evidence contains an invalid record")
-    for key in ("rx_recorder_ids", "tx_recorder_ids"):
-        identifiers = record.get(key)
-        if not isinstance(identifiers, list) or identifiers:
-            fail("capture recorder ownership is not released")
-service_mode = capture.get("service_mode")
-if not isinstance(service_mode, dict):
-    fail("capture service-mode evidence is missing or invalid")
-identifiers = service_mode.get("managed_capture_ids")
-if not isinstance(identifiers, list) or identifiers:
-    fail("managed capture ownership is not released")
+capture_envelope, capture = envelope(2, "capture")
+if offline:
+    if (
+        capture_envelope.get("ok") is not False
+        or capture_envelope.get("blocker") != "trex_connect_failed"
+        or not isinstance(capture_envelope.get("error"), str)
+        or not capture_envelope["error"]
+        or capture.get("connected") is not False
+        or capture.get("partial_client_disposed") is not True
+    ):
+        fail("capture did not report the explicit native-TRex-offline result")
+else:
+    if capture_envelope.get("ok") is not True:
+        fail("capture evidence did not report ok")
+    captures = capture.get("captures")
+    if not isinstance(captures, list) or captures:
+        fail("managed or external capture recorders are still active")
+    usage = capture.get("port_usage")
+    if not isinstance(usage, list):
+        fail("capture port usage evidence is missing or invalid")
+    for record in usage:
+        if not isinstance(record, dict):
+            fail("capture port usage evidence contains an invalid record")
+        for key in ("rx_recorder_ids", "tx_recorder_ids"):
+            identifiers = record.get(key)
+            if not isinstance(identifiers, list) or identifiers:
+                fail("capture recorder ownership is not released")
+    service_mode = capture.get("service_mode")
+    if not isinstance(service_mode, dict):
+        fail("capture service-mode evidence is missing or invalid")
+    identifiers = service_mode.get("managed_capture_ids")
+    if not isinstance(identifiers, list) or identifiers:
+        fail("managed capture ownership is not released")
 
-quick_validation = payload(3, "quick validation")
+quick_validation_envelope, quick_validation = envelope(3, "quick validation")
+if quick_validation_envelope.get("ok") is not True:
+    fail("quick validation evidence did not report ok")
 if quick_validation.get("active") is not False:
     fail("quick validation is still active or unknown")
 if quick_validation.get("recovery_required") is not False:
     fail("quick-validation recovery is still pending")
+print("offline" if offline else "online")
 PY
 }
 
@@ -3074,11 +3211,18 @@ preflight_previous_release_runtime() {
     quick_validation_payload='{"ok":true,"data":{"active":false,"recovery_required":false}}'
   fi
   rm -f -- "$quick_validation_body"
-  validate_previous_release_runtime_evidence \
+  local runtime_mode
+  runtime_mode="$(validate_previous_release_runtime_evidence \
     "$runtime_payload" \
     "$capture_payload" \
-    "$quick_validation_payload" || \
+    "$quick_validation_payload" \
+    "$([[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]] && printf managed-local || printf strict)")" || \
     die "runtime authority is not quiescent enough for N-1 rollback"
+  if [[ "$runtime_mode" == "offline" ]]; then
+    validate_persisted_previous_release_runtime_state \
+      "$SERVICE_RUNTIME_STATE_PATH" || \
+      die "offline native TRex has non-quiescent persistent runtime authority"
+  fi
   if [[ "$MANAGE_LOCAL_DAEMON" -eq 1 ]]; then
     /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
       --host 127.0.0.1 \
@@ -3134,6 +3278,8 @@ cold_restart_forward_daemon_for_previous_release() {
     die "forward daemon host generation failed readiness after cold restart"
   "$DAEMON_NATIVE_BOUNDARY_TARGET" verify || \
     die "forward daemon native boundary failed after cold restart"
+  wait_for_restored_archive_api_readiness || \
+    die "forward API did not recover after the daemon cold restart"
 }
 
 validate_persisted_previous_release_runtime_state() {
@@ -3157,6 +3303,72 @@ post_stop_previous_release_runtime_preflight() {
     --timeout 5 \
     safe-restart || \
     die "TRex daemon became running, reserved, or unknown after stopping the API"
+}
+
+validate_managed_daemon_idle_overview() {
+  python3.11 -c '
+import json
+import sys
+
+
+def fail(message):
+    raise SystemExit(f"managed daemon Idle overview failed: {message}")
+
+
+def reject_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            fail(f"duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
+content = sys.stdin.buffer.read(1024 * 1024 + 1)
+if len(content) > 1024 * 1024:
+    fail("response exceeds 1 MiB")
+try:
+    payload = json.loads(
+        content,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=lambda value: fail(f"non-finite value {value}"),
+    )
+except (json.JSONDecodeError, UnicodeError) as exc:
+    fail(f"invalid JSON: {exc}")
+if not isinstance(payload, dict):
+    fail("response root is not an object")
+environment = payload.get("environment")
+if not isinstance(environment, dict):
+    fail("environment is missing")
+expected = {
+    "host": "127.0.0.1",
+    "daemon_supervisor": "systemd",
+    "host_valid": True,
+    "scripts_dir_path_valid": True,
+    "daemon_bin_path_valid": True,
+    "config_path_valid": True,
+    "runtime_state_path_valid": True,
+    "daemon_generation_path_valid": True,
+}
+for key, value in expected.items():
+    if environment.get(key) != value:
+        fail(f"environment.{key} does not match the managed-local authority")
+if environment.get("configuration_errors") != {}:
+    fail("environment.configuration_errors is not empty")
+daemon = payload.get("daemon_status")
+if not isinstance(daemon, dict) or daemon.get("ok") is not True or daemon.get("running") is not True:
+    fail("daemon_status is not healthy and running")
+if daemon.get("blocker") not in {None, ""} or daemon.get("error") not in {None, ""}:
+    fail("daemon_status contains a blocker or error")
+for field in ("trex_probe", "trex_ports"):
+    result = payload.get(field)
+    if not isinstance(result, dict):
+        fail(f"{field} is missing")
+    if result.get("ok") is not False or result.get("blocker") != "trex_connect_failed":
+        fail(f"{field} is not the explicit native-TRex-offline result")
+    if not isinstance(result.get("error"), str) or not result["error"]:
+        fail(f"{field}.error is missing")
+'
 }
 
 verify_previous_release_readiness() {
@@ -3196,13 +3408,14 @@ verify_previous_release_readiness() {
   /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
     --host 127.0.0.1 --port 8090 --timeout 5 ready || \
     die "forward host integration daemon is not RPC-ready for the N-1 API"
-  local overview overview_validator="$TREX_OVERVIEW_VALIDATOR_TARGET"
-  [[ -f "$overview_validator" && ! -L "$overview_validator" ]] || \
-    die "rollback wrapper is missing the strict TRex overview contract"
+  /usr/bin/python3 "$DAEMON_RPC_PROBE_TARGET" \
+    --host 127.0.0.1 --port 8090 --timeout 5 safe-restart || \
+    die "forward host integration daemon is not Idle(1) and unreserved after its cold restart"
+  local overview
   overview="$(curl -fsS --noproxy '*' --connect-timeout 2 --max-time 8 \
     "http://127.0.0.1/api/system/overview")" || \
-    die "N-1 real TRex overview request failed"
-  python3.11 "$overview_validator" <<<"$overview" || \
+    die "N-1 managed daemon Idle overview request failed"
+  validate_managed_daemon_idle_overview <<<"$overview" || \
     die "N-1 API is incompatible with the forward host/daemon integration"
 }
 
@@ -3210,6 +3423,12 @@ run_previous_release_rollback() {
   log "Preparing guarded rollback to the retained N-1 release"
   preflight_previous_release_consumers
   arm_installed_release_reconciler
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    printf '+ wait for selector-based API readiness after arming release reconciliation\n'
+  else
+    wait_for_restored_archive_api_readiness || \
+      die "forward API did not recover after arming release reconciliation"
+  fi
   preflight_previous_release_runtime
   cold_restart_forward_daemon_for_previous_release
   # A cold start can expose helper/disk drift that an already-running daemon
@@ -3255,6 +3474,11 @@ main() {
   extract_and_verify_archive
   require_production_archive_host_authority
   require_archive_transaction_contract
+  if archive_is_verified_current_noop; then
+    verify_current_archive_noop
+    log "TRex WebUI upgrade complete"
+    return 0
+  fi
   preflight_release_systemd_shadow_authority
   if [[ -n "$ARCHIVE" ]]; then
     capture_archive_api_service_state

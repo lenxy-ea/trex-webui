@@ -66,6 +66,7 @@ REQUIRED_FILES = {
     "deploy/trex_native_boundary.sh": True,
     "deploy/trex_overview_contract.py": True,
     "deploy/trex_persisted_state_contract.py": True,
+    "deploy/trex-webui": True,
     "deploy/upgrade.sh": True,
     "deploy/verified_upgrade.sh": True,
     "deploy/verify.sh": True,

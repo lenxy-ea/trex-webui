@@ -69,6 +69,9 @@ API_PROC_ROOT="/proc"
 NGINX_LOCAL_ROOT="/etc/nginx/trex-webui"
 NGINX_ACCESS_ROOT="/etc/nginx/trex-webui/access.d"
 NGINX_SECURITY_ROOT="/etc/nginx/trex-webui/security.d"
+NGINX_CONFIG_OWNER="root"
+NGINX_CONFIG_GROUP="nginx"
+NGINX_MANAGEMENT_ALLOWLIST_TARGET=""
 SERVICE_PROJECT_ROOT=""
 EFFECTIVE_WEB_ROOT=""
 VERSIONED_WEB_SELINUX_PATTERN='/opt/trex-webui/releases/sha256-[0-9a-f]{64}/apps/web/dist(/.*)?'
@@ -89,6 +92,8 @@ MANAGE_LOCAL_DAEMON=1
 ALLOW_DAEMON_RUNTIME_RESTART=0
 EXPECTED_DAEMON_RESTART=""
 VERSIONED_RELEASE=0
+TREX_CONFIG_IMPORT=""
+MANAGEMENT_CIDR=""
 API_READINESS_URL="http://127.0.0.1:8080/api/health"
 API_READINESS_ATTEMPTS=40
 API_READINESS_INTERVAL_SECONDS="0.5"
@@ -99,6 +104,14 @@ STATIC_OLD_MOVED=0
 STATIC_SWITCHED=0
 STATIC_LIVE_EXISTED=0
 STATE_CONFIG_TEMP=""
+STATE_CONFIG_IMPORT_TEMP=""
+STATE_CONFIG_IMPORT_BACKUP=""
+STATE_CONFIG_IMPORT_EXISTED=0
+STATE_CONFIG_IMPORT_PUBLISHED=0
+NGINX_ALLOWLIST_TEMP=""
+NGINX_ALLOWLIST_BACKUP=""
+NGINX_ALLOWLIST_EXISTED=0
+NGINX_ALLOWLIST_PUBLISHED=0
 NGINX_CONFIG_TEMP=""
 NGINX_CONFIG_BACKUP=""
 NGINX_CONFIG_EXISTED=0
@@ -186,6 +199,10 @@ remove_config_artifact() {
 cleanup_install_temp() {
   local status=0
   remove_config_artifact "${STATE_CONFIG_TEMP:-}" "temporary migrated TRex config" "$SERVICE_STATE_ROOT" || status=1
+  remove_config_artifact "${STATE_CONFIG_IMPORT_TEMP:-}" "temporary imported TRex config" "$SERVICE_STATE_ROOT" || status=1
+  remove_config_artifact "${STATE_CONFIG_IMPORT_BACKUP:-}" "TRex config rollback copy" "$SERVICE_STATE_ROOT" || status=1
+  remove_config_artifact "${NGINX_ALLOWLIST_TEMP:-}" "temporary Nginx management allowlist" "$NGINX_ACCESS_ROOT" || status=1
+  remove_config_artifact "${NGINX_ALLOWLIST_BACKUP:-}" "Nginx management allowlist rollback copy" "$NGINX_ACCESS_ROOT" || status=1
   remove_config_artifact "${NGINX_CONFIG_TEMP:-}" "temporary Nginx configuration" "$(dirname -- "$NGINX_CONF_TARGET")" || status=1
   remove_config_artifact "${NGINX_CONFIG_BACKUP:-}" "Nginx configuration rollback copy" "$(dirname -- "$NGINX_CONF_TARGET")" || status=1
   remove_config_artifact "${SYSTEMD_CONFIG_TEMP:-}" "temporary systemd configuration" "$(dirname -- "$SYSTEMD_SERVICE_TARGET")" || status=1
@@ -356,6 +373,11 @@ rollback_configs() {
       status=1
       nginx_restored=0
     }
+  restore_config_target "$SERVICE_CONFIG_PATH" "imported TRex configuration" \
+    STATE_CONFIG_IMPORT_BACKUP STATE_CONFIG_IMPORT_EXISTED \
+    STATE_CONFIG_IMPORT_PUBLISHED || status=1
+  restore_config_target "$NGINX_MANAGEMENT_ALLOWLIST_TARGET" "Nginx management allowlist" \
+    NGINX_ALLOWLIST_BACKUP NGINX_ALLOWLIST_EXISTED NGINX_ALLOWLIST_PUBLISHED || status=1
   restore_config_target "$SYSTEMD_SERVICE_TARGET" "systemd service" \
     SYSTEMD_CONFIG_BACKUP SYSTEMD_CONFIG_EXISTED SYSTEMD_CONFIG_PUBLISHED || {
       status=1
@@ -518,6 +540,10 @@ finalize_configs() {
   local status=0
   finalize_config_target "$NGINX_CONF_TARGET" "Nginx configuration" \
     NGINX_CONFIG_BACKUP NGINX_CONFIG_PUBLISHED || status=1
+  finalize_config_target "$SERVICE_CONFIG_PATH" "imported TRex configuration" \
+    STATE_CONFIG_IMPORT_BACKUP STATE_CONFIG_IMPORT_PUBLISHED || status=1
+  finalize_config_target "$NGINX_MANAGEMENT_ALLOWLIST_TARGET" "Nginx management allowlist" \
+    NGINX_ALLOWLIST_BACKUP NGINX_ALLOWLIST_PUBLISHED || status=1
   finalize_config_target "$SYSTEMD_SERVICE_TARGET" "systemd configuration" \
     SYSTEMD_CONFIG_BACKUP SYSTEMD_CONFIG_PUBLISHED || status=1
   finalize_config_target "$DAEMON_SYSTEMD_SERVICE_TARGET" "daemon systemd configuration" \
@@ -1057,6 +1083,8 @@ Options:
   --external-daemon     Do not install, enable, restart, or verify a local daemon
   --allow-daemon-runtime-restart
                        Permit maintenance that interrupts running/reserved/unknown daemon state
+  --trex-config PATH    Atomically import a reviewed root-owned TRex configuration
+  --allow-cidr CIDR     Atomically allow one explicit management subnet through Nginx
   --selinux             Run restorecon and httpd_can_network_connect setup when tools exist
   --firewalld           Allow HTTP through firewalld; the managed native-port boundary is independent
   --verify              Run deploy/verify.sh after install or upgrade; requires restart
@@ -1260,9 +1288,45 @@ provision_service_directories() {
 
   log "Provisioning local Nginx policy include directories"
   if [[ "$DRY_RUN" -eq 0 ]]; then
-    getent group nginx >/dev/null 2>&1 || die "Nginx group is missing; install nginx first or use --install-nginx"
+    getent group "$NGINX_CONFIG_GROUP" >/dev/null 2>&1 || die "Nginx group is missing; install nginx first or use --install-nginx"
   fi
-  run install -d -o root -g nginx -m 0750 "$NGINX_LOCAL_ROOT" "$NGINX_ACCESS_ROOT" "$NGINX_SECURITY_ROOT"
+  run install -d -o "$NGINX_CONFIG_OWNER" -g "$NGINX_CONFIG_GROUP" -m 0750 "$NGINX_LOCAL_ROOT" "$NGINX_ACCESS_ROOT" "$NGINX_SECURITY_ROOT"
+}
+
+install_operator_inputs() {
+  if [[ -n "$TREX_CONFIG_IMPORT" ]]; then
+    log "Importing reviewed TRex configuration into $SERVICE_CONFIG_PATH"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      printf '+ snapshot root-authoritative %q into a same-directory temporary file beside %q\n' \
+        "$TREX_CONFIG_IMPORT" "$SERVICE_CONFIG_PATH"
+      printf '+ preserve the current configuration when present, then atomically replace it as %q 0640\n' \
+        "$SERVICE_USER:$SERVICE_GROUP"
+    else
+      STATE_CONFIG_IMPORT_TEMP="$(mktemp --tmpdir="$SERVICE_STATE_ROOT" .trex_cfg.yaml.import.XXXXXXXX)"
+      install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 0640 \
+        "$TREX_CONFIG_IMPORT" "$STATE_CONFIG_IMPORT_TEMP"
+      publish_staged_config "$SERVICE_CONFIG_PATH" "imported TRex configuration" \
+        STATE_CONFIG_IMPORT_TEMP STATE_CONFIG_IMPORT_BACKUP \
+        STATE_CONFIG_IMPORT_EXISTED STATE_CONFIG_IMPORT_PUBLISHED
+    fi
+  fi
+
+  if [[ -n "$MANAGEMENT_CIDR" ]]; then
+    log "Installing explicit Nginx management allowlist for $MANAGEMENT_CIDR"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      printf '+ write %q as root:nginx 0640 with exactly: allow %s;\n' \
+        "$NGINX_MANAGEMENT_ALLOWLIST_TARGET" "$MANAGEMENT_CIDR"
+      printf '+ preserve the current management allowlist when present, then atomically replace it\n'
+    else
+      NGINX_ALLOWLIST_TEMP="$(mktemp --tmpdir="$NGINX_ACCESS_ROOT" .management.conf.new.XXXXXXXX)"
+      printf 'allow %s;\n' "$MANAGEMENT_CIDR" >"$NGINX_ALLOWLIST_TEMP"
+      chown "$NGINX_CONFIG_OWNER:$NGINX_CONFIG_GROUP" "$NGINX_ALLOWLIST_TEMP"
+      chmod 0640 "$NGINX_ALLOWLIST_TEMP"
+      publish_staged_config "$NGINX_MANAGEMENT_ALLOWLIST_TARGET" "Nginx management allowlist" \
+        NGINX_ALLOWLIST_TEMP NGINX_ALLOWLIST_BACKUP \
+        NGINX_ALLOWLIST_EXISTED NGINX_ALLOWLIST_PUBLISHED
+    fi
+  fi
 }
 
 secure_readonly_tree() {
@@ -1408,6 +1472,18 @@ parse_args() {
         ALLOW_DAEMON_RUNTIME_RESTART=1
         shift
         ;;
+      --trex-config)
+        [[ -z "$TREX_CONFIG_IMPORT" ]] || die "--trex-config may be specified only once"
+        TREX_CONFIG_IMPORT="${2:-}"
+        [[ -n "$TREX_CONFIG_IMPORT" ]] || die "--trex-config requires a value"
+        shift 2
+        ;;
+      --allow-cidr)
+        [[ -z "$MANAGEMENT_CIDR" ]] || die "--allow-cidr may be specified only once"
+        MANAGEMENT_CIDR="${2:-}"
+        [[ -n "$MANAGEMENT_CIDR" ]] || die "--allow-cidr requires a value"
+        shift 2
+        ;;
       --expected-daemon-restart)
         EXPECTED_DAEMON_RESTART="${2:-}"
         [[ "$EXPECTED_DAEMON_RESTART" =~ ^[01]$ ]] || \
@@ -1454,7 +1530,57 @@ parse_args() {
   fi
 }
 
+validate_management_cidr() {
+  [[ -n "$MANAGEMENT_CIDR" ]] || return 0
+  have_cmd python3.11 || die "--allow-cidr requires python3.11"
+  MANAGEMENT_CIDR="$(python3.11 - "$MANAGEMENT_CIDR" <<'PY'
+import ipaddress
+import sys
+
+try:
+    network = ipaddress.ip_network(sys.argv[1], strict=True)
+except ValueError as exc:
+    raise SystemExit(f"invalid management CIDR: {exc}")
+if network.prefixlen == 0 or network.is_unspecified or network.is_multicast:
+    raise SystemExit("management CIDR must identify one narrow trusted subnet")
+print(network)
+PY
+  )" || die "unsafe --allow-cidr value"
+}
+
+validate_trex_config_import() {
+  [[ -n "$TREX_CONFIG_IMPORT" ]] || return 0
+  [[ -f "$TREX_CONFIG_IMPORT" && ! -L "$TREX_CONFIG_IMPORT" ]] || \
+    die "--trex-config must name a regular non-symlink file"
+  local resolved_import
+  resolved_import="$(realpath -e -- "$TREX_CONFIG_IMPORT")" || \
+    die "unable to resolve --trex-config"
+  if [[ "$resolved_import" == "$SERVICE_CONFIG_PATH" ]]; then
+    TREX_CONFIG_IMPORT=""
+    return 0
+  fi
+  local owner mode size
+  owner="$(stat -c '%u' -- "$TREX_CONFIG_IMPORT")" || die "unable to inspect --trex-config owner"
+  mode="$(stat -c '%a' -- "$TREX_CONFIG_IMPORT")" || die "unable to inspect --trex-config mode"
+  size="$(stat -c '%s' -- "$TREX_CONFIG_IMPORT")" || die "unable to inspect --trex-config size"
+  [[ "$owner" == "0" ]] || die "--trex-config must be root-owned"
+  (( (8#$mode & 022) == 0 )) || die "--trex-config must not be group/world writable"
+  (( size > 0 && size <= 1048576 )) || die "--trex-config must contain 1-1048576 bytes"
+  TREX_CONFIG_IMPORT="$resolved_import"
+  local authority="$TREX_CONFIG_IMPORT"
+  while [[ "$authority" != "/" ]]; do
+    owner="$(stat -c '%u' -- "$authority")" || die "unable to inspect --trex-config path authority"
+    mode="$(stat -c '%a' -- "$authority")" || die "unable to inspect --trex-config path mode"
+    [[ "$owner" == "0" ]] || die "--trex-config and every path ancestor must be root-owned"
+    (( (8#$mode & 022) == 0 )) || \
+      die "--trex-config and every path ancestor must not be group/world writable"
+    authority="$(dirname -- "$authority")"
+  done
+}
+
 check_layout() {
+  validate_management_cidr
+  validate_trex_config_import
   PROJECT_ROOT="$(trex_canonical_path "$PROJECT_ROOT" "project root")" || die "unsafe project root"
   SERVICE_PROJECT_ROOT="$PROJECT_ROOT"
   EFFECTIVE_WEB_ROOT="$WEB_ROOT"
@@ -1536,6 +1662,7 @@ check_layout() {
   NGINX_LOCAL_ROOT="$(trex_canonical_path "$NGINX_LOCAL_ROOT" "Nginx local policy root")" || die "unsafe Nginx local policy root"
   NGINX_ACCESS_ROOT="$(trex_canonical_path "$NGINX_ACCESS_ROOT" "Nginx access policy root")" || die "unsafe Nginx access policy root"
   NGINX_SECURITY_ROOT="$(trex_canonical_path "$NGINX_SECURITY_ROOT" "Nginx security policy root")" || die "unsafe Nginx security policy root"
+  NGINX_MANAGEMENT_ALLOWLIST_TARGET="$(trex_canonical_path "$NGINX_ACCESS_ROOT/management.conf" "Nginx management allowlist")" || die "unsafe Nginx management allowlist"
 
   local api_app_root project_profile_root
   api_app_root="$(trex_canonical_path "$PROJECT_ROOT/apps/api/app" "API application tree")" || die "unsafe API application tree"
@@ -1605,6 +1732,7 @@ check_layout() {
   trex_path_is_within "$SERVICE_ENV_FILE" "$SERVICE_ENV_ROOT" || die "service environment file escaped its root"
   trex_path_is_within "$NGINX_ACCESS_ROOT" "$NGINX_LOCAL_ROOT" || die "Nginx access root escaped its policy root"
   trex_path_is_within "$NGINX_SECURITY_ROOT" "$NGINX_LOCAL_ROOT" || die "Nginx security root escaped its policy root"
+  trex_path_is_within "$NGINX_MANAGEMENT_ALLOWLIST_TARGET" "$NGINX_ACCESS_ROOT" || die "Nginx management allowlist escaped its policy root"
 
   trex_assert_managed_path "$WEB_ROOT" "web root" "/var/www/trex-webui" || die "unsafe web root"
   trex_assert_managed_path "$BACKUP_ROOT" "static backup root" "/var/www/trex-webui" || die "unsafe static backup root"
@@ -2953,6 +3081,7 @@ main() {
   install_python_deps
   build_web
   provision_service_directories
+  install_operator_inputs
   secure_service_read_paths
   if [[ "$INSTALL_PYTHON_DEPS" -eq 1 ]]; then
     smoke_test_service_import "$VENV_STAGING_PATH"
