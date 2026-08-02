@@ -2336,6 +2336,7 @@ ROLLBACK_PREVIOUS=1
 DRY_RUN=0
 preflight_previous_release_consumers() { :; }
 arm_installed_release_reconciler() { :; }
+wait_for_restored_archive_api_readiness() { :; }
 preflight_previous_release_runtime() { :; }
 cold_restart_forward_daemon_for_previous_release() { :; }
 prelabel_versioned_release_for_selinux() { :; }
