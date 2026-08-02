@@ -18,6 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "release.yml"
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
 GITHUB_RELEASE_GATE = PROJECT_ROOT / "scripts" / "github_release_gate.py"
+PACKAGE_SCRIPT = PROJECT_ROOT / "deploy" / "package.sh"
 VERIFIED_UPGRADE = PROJECT_ROOT / "deploy" / "verified_upgrade.sh"
 RELEASE_METADATA = PROJECT_ROOT / "scripts" / "release_metadata.py"
 VERSION = "0.1.0-rc.2"
@@ -144,6 +145,13 @@ def test_release_commands_use_the_fixed_id_gate_and_publish_only_after_verificat
     assert '"PATCH"' in gate
     assert '{"draft": False, "prerelease": True}' in gate
     assert "verify_immutable_release" in gate
+
+
+def test_release_packaging_uses_an_unprivileged_project_scoped_staging_tree() -> None:
+    content = PACKAGE_SCRIPT.read_text(encoding="utf-8")
+    assert 'mktemp -d --tmpdir="$PROJECT_ROOT/dist"' in content
+    assert '"package staging directory" "$PROJECT_ROOT"' in content
+    assert 'trex_write_managed_marker "$STAGING_ROOT"' not in content
 
 
 def test_verified_upgrade_attests_snapshots_before_archive_use() -> None:

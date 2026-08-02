@@ -32,7 +32,8 @@ cleanup() {
   trap - EXIT
   set +e
   if [[ -n "${STAGING_ROOT:-}" && -e "$STAGING_ROOT" ]]; then
-    trex_safe_remove_tree "$STAGING_ROOT" "package staging directory" || status=1
+    trex_safe_remove_tree \
+      "$STAGING_ROOT" "package staging directory" "$PROJECT_ROOT" || status=1
   fi
   if [[ "$PACKAGE_COMPLETE" -eq 0 ]]; then
     if [[ -n "$OUTPUT_ARCHIVE_TMP" ]]; then
@@ -422,8 +423,14 @@ main() {
   build_web
   assert_clean_source_stable "web build"
 
-  STAGING_ROOT="$(mktemp -d -t trex-webui-package.XXXXXX)"
-  trex_write_managed_marker "$STAGING_ROOT"
+  # Packaging is intentionally unprivileged. Keep its private staging tree
+  # inside the already validated project boundary instead of assigning it the
+  # root-only managed marker used by deployment mutations under /opt and /var.
+  # This also keeps staging and the default output on the same filesystem.
+  mkdir -p "$PROJECT_ROOT/dist"
+  STAGING_ROOT="$(
+    mktemp -d --tmpdir="$PROJECT_ROOT/dist" ".trex-webui-package.XXXXXXXX"
+  )"
   package_root="$STAGING_ROOT/$PACKAGE_NAME"
   mkdir -p "$package_root"
   copy_release_tree "$package_root"
