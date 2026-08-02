@@ -119,7 +119,7 @@ release_dir="$(mktemp -d -t trex-webui-release.XXXXXXXX)"
 gh release download "$tag" --dir "$release_dir"
 export GH_TOKEN="$(gh auth token)"
 sudo --preserve-env=GH_TOKEN \
-  "$release_dir/trex-webui-<version>.verified-upgrade.sh" \
+  bash "$release_dir/trex-webui-<version>.verified-upgrade.sh" \
   --tag "$tag" \
   --metadata "$release_dir/trex-webui-<version>.release.json" \
   -- --install-python-deps --verify
@@ -139,6 +139,30 @@ It snapshots every metadata-named asset, re-verifies those snapshots, checks all
 digests and report/SBOM bindings, validates and safely extracts the v3 payload,
 then executes `deploy/upgrade.sh` from that verified payload. An installed rc.1
 v2 upgrader is never asked to parse a v3 archive.
+
+The target archive contains `deploy/trex-webui`, the stable operator-facing
+entrypoint. After the first verified install, use the selected release to
+inspect the deployment without remembering physical release or Web-root paths:
+
+```bash
+CLI=/opt/trex-webui/current/deploy/trex-webui
+sudo "$CLI" doctor --operation upgrade
+sudo "$CLI" status
+sudo "$CLI" verify --trex
+```
+
+For an archive whose trust and custody were established independently, the same
+entrypoint can preview or execute the transaction engine directly:
+
+```bash
+sudo "$CLI" upgrade --archive /path/to/trex-webui-<version>.tar.gz \
+  --sha256 <64-hex-sha256> --dry-run
+```
+
+The GitHub release path above remains preferred because it verifies the exact
+tag, signer, attestations, metadata, evidence, and archive before executing
+release-carried code. See [INSTALLATION.md](INSTALLATION.md) for configuration
+import, management CIDR, JSON output, and rollback examples.
 
 ## 5. Verify the durable serving selection
 
@@ -269,7 +293,7 @@ sudo grep -F 'root /opt/trex-webui/current/apps/web/dist;' \
 sudo /opt/trex-webui/current/deploy/verify.sh \
   --project-root "$(readlink -f /opt/trex-webui/current)" \
   --service-project-root /opt/trex-webui/current \
-  --web-root /opt/trex-webui/current/apps/web/dist \
+  --web-root "$(readlink -f /opt/trex-webui/current)/apps/web/dist" \
   --base-url http://127.0.0.1
 ```
 
