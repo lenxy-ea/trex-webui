@@ -532,6 +532,7 @@ required = {
     "deploy/trex_persisted_state_contract.py": (
         project_root / "deploy/trex_persisted_state_contract.py"
     ).read_bytes(),
+    "deploy/trex-webui": b"#!/usr/bin/env python3\n",
     "deploy/upgrade.sh": b"#!/usr/bin/env bash\nexit 0\n",
     "deploy/verified_upgrade.sh": b"#!/usr/bin/env bash\nexit 0\n",
     "deploy/verify.sh": b"#!/usr/bin/env bash\nexit 0\n",
@@ -565,6 +566,7 @@ file_modes = {
         "deploy/trex_native_boundary.sh",
         "deploy/trex_overview_contract.py",
         "deploy/trex_persisted_state_contract.py",
+        "deploy/trex-webui",
         "deploy/upgrade.sh",
         "deploy/verified_upgrade.sh",
         "deploy/verify.sh",
@@ -727,6 +729,7 @@ for release_path in \
   deploy/systemd/trex-webui-release-retry.service \
   deploy/trex_overview_contract.py \
   deploy/trex_persisted_state_contract.py \
+  deploy/trex-webui \
   deploy/verified_upgrade.sh \
   scripts/release_contract.py \
   scripts/release_evidence.py \
@@ -793,6 +796,7 @@ assert files["apps/api/app/main.py"]["mode"] == "0644"
 assert files["deploy/archive_safety.py"]["mode"] == "0644"
 assert files["deploy/bootstrap_release_infrastructure.py"]["mode"] == "0755"
 assert files["deploy/install.sh"]["mode"] == "0755"
+assert files["deploy/trex-webui"]["mode"] == "0755"
 assert files["deploy/release_transaction.py"]["mode"] == "0755"
 assert files["deploy/systemd/nginx-trex-webui-release-reconcile.conf"]["mode"] == "0644"
 assert files["deploy/systemd/trex-webui-release-consumer-ack-v1-bridge-v2.conf"]["mode"] == "0644"
@@ -859,6 +863,7 @@ git -C "$PACKAGE_PROJECT" add \
   deploy/systemd/trex-webui-release-retry.service \
   deploy/trex_overview_contract.py \
   deploy/trex_persisted_state_contract.py \
+  deploy/trex-webui \
   deploy/verified_upgrade.sh \
   scripts/release_contract.py \
   scripts/release_evidence.py \
